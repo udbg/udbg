@@ -1,5 +1,5 @@
 
-use super::{*, disasm::*};
+use super::{*, disasm::*, ntdll::*};
 
 use core::mem::{transmute, size_of};
 use core::slice;
@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use spin::Mutex as Spinlock;
 use winapi::um::winnt::*;
+use winapi::shared::ntdef::NTSTATUS;
 
 #[derive(Debug)]
 pub enum Error {
@@ -716,6 +717,129 @@ impl HookManager {
     }
 }
 
+static mut INSTRUMENTATION_CALLBACK: Option<Box<dyn Fn(&mut HookContext)>> = None;
+
+#[no_mangle]
+unsafe extern "system" fn instrumentation_hook(context: &mut HookContext) {
+    static mut RUNNING: bool = false;
+
+    if !RUNNING {
+        RUNNING = true;
+        INSTRUMENTATION_CALLBACK.as_ref().map(|f| f(context));
+        RUNNING = false;
+    }
+}
+
+pub fn instrumentation_callback(callback: impl Fn(&mut HookContext)+'static) -> Result<(), NTSTATUS> {
+    #[cfg(target_arch = "x86_64")]
+    let shellcode = shellcode! {
+        "push rsp"      // +80
+        "push rax"      // +78
+        "push rcx"      // +70
+        "push rdx"      // +68
+        "push rbx"      // +60
+        "push rbp"      // +58
+        "push rsi"      // +50
+        "push rdi"      // +48
+        "push r8"       // +40
+        "push r9"       // +38
+        "push r10"      // +30
+        "push r11"      // +28
+        "push r12"      // +20
+        "push r13"      // +18
+        "push r14"      // +10
+        "push r15"      // +8
+        "pushfq"        // +0
+
+        "mov rcx, rsp"
+        "sub rsp, 0x10"
+        "call instrumentation_hook"
+        "add rsp, 0x10"
+
+        "popfq"
+        "pop r15"
+        "pop r14"
+        "pop r13"
+        "pop r12"
+        "pop r11"
+        "pop r10"
+        "pop r9"
+        "pop r8"
+        "pop rdi"
+        "pop rsi"
+        "pop rbp"
+        "pop rbx"
+        "pop rdx"
+        "pop rcx"
+        "pop rax"
+        "pop rsp"
+
+        "jmp r10"
+    };
+    // TODO:
+    #[cfg(target_arch = "x86")]
+    let shellcode = shellcode! {
+        "push esp"      // +20
+        "push ebp"      // +1c
+        "push eax"      // +18
+        "push ecx"      // +14
+        "push edx"      // +10
+        "push ebx"      // +c
+        "push esi"      // +8
+        "push edi"      // +4
+        "pushfd"        // +0
+        "add dword ptr [esp+0x20], 4"
+        "mov ebp, esp"
+        "push ebp"
+        "push dword ptr [ebp+0x24]"
+        "call instrumentation_hook@4"
+        "popfd"
+        "pop edi"
+        "pop esi"
+        "pop ebx"
+        "pop edx"
+        "pop ecx"
+        "pop eax"
+        "pop ebp"
+        "pop esp"
+        "ret"
+    };
+
+    unsafe {
+        let mut pici = PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION {
+            Callback: shellcode.as_ptr() as _,
+            Version: if cfg!(target_arch = "x86") { 1 } else { 0 },
+            Reserved: 0,
+        };
+        NtSetInformationProcess(
+            ZwCurrentProcess,
+            ProcessInstrumentationCallback,
+            core::mem::transmute(&mut pici),
+            core::mem::size_of::<PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION>() as _
+        ).check()?;
+        INSTRUMENTATION_CALLBACK = Some(Box::new(callback));
+        Ok(())
+    }
+}
+
+pub fn remove_instrumentation_callback() -> Result<(), NTSTATUS> {
+    unsafe {
+        let mut pici = PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION {
+            Callback: core::ptr::null_mut(),
+            Version: if cfg!(target_arch = "x86") { 1 } else { 0 },
+            Reserved: 0,
+        };
+        INSTRUMENTATION_CALLBACK = None;
+        NtSetInformationProcess(
+            ZwCurrentProcess,
+            ProcessInstrumentationCallback,
+            core::mem::transmute(&mut pici),
+            core::mem::size_of::<PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION>() as _
+        ).check()?;
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod hook_test {
     use super::*;
@@ -814,6 +938,23 @@ mod hook_test {
             let s = "OutputDebugString".to_wide();
             output_debug_string(s.as_ptr());
             assert_eq!(MAGIC_VALUE, CHECK_HOOK);
+        }
+    }
+
+    #[test]
+    fn instrumentation_hook() {
+        static mut R10: usize = 0;
+        static mut RAX: usize = 0;
+        instrumentation_callback(|args| unsafe {
+            R10 = args.R10;
+            RAX = args.Rax;
+        }).unwrap();
+        println!("----------");
+        remove_instrumentation_callback().unwrap();
+
+        unsafe {
+            println!("r10: {:x}, rax: {:x}", R10, RAX);
+            assert!(R10 > 0);
         }
     }
 }
