@@ -20,6 +20,7 @@ spin = '^0.7'
 bitflags = '^1.2'
 anyhow = '1.0'
 thiserror = '1.0'
+parking_lot = '0.11'
 derive_more = '0.99.11'
 goblin = {version = '0.2.0'}
 memmap = {version = '0.7.0'}

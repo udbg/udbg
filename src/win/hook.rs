@@ -7,7 +7,7 @@ use std::sync::Arc;
 use spin::RwLock;
 use std::collections::HashMap;
 
-use spin::Mutex as Spinlock;
+use parking_lot::Mutex as Mutex;
 use winapi::um::winnt::*;
 use winapi::shared::ntdef::NTSTATUS;
 
@@ -167,9 +167,6 @@ impl HookArgs<'_> {
         self.hook.codeback
     }
 }
-
-pub type HookCallback = Box<dyn Fn(&mut HookArgs)>;
-pub type HookCallbackFn = unsafe extern "C" fn(&mut HookArgs);
 
 // TODO: prevent to re-entry
 #[allow(improper_ctypes)]
@@ -414,7 +411,7 @@ impl InsnWriter {
 pub struct HookBase {
     pub address: usize,
     pub codeback: usize,    // trampoline
-    pub callback: Spinlock<HookCallback>,
+    pub callback: Mutex<Box<dyn Fn(&mut HookArgs)>>,
 }
 
 pub trait Hook {
@@ -561,22 +558,6 @@ pub fn get_code_bytes(address: usize, len: usize) -> Result<Vec<u8>, &'static st
     return Err("disasm");
 }
 
-pub trait IntoHookCallback {
-    fn into(self) -> HookCallback;
-}
-
-impl IntoHookCallback for HookCallbackFn {
-    fn into(self) -> HookCallback {
-        Box::new(move |args| unsafe { self(args) })
-    }
-}
-
-impl<T: Fn(&mut HookArgs)> IntoHookCallback for T {
-    fn into(self) -> HookCallback {
-        unsafe { transmute(Box::new(self) as Box<dyn FnMut(&mut HookArgs)>) }
-    }
-}
-
 pub fn suspend_else_threads() -> Vec<Handle> {
     let mut result: Vec<Handle> = Vec::new();
     let tid = get_current_tid();
@@ -609,7 +590,7 @@ impl HookManager {
         }
     }
 
-    pub fn inline_hook_(&self, address: usize, callback: HookCallback) -> Result<Arc<dyn Hook>, &'static str> {
+    pub fn inline_hook_(&self, address: usize, callback: Box<dyn Fn(&mut HookArgs)>) -> Result<Arc<dyn Hook>, &'static str> {
         if let Some(hook) = self.get_hook(address) {
             *hook.base().callback.lock() = callback;
             return Ok(hook);
@@ -619,7 +600,7 @@ impl HookManager {
         let trapline = TrapLine::alloc_in_4gb(address).map_err(|_| "alloc memory")?;
         let right_ptr = trapline.trap_right.as_ptr();
         let hook = InlineHook {
-            base: HookBase { address, callback: Spinlock::new(callback), codeback: right_ptr as usize },
+            base: HookBase { address, callback: Mutex::new(callback), codeback: right_ptr as usize },
             trapline, rawbytes: tp.read_value(address).ok_or("read memory")?,
         };
 
@@ -680,11 +661,11 @@ impl HookManager {
     }
 
     #[inline]
-    pub fn inline_hook(&self, address: usize, callback: impl IntoHookCallback, enable: bool) -> Result<Arc<dyn Hook>, &'static str> {
-        self.inline_hook_(address, callback.into()).map(|r| { if enable { r.enable(); } r })
+    pub fn inline_hook<P: Fn(&mut HookArgs)+'static>(&self, address: usize, callback: P, enable: bool) -> Result<Arc<dyn Hook>, &'static str> {
+        self.inline_hook_(address, Box::new(callback)).map(|r| { if enable { r.enable(); } r })
     }
 
-    pub fn table_hook_(&self, address: usize, callback: HookCallback) -> Result<Arc<dyn Hook>, Error> {
+    pub fn table_hook_(&self, address: usize, callback: Box<dyn Fn(&mut HookArgs)>) -> Result<Arc<dyn Hook>, Error> {
         if let Some(hook) = self.get_hook(address) {
             *hook.base().callback.lock() = callback;
             return Ok(hook);
@@ -693,7 +674,7 @@ impl HookManager {
         let tp = this_process();
         let raw_pointer: usize = tp.read_value(address).ok_or(Error::ReadMemory)?;
         let hook = Arc::new(TableHook {
-            base: HookBase {address, callback: Spinlock::new(callback), codeback: raw_pointer},
+            base: HookBase {address, callback: Mutex::new(callback), codeback: raw_pointer},
             trapline: TrapLine::alloc_in_4gb(address)?,
         });
         hook.trapline.write_left(&hook.base);
@@ -703,8 +684,8 @@ impl HookManager {
     }
 
     #[inline]
-    pub fn table_hook(&self, address: usize, callback: impl IntoHookCallback, enable: bool) -> Result<Arc<dyn Hook>, Error> {
-        self.table_hook_(address, callback.into()).map(|r| { if enable { r.enable(); } r })
+    pub fn table_hook<P: Fn(&mut HookArgs)+'static>(&self, address: usize, callback: P, enable: bool) -> Result<Arc<dyn Hook>, Error> {
+        self.table_hook_(address, Box::new(callback)).map(|r| { if enable { r.enable(); } r })
     }
 
     #[inline]
@@ -837,124 +818,5 @@ pub fn remove_instrumentation_callback() -> Result<(), NTSTATUS> {
             core::mem::size_of::<PROCESS_INSTRUMENTATION_CALLBACK_INFORMATION>() as _
         ).check()?;
         Ok(())
-    }
-}
-
-#[cfg(test)]
-mod hook_test {
-    use super::*;
-    use std::println;
-
-    use winapi::um::winuser::*;
-    use winapi::um::libloaderapi::*;
-
-    const MAGIC_VALUE: u64 = 1001234;
-
-    #[test]
-    fn inline_hook() {
-        let m = unsafe { GetProcAddress(LoadLibraryA(b"user32\0".as_ptr() as *const i8), b"MessageBoxA\0".as_ptr() as *const i8) };
-        assert!(!m.is_null());
-
-        static mut CHECK_MSG: u64 = 0;
-        unsafe extern "C" fn callback(args: &mut HookArgs) {
-            *args.regs.reg_mut("_ax").unwrap() = 0x1234;
-            args.reject = Some(if cfg!(target_arch = "x86_64") { 0 } else { 4 });
-        }
-        let hm = HookManager::instance();
-        hm.inline_hook(m as usize, callback as HookCallbackFn, true).expect("MessageBoxA");
-        unsafe {
-            let r = MessageBoxA(std::ptr::null_mut(), b"error\0".as_ptr() as *const i8, b"\0".as_ptr() as *const i8, 0);
-            assert_eq!(r, 0x1234);
-        }
-    }
-
-    #[test]
-    fn inline_hook_middle() {
-        unsafe {
-            let f = GetProcAddress(GetModuleHandleA(b"kernelbase\0".as_ptr() as *const i8), b"CreateFileW\0".as_ptr() as *const i8);
-            assert!(!f.is_null());
-            let dis = DisAsmWrapper::new(f as usize, core::slice::from_raw_parts(f as *const u8, 16)).unwrap();
-            println!("[kernelbase!CreateFileW] {}", dis.to_string());
-
-            let hm = HookManager::instance();
-            hm.inline_hook(f as usize + dis.len(), |args: &mut HookArgs| {
-                println!("[hook] in the middle");
-            }, true);
-            std::fs::File::open("C:\\");
-            hm.remove_hook(f as usize + dis.len());
-        }
-    }
-
-    #[test]
-    fn inline_hook_jmp() {
-        let f = unsafe { GetProcAddress(GetModuleHandleA(b"kernel32\0".as_ptr() as *const i8), b"CreateFileW\0".as_ptr() as *const i8) };
-        assert!(!f.is_null());
-        unsafe {
-            let dis = DisAsmWrapper::new(f as usize, core::slice::from_raw_parts(f as *const u8, 16)).unwrap();
-            println!("[CreateFileW] {}", dis.to_string());
-        }
-        let hm = HookManager::instance();
-        hm.inline_hook(f as usize, |args: &mut HookArgs| {
-            println!("[hook] CreateFileW");
-        }, true).expect("CreateFileW");
-        std::fs::File::open("C:\\");
-    }
-
-    #[test]
-    fn inline_hook_reject() {
-        type FnRtlQueryPerformanceCounter = extern "system" fn(&mut u64) -> usize;
-        let m = unsafe { GetProcAddress(GetModuleHandleA(b"ntdll\0".as_ptr() as *const i8), b"RtlQueryPerformanceCounter\0".as_ptr() as *const i8) };
-        assert!(!m.is_null());
-        HookManager::instance().inline_hook(m as usize, |args: &mut HookArgs| unsafe {
-            let RtlQueryPerformanceCounter = transmute::<_, FnRtlQueryPerformanceCounter>(args.trampoline());
-            let regs = &mut args.regs;
-            let arg1 = regs.arg(1);
-            *regs.reg_mut("_ax").unwrap() = RtlQueryPerformanceCounter(transmute(arg1));
-            *(arg1 as *mut u64) = MAGIC_VALUE;
-            args.reject = Some(if size_of::<usize>() == 8 { 0 } else { 1 });
-        }, true).expect("RtlQueryPerformanceCounter");
-
-        let mut counter: u64 = 0;
-        unsafe {
-            let RtlQueryPerformanceCounter: FnRtlQueryPerformanceCounter = transmute(m);
-            RtlQueryPerformanceCounter(transmute(&mut counter));
-            assert_eq!(MAGIC_VALUE, counter);
-        }
-    }
-
-    #[test]
-    fn table_hook() {
-        static mut CHECK_HOOK: u64 = 0;
-        unsafe {
-            let m = GetProcAddress(LoadLibraryA(b"kernel32\0".as_ptr() as *const i8), b"OutputDebugStringW\0".as_ptr() as *const i8);
-            let output_debug_string: extern "win64" fn(LPCWSTR) = transmute(m);
-            let address: usize = transmute(&output_debug_string);
-
-            HookManager::instance().table_hook(address, |_arg: &mut HookArgs| {
-                println!("TableHook success");
-                CHECK_HOOK = MAGIC_VALUE;
-            }, true).expect("table hook");
-
-            let s = "OutputDebugString".to_wide();
-            output_debug_string(s.as_ptr());
-            assert_eq!(MAGIC_VALUE, CHECK_HOOK);
-        }
-    }
-
-    #[test]
-    fn instrumentation_hook() {
-        static mut R10: usize = 0;
-        static mut RAX: usize = 0;
-        instrumentation_callback(|args| unsafe {
-            R10 = args.R10;
-            RAX = args.Rax;
-        }).unwrap();
-        println!("----------");
-        remove_instrumentation_callback().unwrap();
-
-        unsafe {
-            println!("r10: {:x}, rax: {:x}", R10, RAX);
-            assert!(R10 > 0);
-        }
     }
 }
