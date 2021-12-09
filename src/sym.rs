@@ -29,8 +29,9 @@ pub enum TypeKind {
         pointer: bool,
     },
     Class {
-        tid: Option<u32>,
-        base: Option<u32>,
+        fields: Option<u32>,
+        vtable: Option<u32>,
+        derive: Option<u32>,
         size: u16,
     },
     Nested,
@@ -38,6 +39,7 @@ pub enum TypeKind {
     Enum,
     Array {
         tid: u32,
+        dimensions: Vec<u32>,
     },
     Bitfield {
         tid: u32,
@@ -86,7 +88,7 @@ pub trait SymbolFile {
     fn path(&self) -> &str;
     fn global(&self) -> Result<Arc<Syms>, String>;
 
-    fn type_info(&self, name: &str) -> Option<TypeInfo> { None }
+    fn find_type(&self, name: &str) -> Vec<TypeInfo> { vec![] }
     fn get_type(&self, id: u32) -> Option<TypeInfo> { None }
     fn get_field(&self, id: u32, index: usize) -> Option<FieldInfo> { None }
     fn find_field(&self, id: u32, name: &str) -> Option<FieldInfo> {

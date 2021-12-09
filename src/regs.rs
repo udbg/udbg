@@ -827,7 +827,10 @@ pub use self::plat::*;
 #[cfg(not(windows))]
 mod plat {
     use super::*;
+    #[cfg(target_arch = "x86_64")]
     use libc::user_regs_struct;
+    #[cfg(target_arch = "aarch64")]
+    use crate::nix::user_regs_struct;
 
     #[cfg(target_arch = "x86_64")]
     impl UDbgRegs for user_regs_struct {

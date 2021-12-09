@@ -32,6 +32,9 @@ pub struct user_regs_struct {   // pt_regs: https://android.googlesource.com/pla
 }
 
 #[cfg(target_arch = "aarch64")]
+use std::fmt;
+
+#[cfg(target_arch = "aarch64")]
 #[derive(Copy, Clone)]
 pub struct user_regs_struct {   // user_pt_regs
     pub regs: [reg_t; 31],

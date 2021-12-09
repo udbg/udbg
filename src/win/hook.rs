@@ -700,6 +700,7 @@ impl HookManager {
 
 static mut INSTRUMENTATION_CALLBACK: Option<Box<dyn Fn(&mut HookContext)>> = None;
 
+#[allow(improper_ctypes)]
 #[no_mangle]
 unsafe extern "system" fn instrumentation_hook(context: &mut HookContext) {
     static mut RUNNING: bool = false;
@@ -773,7 +774,7 @@ pub fn instrumentation_callback(callback: impl Fn(&mut HookContext)+'static) -> 
         "mov ebp, esp"
         "push ebp"
         "push dword ptr [ebp+0x24]"
-        "call instrumentation_hook@4"
+        "call _instrumentation_hook@4"
         "popfd"
         "pop edi"
         "pop esi"

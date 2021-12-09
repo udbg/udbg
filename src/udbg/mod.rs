@@ -324,7 +324,7 @@ pub trait UDbgModule {
     }
     fn get_symbol(&self, name: &str) -> Option<sym::Symbol> { None }
     fn symbol_file(&self) -> Option<Arc<dyn sym::SymbolFile>> { None }
-    fn load_symbol_file(&self, path: &str) -> UDbgResult<()> {
+    fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
     fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item=sym::Symbol>>> {

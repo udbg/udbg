@@ -27,7 +27,7 @@ memmap = {version = '0.7.0'}
 encoding = {version = '0.2.3'}
 cpp_demangle = {version = '0.3'}
 log = {version = '0.4.8', optional = true}
-capstone = {version = '0.9', optional = true}
+capstone = {version = '0.10', optional = true}
 llua = {git = 'https://github.com/udbg/llua', optional = true}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
