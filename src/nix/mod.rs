@@ -1,10 +1,8 @@
 
 use std::path::{Path, PathBuf};
-use std::sync::RwLock;
+use parking_lot::RwLock;
 use std::convert::TryFrom;
-use std::io::prelude::*;
 use std::collections::HashMap;
-use std::io::{self, Seek, SeekFrom};
 use std::fs::{File, read_dir, read_link};
 use core::mem::{transmute, size_of_val, size_of};
 

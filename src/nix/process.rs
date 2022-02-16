@@ -2,6 +2,9 @@
 use super::*;
 use core::mem::zeroed;
 
+use std::io;
+use std::os::unix::prelude::AsRawFd;
+
 pub fn process_name(pid: pid_t) -> Option<String> {
     read_lines(format!("/proc/{}/comm", pid)).ok()?.next()
 }
@@ -83,24 +86,35 @@ impl Process {
     #[inline]
     pub fn environ(&self) -> HashMap<String, String> { process_environ(self.pid) }
 
-    pub fn read_mem(mem: &mut File, address: usize, buf: &mut [u8]) -> usize {
-        mem.seek(SeekFrom::Start(address as u64)).and_then(|_| mem.read(buf)).unwrap_or(0)
+    pub fn read_mem(mem: &File, address: usize, buf: &mut [u8]) -> usize {
+        unsafe {
+            let n = pread64(mem.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), address as _);
+            if n == -1 { 0 } else { n as _ }
+        }
+    }
+
+    #[inline]
+    fn open_mem(&self) -> Option<()> {
+        if self.mem.read().is_none() {
+            *self.mem.write() = Some(Box::new(File::options().read(true).write(true).open(format!("/proc/{}/mem", self.pid)).ok()?));
+        }
+        Some(())
     }
 
     pub fn read<'a>(&self, address: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        if self.mem.read().unwrap().is_none() {
-            *self.mem.write().unwrap() = Some(Box::new(File::open(format!("/proc/{}/mem", self.pid)).ok()?));
-        }
-        self.mem.write().unwrap().as_mut().and_then(move |f| {
+        self.open_mem()?;
+        self.mem.read().as_ref().and_then(move |f| {
             let result = Self::read_mem(f, address, buf);
             if result > 0 { Some(&mut buf[..result]) } else { None }
         })
     }
 
     pub fn write(&self, address: usize, buf: &[u8]) -> Option<usize> {
-        let mut mem = File::create(format!("/proc/{}/mem", self.pid)).ok()?;
-        mem.seek(SeekFrom::Start(address as u64)).ok()?;
-        mem.write(buf).ok()
+        self.open_mem()?;
+        self.mem.read().as_ref().and_then(move |f| unsafe {
+            let n = pwrite64(f.as_raw_fd(), buf.as_ptr().cast(), buf.len(), address as _);
+            if n == -1 { None } else { Some(n as _) }
+        })
     }
 
     fn lines(&self, subpath: &str) -> io::Result<LineReader<File>> {
@@ -125,41 +139,6 @@ impl Process {
 
     pub fn find_module_by_name(&self, name: &str) -> Option<Module> {
         self.enum_module().ok()?.find(|m| m.name.as_ref() == name)
-    }
-
-    pub fn wait(&self, opt: c_int) -> (pid_t, WaitStatus) {
-        let mut status: c_int = 0;
-        unsafe {
-            // http://man7.org/linux/man-pages/man2/waitpid.2.html
-            let tid = libc::waitpid(-1, &mut status, opt);
-
-            if WIFEXITED(status) {
-                return (tid, WaitStatus::Exit(WEXITSTATUS(status)));
-            }
-            if WIFSIGNALED(status) {
-                return (tid, WaitStatus::Signal(WTERMSIG(status)));
-            }
-            if WIFSTOPPED(status) {
-                let extra = (status >> 16) & 0xffff;
-                return (tid, match extra {
-                    PTRACE_EVENT_CLONE => {
-                        let new_tid: pid_t = 0;
-                        if ptrace(PTRACE_GETEVENTMSG, tid, 0, &new_tid) < 0 {
-                            panic!("PTRACE_GETEVENTMSG Failed");
-                        }
-                        WaitStatus::Clone(new_tid)
-                    }
-                    PTRACE_EVENT_EXEC => {
-                        WaitStatus::Exec
-                    }
-                    _ => WaitStatus::Stop(WSTOPSIG(status)),
-                });
-            }
-            if WIFCONTINUED(status) {
-                return (tid, WaitStatus::Continue);
-            }
-            panic!("invalid waitpid");
-        }
     }
 
     pub fn get_regs(&self, tid: pid_t) -> Option<user_regs_struct> {

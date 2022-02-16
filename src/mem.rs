@@ -22,10 +22,10 @@ pub trait ReadMemUtil: ReadMemory {
             let mut buf: [T; BUFLEN] = core::mem::zeroed();
             let mut addr = address;
 
-            let pdata: *mut u8 = transmute(buf.as_mut_ptr());
             let size = buf.len() * size_of::<T>();
             let mut end = false;
-            while let Some(data) = self.read_memory(addr, from_raw_parts_mut(pdata, size)) {
+            // TODO: check page boundary
+            while let Some(data) = self.read_memory(addr, from_raw_parts_mut(buf.as_mut_ptr().cast(), size)) {
                 let mut pos = match buf.iter().position(pred) {
                     None => buf.len(),
                     Some(pos) => { end = true; pos },

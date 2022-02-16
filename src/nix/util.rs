@@ -60,7 +60,7 @@ pub fn ptrace_inject(p: &Process, libpath: &str) -> Result<(), InjectError> {
     let e = elf::parse(&data).unwrap();
     let dlopen = m.base + e.get_export("dlopen").ok_or(FuncNotFound("dlopen"))?.offset();
 
-    ptrace_attach_wait(p.pid, WUNTRACED).map_err(|_| AttachFailed)?;
+    ptrace_attach_wait(p.pid, WUNTRACED).ok_or(AttachFailed)?;
     let result = (|| {
         let libpath = fs::canonicalize(libpath).unwrap();
         let libpath = libpath.to_str().unwrap();

@@ -97,8 +97,10 @@ pub struct Arm64Regs {
 }
 
 pub trait AbstractRegs {
-    fn ip(&mut self) -> &mut reg_t;
-    fn sp(&mut self) -> &mut reg_t;
+    type REG: FromUsize + Copy = reg_t;
+
+    fn ip(&mut self) -> &mut Self::REG;
+    fn sp(&mut self) -> &mut Self::REG;
 }
 
 impl AbstractRegs for X86Regs {
@@ -121,7 +123,6 @@ impl AbstractRegs for Arm64Regs {
     fn sp(&mut self) -> &mut reg_t { &mut self.sp }
 }
 
-use core::slice::{from_raw_parts, from_raw_parts_mut};
 use core::mem::transmute;
 
 #[cfg(target_arch = "x86")]
@@ -514,6 +515,15 @@ pub enum CpuReg {
     Flt(f64),
 }
 
+impl serde::Serialize for CpuReg {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {
+        match self {
+            Self::Int(val) => serializer.serialize_u64(*val as _),
+            Self::Flt(val) => serializer.serialize_f64(*val),
+        }
+    }
+}
+
 impl CpuReg {
     #[inline]
     pub fn as_int(&self) -> usize {
@@ -553,16 +563,6 @@ impl Into<usize> for CpuReg {
     fn into(self) -> usize { self.as_int() }
 }
 
-#[cfg(feature = "llua")]
-impl llua::ToLua for CpuReg {
-    fn to_lua(self, s: &llua::State) {
-        match self {
-            CpuReg::Int(n) => s.push_integer(n as _),
-            CpuReg::Flt(n) => s.push_number(n as _),
-        };
-    }
-}
-
 pub trait FromUsize {
     fn from_usize(v: usize) -> Self;
     fn to_usize(&self) -> usize;
@@ -578,20 +578,19 @@ impl FromUsize for u64 {
     fn to_usize(&self) -> usize { *self as usize }
 }
 
-pub trait CommRegs {
-    type REG: FromUsize + Copy;
-
-    fn ip(&mut self) -> &mut Self::REG;
-    fn sp(&mut self) -> &mut Self::REG;
-}
-
 #[cfg(windows)]
 mod plat {
     use super::*;
+    use core::slice::{from_raw_parts, from_raw_parts_mut};
+
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub type CONTEXT32 = WOW64_CONTEXT;
+    #[cfg(target_arch = "x86")]
+    pub type CONTEXT32 = CONTEXT;
 
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context
     #[cfg(target_arch = "x86_64")]
-    impl CommRegs for CONTEXT {
+    impl AbstractRegs for CONTEXT {
         type REG = u64;
 
         #[inline]
@@ -600,20 +599,22 @@ mod plat {
         fn sp(&mut self) -> &mut Self::REG { &mut self.Rsp }
     }
 
-    impl CommRegs for WOW64_CONTEXT {
-        type REG = u32;
+    #[cfg(target_arch = "aarch64")]
+    impl AbstractRegs for CONTEXT {
+        type REG = u64;
 
         #[inline]
-        fn ip(&mut self) -> &mut Self::REG { &mut self.Eip }
+        fn ip(&mut self) -> &mut Self::REG { &mut self.Pc }
         #[inline]
-        fn sp(&mut self) -> &mut Self::REG { &mut self.Esp }
+        fn sp(&mut self) -> &mut Self::REG { &mut self.Sp }
     }
 
-    #[cfg(target_arch = "x86")]
-    impl CommRegs for CONTEXT {
+    impl AbstractRegs for CONTEXT32 {
         type REG = u32;
 
+        #[inline]
         fn ip(&mut self) -> &mut Self::REG { &mut self.Eip }
+        #[inline]
         fn sp(&mut self) -> &mut Self::REG { &mut self.Esp }
     }
 
@@ -690,16 +691,113 @@ mod plat {
                 _ => {}
             };
         }
-    
+
+        fn get(&self, reg_t: &str) -> Option<CpuReg> {
+            if reg_t.starts_with("mm") {       // float
+                return usize::from_str_radix(&reg_t[3..], 10).map(|o| unsafe {
+                    let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
+                    let mut f = [0.0; 4];
+                    _mm_storeu_ps(f.as_mut_ptr(), transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]));
+                    CpuReg::Flt(f[0] as f64)
+                }).ok();
+            }
+            if reg_t.starts_with("xmm") {       // double
+                return usize::from_str_radix(&reg_t[3..], 10).map(|o| unsafe {
+                    let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
+                    let mut f = [0.0; 2];
+                    _mm_storeu_pd(f.as_mut_ptr(), transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]));
+                    CpuReg::Flt(f[0])
+                }).ok();
+            }
+            Some(CpuReg::Int(match reg_t {
+                "rax" => self.Rax,
+                "rbx" => self.Rbx,
+                "rcx" => self.Rcx,
+                "rdx" => self.Rdx,
+                "rbp" => self.Rbp,
+                "rsp" | "_sp" => self.Rsp,
+                "rsi" => self.Rsi,
+                "rdi" => self.Rdi,
+                "r8" => self.R8,
+                "r9" => self.R9,
+                "r10" => self.R10,
+                "r11" => self.R11,
+                "r12" => self.R12,
+                "r13" => self.R13,
+                "r14" => self.R14,
+                "r15" => self.R15,
+                "rip" | "_pc" => self.Rip,
+                "rflags" => self.EFlags as u64,
+                _ => return None,
+            } as usize))
+        }
+
+        fn set(&mut self, name: &str, val: CpuReg) {
+            if name.starts_with("mm") {       // float
+                usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
+                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] = transmute(_mm_set1_ps(val.as_flt() as f32));
+                });
+            }
+            if name.starts_with("xmm") {       // double
+                usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
+                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] = transmute(_mm_set1_pd(val.as_flt()));
+                });
+            }
+            let val = val.as_int() as u64;
+            match name {
+                "rax" => self.Rax = val,
+                "rbx" => self.Rbx = val,
+                "rcx" => self.Rcx = val,
+                "rdx" => self.Rdx = val,
+                "rbp" => self.Rbp = val,
+                "rsp" | "_sp" => self.Rsp = val,
+                "rsi" => self.Rsi = val,
+                "rdi" => self.Rdi = val,
+                "r8" => self.R8 = val,
+                "r9" => self.R9 = val,
+                "r10" => self.R10 = val,
+                "r11" => self.R11 = val,
+                "r12" => self.R12 = val,
+                "r13" => self.R13 = val,
+                "r14" => self.R14 = val,
+                "r15" => self.R15 = val,
+                "rip" | "_pc" => self.Rip = val,
+                "rflags" => self.EFlags = val as u32,
+                _ => {}
+            };
+        }
+
         fn to_regs(&self) -> RegType {
             RegType::X64(context_to_regs(self))
         }
     
         fn as_raw(&self) -> Option<&CONTEXT> { Some(self) }
     }
+
+    #[cfg(target_arch = "aarch64")]
+    impl UDbgRegs for CONTEXT {
+        fn get_reg(&self, id: u32) -> Option<CpuReg> {
+            let c = self;
+            Some(CpuReg::Int(match id {
+                ARM_REG_PC => c.Pc,
+                ARM_REG_SP | COMM_REG_SP => c.Sp,
+                // TODO:
+                _ => return None,
+            } as usize))
+        }
     
-    #[cfg(target_arch = "x86_64")]
-    impl UDbgRegs for WOW64_CONTEXT {
+        fn set_reg(&mut self, id: u32, val: CpuReg) {
+            // TODO:
+        }
+
+        fn to_regs(&self) -> RegType {
+            #[cfg(target_arch = "aarch64")] {
+                RegType::Arm64(context_to_regs(self))
+            }
+        }
+    }
+
+    impl UDbgRegs for CONTEXT32 {
         fn get_reg(&self, id: u32) -> Option<CpuReg> {
             let c = self;
             Some(CpuReg::Int(match id {
@@ -722,6 +820,22 @@ mod plat {
                 _ => return None,
             } as usize))
         }
+
+        fn get(&self, reg_t: &str) -> Option<CpuReg> {
+            Some(CpuReg::Int(match reg_t {
+                "eax" => self.Eax,
+                "ebx" => self.Ebx,
+                "ecx" => self.Ecx,
+                "edx" => self.Edx,
+                "ebp" => self.Ebp,
+                "esp" | "_sp" => self.Esp,
+                "esi" => self.Esi,
+                "edi" => self.Edi,
+                "eip" | "_pc" => self.Eip,
+                "eflags" => self.EFlags,
+                _ => return None,
+            } as usize))
+        }
     
         fn set_reg(&mut self, id: u32, val: CpuReg) {
             let c = self;
@@ -741,9 +855,15 @@ mod plat {
         }
     
         fn to_regs(&self) -> RegType {
-            RegType::X86(context_to_regs32(self))
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
+                RegType::X86(context_to_regs32(self))
+            }
+            #[cfg(target_arch = "x86")] {
+                RegType::X86(context_to_regs(self))
+            }
         }
-    
+
+        #[cfg(target_arch = "x86_64")]
         fn as_wow64(&self) -> Option<&WOW64_CONTEXT> { Some(self) }
     }
     
@@ -776,20 +896,31 @@ mod plat {
             ss: c.SegSs,
         }
     }
+
+    #[cfg(target_arch = "aarch64")]
+    pub fn context_to_regs(c: &CONTEXT) -> Registers {
+        Registers {
+            regs: unsafe { core::mem::transmute(c.u) },
+            sp: c.Sp,
+            pc: c.Pc,
+            // TODO:
+            pstate: c.Cpsr as _,
+        }
+    }
     
-    #[cfg(target_arch = "x86_64")]
-    pub fn context_to_regs32(c: &WOW64_CONTEXT) -> Registers32 {
-        Registers32 {
-            eax: c.Eax,
-            ebx: c.Ebx,
-            ecx: c.Ecx,
-            edx: c.Edx,
-            ebp: c.Ebp,
-            esp: c.Esp,
-            esi: c.Esi,
-            edi: c.Edi,
-            eip: c.Eip,
-            eflags: c.EFlags as u32,
+    #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+    pub fn context_to_regs32(c: &WOW64_CONTEXT) -> X86Regs {
+        X86Regs {
+            eax: c.Eax as _,
+            ebx: c.Ebx as _,
+            ecx: c.Ecx as _,
+            edx: c.Edx as _,
+            ebp: c.Ebp as _,
+            esp: c.Esp as _,
+            esi: c.Esi as _,
+            edi: c.Edi as _,
+            eip: c.Eip as _,
+            eflags: c.EFlags as _,
             cs: c.SegCs as u16,
             ds: c.SegDs as u16,
             es: c.SegEs as u16,
@@ -821,8 +952,6 @@ mod plat {
         }
     }    
 }
-#[cfg(windows)]
-pub use self::plat::*;
 
 #[cfg(not(windows))]
 mod plat {
@@ -953,7 +1082,7 @@ mod plat {
         }
     }
 }
-#[cfg(not(windows))]
+
 pub use self::plat::*;
 
 #[inline]
@@ -1005,8 +1134,8 @@ pub struct Registers32 {   // pt_regs: https://android.googlesource.com/platform
 pub type Registers32 = Registers;
 
 pub enum RegType {
-    X86(Registers32),
-    X64(Registers),
+    X86(X86Regs),
+    X64(X64Regs),
     Arm(ArmRegs),
     Arm64(Arm64Regs),
 }
@@ -1015,11 +1144,18 @@ pub trait UDbgRegs: crate::util::AsByteArray {
     fn get_reg(&self, id: u32) -> Option<CpuReg>;
     fn set_reg(&mut self, id: u32, val: CpuReg);
 
+    fn get(&self, name: &str) -> Option<CpuReg> {
+        get_regid(name).and_then(|id| self.get_reg(id))
+    }
+    fn set(&mut self, name: &str, val: CpuReg) {
+        get_regid(name).map(|id| self.set_reg(id, val));
+    }
+
     fn to_regs(&self) -> RegType;
 
     #[cfg(windows)]
     fn as_raw(&self) -> Option<&CONTEXT> { None }
-    #[cfg(windows)]
+    #[cfg(all(windows, target_arch = "x86_64"))]
     fn as_wow64(&self) -> Option<&WOW64_CONTEXT> { None }
 }
 

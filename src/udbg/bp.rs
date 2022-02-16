@@ -4,14 +4,14 @@ use crate::tid_t;
 
 pub type BpID = isize;
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum HwbpType {
     Execute = 0,
     Write = 1,
     Access = 3,
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum BpType {
     Soft,
     Table,

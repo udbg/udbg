@@ -1,70 +1,34 @@
 
-pub mod bp;
-pub mod event;
+cfg_if! {
+    if #[cfg(windows)] {
+        mod win;
+        pub use self::win::*;
+    } else {
+        mod nix;
+        pub use self::nix::*;
+    }
+}
 
-use std::cell::Cell;
-use std::sync::Arc;
-use std::any::Any;
+mod bp;
+mod event;
+mod shell;
+#[cfg(windows)]
+pub mod pdbfile;
+
+mod tests;
+
 use core::ops::Deref;
+use std::cell::Cell;
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, RwLock, Weak};
 pub use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 
 #[cfg(windows)]
 use winapi::um::winnt::{PCONTEXT, PEXCEPTION_RECORD, EXCEPTION_POINTERS};
 
-pub use bp::*;
-pub use event::*;
-use crate::{*, regs::*};
-
-mod error {
-    use std::fmt;
-    use super::*;
-    use thiserror::Error;
-
-    #[derive(Error, Debug)]
-    pub enum UDbgError {
-        NotSupport,
-        BpExists,
-        NotFound,
-        NoTarget,
-        TimeOut,
-        InvalidAddress,
-        InvalidRegister,
-        MemoryError,
-        HWBPSlotMiss,
-        BindFailed,
-        SpawnFailed,
-        TargetIsBusy,
-        GetContext(u32),
-        SetContext(u32),
-        Text(String),
-        System(String),
-        Code(usize),
-        #[error(transparent)]
-        Other(#[from] anyhow::Error),
-    }
-    pub type UDbgResult<T>  = std::result::Result<T, UDbgError>;
-
-    impl UDbgError {
-        #[inline]
-        pub fn system() -> UDbgError { UDbgError::System(get_last_error_string()) }
-    }
-
-    impl From<&str> for UDbgError {
-        fn from(s: &str) -> Self { UDbgError::Text(s.to_string()) }
-    }
-
-    impl From<String> for UDbgError {
-        fn from(s: String) -> Self { UDbgError::Text(s) }
-    }
-
-    impl fmt::Display for UDbgError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            write!(f, "")
-        }
-    }
-}
-pub use error::*;
+pub use crate::error::*;
+pub use {bp::*, shell::*, event::*};
+use crate::{*, regs::*, sym::*};
 
 #[cfg(target_arch = "x86_64")]
 pub const UDBG_ARCH: u32 = ARCH_X64;
@@ -75,43 +39,13 @@ pub const UDBG_ARCH: u32 = ARCH_ARM;
 #[cfg(target_arch = "aarch64")]
 pub const UDBG_ARCH: u32 = ARCH_ARM64;
 
-bitflags! {
-    pub struct UFlags: u32 {
-        const NONE = 0b00000000;
-        const UNDEC_TYPE = 1 << 0;
-        const UNDEC_RETN = 1 << 1;
-        const UNDEC_NAME_ONLY = 1 << 2;
-
-        const DISASM_RAW = 1 << 8;
-        const DISASM_SYMBOL = 1 << 9;
-        // const DISASM_SYMBOL = 1 << 3;
-
-        const SHOW_OUTPUT = 1 << 16;
-    }
-}
-
-impl Default for UFlags {
-    fn default() -> Self {
-        Self::SHOW_OUTPUT | Self::UNDEC_NAME_ONLY
-    }
-}
-
-pub const UFLAG_NAME_ONLY: usize = 1 << 8;
-pub const UFLAG_UNDEC_TYPE: usize = 1 << 0;     // undecorate full type of function
-pub const UFLAG_UNDEC_RETN: usize = 1 << 1;     // undecorate the return type of function
-
-pub const DISASM_RAW: u32 = 0;
-pub const DISASM_MODULE: u32 = 1;
-pub const DISASM_SYMBOL: u32 = 2;
-
-pub struct DebugOption {
-    pub disasm: Cell<u32>,
-}
-unsafe impl Sync for DebugOption {}
-
-pub static G_OPT: DebugOption = DebugOption {
-    disasm: Cell::new(DISASM_SYMBOL),
-};
+pub const MF_IMAGE: u32 = 1 << 0;
+pub const MF_MAP: u32 = 1 << 1;
+pub const MF_PRIVATE: u32 = 1 << 2;
+pub const MF_SECTION: u32 = 1 << 3;
+pub const MF_STACK: u32 = 1 << 4;
+pub const MF_HEAP: u32 = 1 << 5;
+pub const MF_PEB: u32 = 1 << 6;
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum UDbgStatus {
@@ -157,14 +91,32 @@ pub struct UDbgBase {
     pub image_path: String,
     pub image_base: usize,
     pub arch: &'static str,
+    #[cfg(windows)]
+    pub wow64: Cell<bool>,
     #[serde(skip)]
     pub flags: Cell<UFlags>,
     #[serde(skip)]
     pub context: PauseContext,
     #[serde(skip)]
     pub status: Cell<UDbgStatus>,
-    #[serde(skip)]
-    pub update: fn(u32),
+}
+
+impl Default for UDbgBase {
+    fn default() -> Self {
+        Self {
+            image_path: "".into(),
+            image_base: 0,
+            context: Default::default(),
+            event_pc: Default::default(),
+            event_tid: Default::default(),
+            pid: Cell::new(0),
+            flags: Default::default(),
+            #[cfg(windows)]
+            wow64: Cell::new(false),
+            arch: std::env::consts::ARCH,
+            status: Cell::new(udbg::UDbgStatus::Attached),
+        }
+    }
 }
 
 impl UDbgBase {
@@ -181,7 +133,7 @@ impl UDbgBase {
     pub fn update_arch(&self, arch: u32) {
         if arch == self.context.arch.get() { return; }
         self.context.update(arch);
-        (self.update)(arch);
+        udbg_ui().update_arch(arch);
     }
 
     pub fn is_opened(&self) -> bool {
@@ -246,9 +198,9 @@ pub struct ThreadData {
 #[cfg(windows)]
 pub type ThreadContext = winapi::um::winnt::CONTEXT;
 #[cfg(windows)]
-pub type ThreadContext32 = winapi::um::winnt::WOW64_CONTEXT;
+pub type ThreadContext32 = super::regs::CONTEXT32;
 
-pub trait UDbgThread: Any + Deref<Target=ThreadData> {
+pub trait UDbgThread: Deref<Target=ThreadData> + GetProp {
     fn name(&self) -> Arc<str> { "".into() }
     fn status(&self) -> Arc<str> { "".into() }
 
@@ -282,57 +234,7 @@ pub trait UDbgThread: Any + Deref<Target=ThreadData> {
     /// start address
     #[cfg(windows)]
     fn entry(&self) -> usize { 0 }
-    // extra function
-    fn lua_call(&self, s: &llua::State) -> i32 { 0 }
-}
-
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
-pub enum SymbolStatus {
-    Unload,
-    Failed,
-    Loaded,
-}
-
-#[cfg(windows)]
-pub type UModFunc = winapi::um::winnt::RUNTIME_FUNCTION;
-
-pub trait UDbgModule {
-    fn data(&self) -> &sym::ModuleData;
-    fn is_32(&self) -> bool { IS_ARCH_X64 || IS_ARCH_ARM64 }
-    fn symbol_status(&self) -> SymbolStatus;
-    fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
-    }
-    fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<sym::Symbol> {
-        None
-    }
-    #[cfg(windows)]
-    fn runtime_function(&self) -> Option<&[UModFunc]> { None }
-    #[cfg(windows)]
-    fn find_function(&self, offset: usize) -> Option<&UModFunc> {
-        let funcs = self.runtime_function()?;
-        let offset = offset as u32;
-        let i = funcs.binary_search_by(|f| {
-            use std::cmp::Ordering;
-            if offset >= f.BeginAddress && offset < f.EndAddress {
-                Ordering::Equal
-            } else if offset < f.BeginAddress {
-                Ordering::Greater
-            } else { Ordering::Less }
-        }).ok()?;
-        funcs.get(i)
-    }
-    fn get_symbol(&self, name: &str) -> Option<sym::Symbol> { None }
-    fn symbol_file(&self) -> Option<Arc<dyn sym::SymbolFile>> { None }
-    fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
-    }
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item=sym::Symbol>>> {
-        Err(UDbgError::NotSupport)
-    }
-    fn get_exports(&self) -> Option<Vec<sym::Symbol>> { None }
-    // extra function
-    fn call(&self, s: &llua::State) -> i32 { 0 }
+    fn last_error(&self) -> Option<u32> { None }
 }
 
 pub trait UDbgBreakpoint {
@@ -374,16 +276,6 @@ pub trait UDbgSymMgr {
     fn check_load_module(&self, read: &dyn ReadMemory, base: usize, size: usize, path: &str, file: winapi::um::winnt::HANDLE) -> bool { false }
 }
 
-#[repr(C)]
-#[derive(Serialize, Deserialize)]
-pub struct PsInfo {
-    pub pid: pid_t,
-    pub wow64: bool,
-    pub name: String,
-    pub path: String,
-    pub cmdline: String,
-}
-
 pub trait UDbgEngine {
     fn enum_process(&self) -> Box<dyn Iterator<Item=PsInfo>> {
         enum_psinfo()
@@ -391,12 +283,48 @@ pub trait UDbgEngine {
 
     fn open(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
 
+    fn open_self(&self, base: UDbgBase) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        self.open(base, std::process::id() as _)
+    }
+
     fn attach(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
 
     fn create(&self, base: UDbgBase, path: &str, cwd: Option<&str>, args: &[&str]) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
 }
 
-pub trait UDbgAdaptor: Any + Send + Sync + 'static + ReadMemory + WriteMemory {
+pub type UDbgCallback<'a> = dyn FnMut(UEvent) -> UserReply + 'a;
+
+#[cfg(windows)]
+pub trait AdaptorSpec {
+    fn handle(&self) -> HANDLE { core::ptr::null_mut() }
+
+    fn exception_context(&self) -> UDbgResult<PCONTEXT> {
+        Err(UDbgError::NotSupport)
+    }
+
+    fn exception_record(&self) -> UDbgResult<PEXCEPTION_RECORD> {
+        Err(UDbgError::NotSupport)
+    }
+
+    fn exception_pointers(&self) -> UDbgResult<EXCEPTION_POINTERS> {
+        Ok(EXCEPTION_POINTERS {
+            ExceptionRecord: self.exception_record()?,
+            ContextRecord: self.exception_context()?,
+        })
+    }
+}
+
+#[cfg(not(windows))]
+pub trait AdaptorSpec {
+}
+
+pub trait GetProp {
+    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        Err(UDbgError::NotSupport)
+    }
+}
+
+pub trait UDbgAdaptor: Send + Sync + GetProp + ReadMemory + WriteMemory + AdaptorSpec + 'static {
     fn base(&self) -> &UDbgBase;
 
     // target control
@@ -495,38 +423,15 @@ pub trait UDbgAdaptor: Any + Send + Sync + 'static + ReadMemory + WriteMemory {
         Err(UDbgError::NotSupport)
     }
 
-    #[cfg(windows)]
-    fn exception_context(&self) -> UDbgResult<PCONTEXT> {
-        Err(UDbgError::NotSupport)
-    }
-    #[cfg(windows)]
-    fn exception_record(&self) -> UDbgResult<PEXCEPTION_RECORD> {
-        Err(UDbgError::NotSupport)
-    }
-    #[cfg(windows)]
-    fn exception_pointers(&self) -> UDbgResult<EXCEPTION_POINTERS> {
-        Ok(EXCEPTION_POINTERS {
-            ExceptionRecord: self.exception_record()?,
-            ContextRecord: self.exception_context()?,
-        })
-    }
-
     fn except_param(&self, i: usize) -> Option<usize> { None }
-    fn lua_call(&self, s: &State) -> UDbgResult<i32> { Ok(0) }
-    fn sync_option(&self, s: &State) -> UDbgResult<()> { Err(UDbgError::NotSupport) }
     fn do_cmd(&self, cmd: &str) -> UDbgResult<()> { Err(UDbgError::NotSupport) }
 
-    fn loop_event(self: Arc<Self>, state: UEventState) -> EventPumper;
+    fn event_loop<'a>(&self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> { Err(UDbgError::NotSupport) }
 }
 
 pub trait UDbgDebug: UDbgAdaptor {}
 
-pub trait UDbgAdaptorUtil {
-    fn read_ptr(&self, a: usize) -> Option<usize>;
-    fn write_ptr(&self, a: usize, p: usize) -> Option<usize>;
-}
-
-impl<'a> UDbgAdaptorUtil for dyn UDbgAdaptor + 'a {
+pub trait AdaptorUtil: UDbgAdaptor {
     fn read_ptr(&self, a: usize) -> Option<usize> {
         if self.base().is_ptr32() {
             self.read_value::<u32>(a).map(|r| r as usize)
@@ -542,7 +447,159 @@ impl<'a> UDbgAdaptorUtil for dyn UDbgAdaptor + 'a {
             self.write_value(a, &(p as u64))
         }
     }
+
+    fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
+        self.get_registers()?.get_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?).ok_or(UDbgError::InvalidRegister)
+    }
+
+    fn set_reg(&self, r: &str, val: CpuReg) -> UDbgResult<()> {
+        self.get_registers()?.set_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?, val);
+        Ok(())
+    }
+
+    fn parse_address(&self, symbol: &str) -> Option<usize> {
+        let (mut left, right) = match symbol.find('+') {
+            Some(pos) => ((&symbol[..pos]).trim(), Some((&symbol[pos + 1..]).trim())),
+            None => (symbol.trim(), None),
+        };
+
+        let mut val = if let Ok(val) = self.get_reg(left) {
+            val.as_int()
+        } else {
+            if left.starts_with("0x") || left.starts_with("0X") {
+                left = &left[2..];
+            }
+            if let Ok(address) = usize::from_str_radix(left, 16) {
+                address
+            } else { self.get_address_by_symbol(left)? }
+        };
+
+        if let Some(right) = right { val += self.parse_address(right)?; }
+
+        Some(val)
+    }
+
+    fn get_symbol_(&self, addr: usize, o: Option<usize>) -> Option<SymbolInfo> {
+        UDbgAdaptor::get_symbol(self, addr, o.unwrap_or(0x100))
+    }
+
+    fn get_symbol_string(&self, addr: usize) -> Option<String> {
+        self.get_symbol_(addr, None).map(|s| s.to_string(addr))
+    }
+
+    fn get_symbol_module_info(&self, addr: usize) -> Option<String> {
+        self.find_module(addr).map(|m| {
+            let data = m.data();
+            let offset = addr - data.base;
+            if offset > 0 { format!("{}+{:x}", data.name, offset) } else { data.name.to_string() }
+        })
+    }
+
+    fn get_main_module<'a>(&'a self) -> Option<Arc<dyn UDbgModule + 'a>> {
+        let base = self.base();
+        if base.image_base > 0 {
+            self.find_module(base.image_base)
+        } else {
+            let image_path = &self.base().image_path;
+            for m in self.enum_module().ok()? {
+                let path = m.data().path.clone();
+                #[cfg(windows)] {
+                    if path.eq_ignore_ascii_case(&image_path) { return Some(m); }
+                }
+                #[cfg(not(windows))] {
+                    if path.as_ref() == image_path { return Some(m); }
+                }
+            }
+            None
+        }
+    }
+
+    #[cfg(not(windows))]
+    fn get_module_entry(&self, base: usize) -> usize {
+        use goblin::elf32::header::Header as Header32;
+        use goblin::elf64::header::Header as Header64;
+
+        let mut buf = vec![0u8; core::mem::size_of::<Header64>()];
+        if let Some(header) = self.read_memory(base, &mut buf) {
+            base + Header64::parse(header).ok().map(|h| h.e_entry as usize)
+            .or_else(|| Header32::parse(header).map(|h| h.e_entry as usize).ok()).unwrap_or_default()
+        } else { 0 }
+    }
+
+    #[cfg(windows)]
+    fn get_module_entry(&self, base: usize) -> usize {
+        self.read_nt_header(base).map(|(nt, _)| base + nt.OptionalHeader.AddressOfEntryPoint as usize).unwrap_or(0)
+    }
+
+    fn detect_string(&self, a: usize, max: usize) -> Option<(bool, String)> {
+        fn ascii_count(s: &str) -> usize {
+            let mut r = 0usize;
+            for c in s.chars() { if c.is_ascii() { r += 1; } }
+            return r;
+        }
+        // guess string
+        #[cfg(windows)]
+        let ws = self.read_wstring(a, max);
+        #[cfg(not(windows))]
+        let ws: Option<String> = None;
+        if let Some(s) = self.read_utf8(a, max) {
+            return if let Some(ws) = ws {
+                if ascii_count(&s) > ascii_count(&ws) {
+                    Some((false, s))
+                } else { Some((true, ws)) }
+            } else { Some((false, s)) };
+        } None
+    }
+
+    #[inline]
+    fn pid(&self) -> pid_t { self.base().pid.get() }
+
+    fn loop_event<U: std::future::Future<Output=()> + 'static, F: FnOnce(Arc<Self>, UEventState)->U>(self: Arc<Self>, callback: F) {
+        let state = UEventState::new();
+        let mut fetcher = ReplyFetcher::new(Box::pin(callback(self.clone(), state.clone())), state);
+        self.event_loop(&mut |event| {
+            fetcher.fetch(event).unwrap_or(UserReply::Run(false))
+        });
+        fetcher.fetch(None);
+    }
 }
+impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorUtil for T {}
+
+#[cfg(any(target_arch="x86", target_arch="x86_64"))]
+pub trait AdaptorArchUtil: UDbgAdaptor {
+    fn disasm(&self, address: usize) -> Option<iced_x86::Instruction> {
+        use iced_x86::{Decoder, DecoderOptions, Instruction};
+
+        let buffer = self.read_bytes(address, MAX_INSN_SIZE);
+        let mut decoder = Decoder::new(if self.base().is_ptr32() { 32 } else { 64 }, buffer.as_slice(), DecoderOptions::NONE);
+        let mut insn = Instruction::default();
+        if decoder.can_decode() {
+            decoder.decode_out(&mut insn);
+            Some(insn)
+        } else { None }
+    }
+
+    #[inline(always)]
+    fn check_call(&self, address: usize) -> Option<usize> {
+        use iced_x86::Mnemonic::*;
+
+        self.disasm(address).and_then(|insn|
+            if matches!(insn.mnemonic(), Call | Syscall | Sysenter) || insn.has_rep_prefix() {
+                Some(address + insn.len())
+            } else { None }
+        )
+    }
+}
+
+#[cfg(any(target_arch="arm", target_arch="aarch64"))]
+pub trait AdaptorArchUtil: UDbgAdaptor {
+    #[inline(always)]
+    fn check_call(&self, address: usize) -> Option<usize> {
+        todo!();
+    }
+}
+
+impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorArchUtil for T {}
 
 use crate::range::RangeValue;
 
@@ -556,131 +613,118 @@ impl RangeValue for MemoryPage {
     fn as_range(&self) -> core::ops::Range<usize> { self.base..self.base+self.size }
 }
 
-use llua::State;
-
-pub trait UiProxy {
-    fn with_lua(&self, cb: &dyn Fn(&State));
-    fn register_engine(&self, name: &str, engine: Box<dyn UDbgEngine>);
-
-    fn target(&self) -> Option<Arc<dyn UDbgAdaptor>>;
-
-    fn user_reply(&self, r: UserReply);
-
-    fn log_(&self, level: u32, msg: &str);
-    fn logc(&self, c: u32, msg: &str);
-
-    #[cfg(windows)]
-    fn new_symgr(&self) -> Arc<dyn UDbgSymMgr>;
-    fn get_util(&self) -> &'static dyn UDbgUtil;
-}
-
-pub trait UiUtil {
-    fn log(&self, data: impl AsRef<str>);
-    fn warn(&self, err: impl AsRef<str>);
-    fn info(&self, err: impl AsRef<str>);
-    fn error(&self, err: impl AsRef<str>);
-}
-
-const INFO: u32 = 3;
-const LOG: u32 = 4;
-const WARN: u32 = 5;
-const ERROR: u32 = 6;
-
-impl<T: UiProxy + ?Sized> UiUtil for T {
-    #[inline(always)]
-    fn log(&self, data: impl AsRef<str>) { self.log_(LOG, data.as_ref()); }
-    #[inline(always)]
-    fn warn(&self, err: impl AsRef<str>) { self.log_(WARN, err.as_ref()); }
-    #[inline(always)]
-    fn error(&self, err: impl AsRef<str>) { self.log_(ERROR, err.as_ref()); }
-    #[inline(always)]
-    fn info(&self, msg: impl AsRef<str>) { self.log_(INFO, msg.as_ref()); }
-}
-
-pub trait UDbgUtil {
-    #[cfg(windows)]
-    fn enum_process_handle<'a>(&self, pid: pid_t, p: HANDLE) -> UDbgResult<Box<dyn Iterator<Item = UiHandle> + 'a>>;
-    #[cfg(not(windows))]
-    fn enum_process_handle<'a>(&self, pid: pid_t) -> UDbgResult<Box<dyn Iterator<Item = UiHandle> + 'a>> {
-        Err(UDbgError::NotSupport)
-    }
-    #[cfg(windows)]
-    fn get_memory_map(&self, p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory>;
-    #[cfg(windows)]
-    fn open_all_thread(&self, p: &Process, pid: pid_t) -> Vec<(tid_t, Box<dyn UDbgThread>)>;
-}
-
-pub static mut UDBG_UI: Option<Arc<dyn UiProxy>> = None;
-
-#[no_mangle]
-pub fn plugin_load(ui: &Arc<dyn UiProxy>) -> bool {
+pub fn to_weak<T: ?Sized>(t: &T) -> Weak<T> {
     unsafe {
-        let loaded = UDBG_UI.is_some();
-        UDBG_UI.get_or_insert_with(|| ui.clone());
-        loaded
-    }
-}
-
-pub fn udbg_ui() -> &'static dyn UiProxy {
-    unsafe { UDBG_UI.as_ref().expect("plugin not inited").as_ref() }
-}
-
-#[cfg(windows)]
-pub fn undecorate_symbol(sym: &str, flags: UFlags) -> Option<String> {
-    use msvc_demangler::*;
-
-    let mut sym_flags = DemangleFlags::COMPLETE;
-    if flags.contains(UFlags::UNDEC_NAME_ONLY) {
-        sym_flags = DemangleFlags::NAME_ONLY;
-    } else {
-        // if flags & UFLAG_UNDEC_TYPE == 0 { sym_flags |= DemangleFlags::NO_ARGUMENTS; }
-        if !flags.contains(UFlags::UNDEC_RETN) { sym_flags |= DemangleFlags::NO_FUNCTION_RETURNS; }
-    }
-
-    demangle(sym, sym_flags).ok()
-}
-
-#[cfg(not(windows))]
-pub fn undecorate_symbol(sym: &str, flags: UFlags) -> Option<String> {
-    use cpp_demangle::{Symbol, DemangleOptions};
-    Symbol::new(sym).ok().and_then(|s| {
-        let mut opts = DemangleOptions::new();
-        if flags.contains(UFlags::UNDEC_TYPE) { opts = opts.no_params(); }
-        if flags.contains(UFlags::UNDEC_RETN) { opts = opts.no_return_type(); }
-        s.demangle(&opts).ok()
-    })
-}
-
-#[cfg(windows)]
-pub fn enum_psinfo() -> Box<dyn Iterator<Item=PsInfo>> {
-    use crate::*;
-    use winapi::um::winnt::*;
-
-    Box::new(enum_process().map(|p| {
-        let pid = p.pid();
-        let mut result = PsInfo {
-            pid, name: p.name(), wow64: false,
-            // window: get_window(pid).map(|w| w.get_text()).unwrap_or(String::new()),
-            path: String::new(),
-            cmdline: String::new(),
-        };
-        Process::open(pid, Some(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)).map(|p| {
-            result.wow64 = p.is_wow64();
-            p.image_path().map(|path| result.path = path);
-            p.cmdline().map(|cmd| result.cmdline = cmd);
-        });
+        let t = Arc::from_raw(t);
+        let result = Arc::downgrade(&t);
+        Arc::into_raw(t);
         result
-    }))
+    }
 }
 
-#[cfg(not(windows))]
-pub fn enum_psinfo() -> Box<dyn Iterator<Item=PsInfo>> {
-    Box::new(enum_pid().map(|pid| {
-        PsInfo {
-            pid, wow64: false,
-            name: process_name(pid).unwrap_or(String::new()),
-            path: process_path(pid).unwrap_or(String::new()),
-            cmdline: process_cmdline(pid).join(" "),
+#[derive(Clone)]
+pub struct Breakpoint {
+    pub address: usize,
+    pub enabled: Cell<bool>,
+    pub temp: Cell<bool>,
+    pub bp_type: InnerBpType,
+    pub hit_count: Cell<usize>,
+    pub hit_tid: Option<tid_t>,
+
+    target: Weak<dyn UDbgAdaptor>,
+    common: *const CommonAdaptor,
+}
+
+impl Breakpoint {
+    pub fn get_hwbp_len(&self) -> Option<usize> {
+        if let InnerBpType::Hard(info) = self.bp_type {
+            Some(match info.len as crate::reg_t {
+                LEN_1 => 1,
+                LEN_2 => 2,
+                LEN_4 => 4,
+                LEN_8 => 8,
+                _ => 0,
+            })
+        } else { None }
+    }
+
+    #[inline]
+    pub fn is_hard(&self) -> bool {
+        if let InnerBpType::Hard {..} = self.bp_type { true } else { false }
+    }
+
+    #[inline]
+    pub fn is_soft(&self) -> bool {
+        if let InnerBpType::Soft(_) = self.bp_type { true } else { false }
+    }
+
+    #[inline]
+    pub fn is_table(&self) -> bool {
+        if let InnerBpType::Table {..} = self.bp_type { true } else { false }
+    }
+
+    #[inline]
+    pub fn hard_index(&self) -> Option<usize> {
+        if let InnerBpType::Hard(info) = self.bp_type {
+            Some(info.index as usize)
+        } else { None }
+    }
+}
+
+impl UDbgBreakpoint for Breakpoint {
+    fn get_id(&self) -> BpID { self.address as BpID }
+    fn address(&self) -> usize { self.address }
+    fn enabled(&self) -> bool { self.enabled.get() }
+    fn get_type(&self) -> BpType {
+        match self.bp_type {
+            InnerBpType::Soft {..} => BpType::Soft,
+            InnerBpType::Table {..} => BpType::Table,
+            InnerBpType::Hard(info) => BpType::Hwbp(info.rw.into(), info.len),
         }
-    }))
+    }
+    /// count of this breakpoint hitted
+    fn hit_count(&self) -> usize { self.hit_count.get() }
+    /// set count of the to be used,
+    /// when hit_count() > this count, bp will be delete
+    fn set_count(&self, count: usize) {}
+    /// set the which can hit the bp. if tid == 0, all thread used
+    fn set_hit_thread(&self, tid: tid_t) {}
+    /// current tid setted by set_hit_thread()
+    fn hit_tid(&self) -> tid_t { 0 }
+
+    fn origin_bytes<'a>(&'a self) -> Option<&'a [u8]> {
+        if let InnerBpType::Soft(raw) = &self.bp_type {
+            Some(raw)
+        } else { None }
+    }
+
+    fn enable(&self, enable: bool) -> UDbgResult<()> {
+        let t = self.target.upgrade().ok_or(UDbgError::NoTarget)?;
+        unsafe {
+            let common = self.common.as_ref().unwrap();
+            #[cfg(windows)]
+            common.enable_breadpoint(t.as_ref(), self, enable)?;
+            #[cfg(not(windows))]
+            common.enable_breadpoint(self, enable)?;
+            Ok(())
+        }
+    }
+
+    fn remove(&self) -> UDbgResult<()> {
+        let t = self.target.upgrade().ok_or(UDbgError::NoTarget)?;
+        unsafe {
+            let common = self.common.as_ref().unwrap();
+            self.enable(false);
+            #[cfg(windows)]
+            common.remove_breakpoint(t.as_ref(), self);
+            #[cfg(not(windows))] {
+                if let Some(bp) = common.bp_map.write().remove(&self.get_id()) {
+                    if let InnerBpType::Hard(_) = bp.bp_type {
+                        // TODO: nix
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
 }

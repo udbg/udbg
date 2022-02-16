@@ -1,10 +1,10 @@
 #![feature(vec_into_raw_parts)]
 #![feature(get_mut_unchecked)]
 #![feature(untagged_unions)]
-#![feature(llvm_asm)]
 #![feature(trait_alias)]
 #![feature(naked_functions)]
 #![feature(proc_macro_hygiene)]
+#![feature(associated_type_defaults)]
 #![allow(unused_variables)]
 #![allow(unused_must_use)]
 #![allow(dead_code)]
@@ -18,6 +18,10 @@ pub extern crate iced_x86;
 #[macro_use] extern crate cfg_if;
 #[macro_use] extern crate bitflags;
 #[macro_use] extern crate derive_more;
+#[macro_use] extern crate serde;
+#[macro_use] extern crate log;
+#[macro_use] extern crate ctor;
+#[macro_use] extern crate cstrptr;
 
 pub mod pe;
 pub mod elf;
@@ -28,6 +32,7 @@ pub mod util;
 pub mod range;
 pub mod err;
 pub mod mem;
+pub mod error;
 pub mod strutil;
 
 #[cfg(feature="udbg")]

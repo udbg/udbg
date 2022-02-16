@@ -4,6 +4,7 @@ use super::pid_t;
 use crate::text::*;
 use alloc::string::String;
 
+#[derive(Clone, Default)]
 pub struct ThreadStat {
     pub tid: pid_t,
     pub name: String,
@@ -51,19 +52,17 @@ pub struct ThreadStat {
 impl ThreadStat {
     pub fn from(pid: pid_t, tid: pid_t) -> Option<Self> {
         let line = read_lines(format!("/proc/{}/task/{}/stat", pid, tid)).ok()?.next()?;
-        unsafe {
-            let mut result: Self = core::mem::MaybeUninit::uninit().assume_init();
-            scan!(line.bytes() => "{} ({}) {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
-                result.tid, result.name, result.state, result.ppid, result.pgrp, result.session,
-                result.tty_nr, result.tpgid, result.flags, result.minflt, result.cminflt, result.majflt,
-                result.cmajflt, result.utime, result.stime, result.cutime, result.cstime, result.priority,
-                result.nice, result.num_threads, result.itrealvalue, result.starttime, result.vsize,
-                result.rss, result.rsslim, result.startcode, result.endcode, result.startstack, result.kstkesp,
-                result.kstkeip, result.signal, result.blocked, result.sigignore, result.sigcatch, result.wchan,
-                result.nswap, result.cnswap, result.exit_signal, result.processor, result.rt_priority, result.policy
-            );
-            Some(result)
-        }
+        let mut result = Self::default();
+        scan!(line.bytes() => "{} ({}) {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {} {}",
+            result.tid, result.name, result.state, result.ppid, result.pgrp, result.session,
+            result.tty_nr, result.tpgid, result.flags, result.minflt, result.cminflt, result.majflt,
+            result.cmajflt, result.utime, result.stime, result.cutime, result.cstime, result.priority,
+            result.nice, result.num_threads, result.itrealvalue, result.starttime, result.vsize,
+            result.rss, result.rsslim, result.startcode, result.endcode, result.startstack, result.kstkesp,
+            result.kstkeip, result.signal, result.blocked, result.sigignore, result.sigcatch, result.wchan,
+            result.nswap, result.cnswap, result.exit_signal, result.processor, result.rt_priority, result.policy
+        );
+        Some(result)
     }
 
     pub fn state(&self) -> String {

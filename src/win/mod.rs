@@ -12,6 +12,7 @@ pub mod time;
 pub mod wintrust;
 pub mod symbol;
 pub mod string;
+#[cfg(any(target_arch="x86_64", target_arch="x86"))]
 pub mod hook;
 #[cfg(feature="dbglog")]
 pub mod dbglog;
@@ -23,6 +24,7 @@ pub use self::symbol::SymbolApi;
 use core::slice::{from_raw_parts, from_raw_parts_mut};
 use core::mem::{zeroed, transmute, size_of, size_of_val};
 use core::ptr::{null, null_mut};
+use core::ops::Deref;
 use alloc::sync::Arc;
 use alloc::string::String;
 
@@ -44,7 +46,6 @@ use std::io::Error as StdError;
 use serde::{Deserialize, Serialize};
 
 use crate::*;
-use crate::regs::AbstractRegs;
 use super::ntdll::*;
 
 pub type pid_t = u32;
@@ -66,7 +67,7 @@ impl Handle {
         Self(handle)
     }
 
-    pub unsafe fn clone_from_raw(handle: HANDLE) -> Option<Self> {
+    pub unsafe fn clone_from_raw(handle: HANDLE) -> Result<Self, StdError> {
         let mut result = null_mut();
         if DuplicateHandle(
             GetCurrentProcess(),
@@ -74,11 +75,11 @@ impl Handle {
             GetCurrentProcess(),
             &mut result,
             0, 0, DUPLICATE_SAME_ACCESS
-        ) > 0 { Some(Self::from_raw_handle(result)) } else { None }
+        ) > 0 { Ok(Self::from_raw_handle(result)) } else { Err(StdError::last_os_error()) }
     }
 
     #[inline(always)]
-    pub fn clone(&self) -> Option<Self> {
+    pub fn clone(&self) -> Result<Self, StdError> {
         unsafe {
             Self::clone_from_raw(self.0)
         }
@@ -153,37 +154,31 @@ pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
     }
 }
 
-pub trait ModuleInfo {
-    fn name(&self) -> String;
-    fn path(&self) -> String;
-    fn base(&self) -> usize;
-    fn size(&self) -> usize;
-    fn id(&self) -> u32;
+pub trait ModuleInfo: Deref<Target=MODULEENTRY32W> + Sized {
+    #[inline(always)]
+    fn name(self) -> String { self.szModule.as_ref().to_utf8() }
+    #[inline(always)]
+    fn path(self) -> String { self.szExePath.as_ref().to_utf8() }
+    #[inline(always)]
+    fn base(self) -> usize { self.modBaseAddr as usize }
+    #[inline(always)]
+    fn size(self) -> usize { self.modBaseSize as usize }
+    #[inline(always)]
+    fn id(self) -> u32 { self.th32ModuleID }
 }
+impl ModuleInfo for &MODULEENTRY32W {}
 
 impl range::RangeValue for MODULEENTRY32W {
     fn as_range(&self) -> core::ops::Range<usize> { self.base()..self.base()+self.size() }
 }
 
-impl ModuleInfo for MODULEENTRY32W {
-    fn name(&self) -> String { self.szModule.as_ref().to_utf8() }
-    fn path(&self) -> String { self.szExePath.as_ref().to_utf8() }
-    fn base(&self) -> usize { self.modBaseAddr as usize }
-    fn size(&self) -> usize { self.modBaseSize as usize }
-    fn id(&self) -> u32 { self.th32ModuleID }
-}
-
-pub trait ProcessInfo {
-    fn pid(&self) -> u32;
-    fn name(&self) -> String;
-}
-
-impl ProcessInfo for PROCESSENTRY32W {
+pub trait ProcessInfo: Deref<Target=PROCESSENTRY32W> + Sized {
     #[inline]
-    fn pid(&self) -> u32 { self.th32ProcessID }
+    fn pid(self) -> u32 { self.th32ProcessID }
     #[inline]
-    fn name(&self) -> String { self.szExeFile.as_ref().to_utf8() }
+    fn name(self) -> String { self.szExeFile.as_ref().to_utf8() }
 }
+impl ProcessInfo for &PROCESSENTRY32W {}
 
 pub fn enum_process() -> ToolHelperIter<PROCESSENTRY32W> {
     unsafe {
@@ -582,12 +577,15 @@ impl Process {
         write_process_memory(*self.handle, address, data)
     }
 
-    pub fn write_code(&self, address: usize, data: &[u8]) -> usize {
+    pub fn write_code(&self, address: usize, data: &[u8]) -> Result<usize, StdError> {
         let r = write_process_memory(*self.handle, address, data);
-        unsafe {
-            FlushInstructionCache(*self.handle, address as LPCVOID, data.len());
+        if unsafe {
+            FlushInstructionCache(*self.handle, address as LPCVOID, data.len()) > 0
+        } {
+            Ok(r)
+        } else {
+            Err(StdError::last_os_error())
         }
-        return r;
     }
 
     pub fn enum_memory(&self, address: usize) -> MemoryIter {
@@ -700,19 +698,6 @@ const LEN2: usize = 26;
 const RW3: usize = 28;
 const LEN3: usize = 30;
 
-// https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context
-#[cfg(target_arch = "x86_64")]
-impl AbstractRegs for CONTEXT {
-    fn ip(&mut self) -> &mut reg_t { &mut self.Rip }
-    fn sp(&mut self) -> &mut reg_t { &mut self.Rsp }
-}
-
-#[cfg(target_arch = "x86")]
-impl AbstractRegs for CONTEXT {
-    fn ip(&mut self) -> &mut reg_t { &mut self.Eip }
-    fn sp(&mut self) -> &mut reg_t { &mut self.Esp }
-}
-
 pub trait ReadMemUtilWin: ReadMemUtil {
     fn read_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         let r = self.read_cstring(address, max)?;
@@ -728,7 +713,7 @@ pub trait ReadMemUtilWin: ReadMemUtil {
     }
 
     fn read_wstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
-        let result = self.read_util_lt(address, b' ' as u16, max.into().unwrap_or(1000));
+        let result = self.read_util(address, |&x| x < b' ' as u16 && x != 9 && x != 10 && x != 13, max.into().unwrap_or(1000));
         if result.len() == 0 { return None; }
         Some(result.to_utf8())
     }
