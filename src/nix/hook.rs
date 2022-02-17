@@ -332,7 +332,7 @@ pub struct TrapLine {
 
 #[inline]
 fn virtual_reserve_commit(address: usize, size: usize, protect: u32) -> usize {
-    this_process().virtual_alloc(address, size, MEM_RESERVE | MEM_COMMIT, protect)
+    Process::current().virtual_alloc(address, size, MEM_RESERVE | MEM_COMMIT, protect)
 }
 
 #[cfg(target_arch = "x86_64")]
@@ -340,7 +340,7 @@ fn alloc_mem_in_4gb(address: usize, size: usize) -> Result<usize, Error> {
     const LOW_2GB: usize = 0x7FFFFFFF;
     // let begin_address = if address > LOW_2GB { address - LOW_2GB } else { 0x10000 };
     let begin_address = address;
-    for m in this_process().enum_memory(begin_address) {
+    for m in Process::current().enum_memory(begin_address) {
         if m.base > address && m.base - address > LOW_2GB { break; }
         if m.is_free() {
             let sub_size = m.base & 0xFFFF;
@@ -410,7 +410,7 @@ impl InlineHook {
 impl Drop for InlineHook {
     fn drop(&mut self) {
         unsafe {
-            this_process().virtual_free(transmute(self.trapline as *mut TrapLine));
+            Process::current().virtual_free(transmute(self.trapline as *mut TrapLine));
         }
     }
 }
@@ -420,14 +420,14 @@ impl Hook for InlineHook {
 
     fn enable(&self) -> bool {
         // let tids = suspend_else_threads();
-        let r = this_process().write_memory(self.base.address, &self.jmp_code_bytes()) > 0;
+        let r = Process::current().write_memory(self.base.address, &self.jmp_code_bytes()) > 0;
         // tids.iter().for_each(resume_thread);
         return r;
     }
 
     fn disable(&self) -> bool {
         // let tids = suspend_else_threads();
-        let r = this_process().write_memory(self.base.address, &self.rawbytes) > 0;
+        let r = Process::current().write_memory(self.base.address, &self.rawbytes) > 0;
         // tids.iter().for_each(resume_thread);
         return r;
     }
@@ -436,7 +436,7 @@ impl Hook for InlineHook {
 pub fn get_code_bytes(address: usize, len: usize) -> Result<Vec<u8>, Error> {
     let mut result: Vec<u8> = Vec::with_capacity(MAX_INSN_SIZE);
 
-    let tp = this_process();
+    let tp = Process::current();
     let cs = create_cs();
     while !(result.len() >= len) {
         let mut data = vec![0u8; MAX_INSN_SIZE];
@@ -495,7 +495,7 @@ impl HookManager {
             return Ok(hook);
         }
 
-        let tp = this_process();
+        let tp = Process::current();
         let trapline = TrapLine::alloc_in_4gb(address)?;
         let right_ptr = trapline.trap_right.as_ptr();
         let hook = InlineHook {

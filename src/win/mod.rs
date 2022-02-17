@@ -17,6 +17,8 @@ pub mod hook;
 #[cfg(feature="dbglog")]
 pub mod dbglog;
 
+pub mod udbg;
+
 pub use self::window::*;
 pub use self::util::*;
 pub use self::symbol::SymbolApi;
@@ -659,12 +661,6 @@ impl Process {
 pub fn sym_get_options() -> u32 { unsafe { SymGetOptions() } }
 
 pub fn sym_set_options(option: u32) -> u32 { unsafe { SymSetOptions(option) } }
-
-pub fn this_process() -> &'static Process {
-    static mut P: Option<Process> = None;
-
-    unsafe { P.get_or_insert_with(Process::current) }
-}
 
 #[inline(always)]
 fn set_bit(n: &mut reg_t, x: usize, set: bool) {

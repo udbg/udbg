@@ -169,3 +169,104 @@ impl WriteMemory for Process {
         self.write(address, data)
     }
 }
+
+pub struct MemoryIter(LineReader<File>);
+
+impl Iterator for MemoryIter {
+    type Item = MemoryPage;
+    fn next(&mut self) -> Option<Self::Item> {
+        let line = self.0.next()?;
+        let mut line = LineParser::new(line.as_ref());
+        let base = line.till('-').unwrap();
+        let base = usize::from_str_radix(base, 16).unwrap();
+        line.skip_count(1);
+        let end = usize::from_str_radix(line.next().unwrap(), 16).unwrap();
+        let size = end - base;
+        let prot = line.next().unwrap();
+        for i in 0..3 { line.next(); }
+        let usage: Arc<str> = line.rest().trim().into();
+
+        let mut result = MemoryPage { base, size, usage, prot: [0; 4] };
+        result.prot.copy_from_slice(prot.as_bytes());
+        Some(result)
+    }
+}
+
+#[derive(Deref)]
+pub struct Module {
+    #[deref]
+    pub comm: CommonModule,
+    pub name: Arc<str>,
+    pub path: Arc<str>,
+}
+
+impl HKitModule for Module {
+    fn comm(&self) -> &CommonModule { &self.comm }
+    fn name(&self) -> Arc<str> { self.name.clone() }
+    fn path(&self) -> Arc<str> { self.path.clone() }
+}
+
+pub struct ModuleIter<'a> {
+    f: LineReader<File>,
+    p: &'a Process,
+    cached: bool,
+    base: usize,
+    size: usize,
+    usage: Arc<str>,
+}
+
+pub const ELF_SIG: [u8; 4] = [127, b'E', b'L', b'F'];
+
+impl ModuleIter<'_> {
+    fn next_line(&mut self) -> bool {
+        let line = match self.f.next() { Some(r) => r, None => return false, };
+        let mut line = LineParser::new(line.as_ref());
+        let base = line.till('-').unwrap();
+        self.base = usize::from_str_radix(base, 16).expect("page base");
+        line.skip_count(1);
+        let end = usize::from_str_radix(line.next().unwrap(), 16).expect("page end");
+        self.size = end - self.base;
+        let _prot = line.next().unwrap().to_string();
+        for _i in 0..3 { line.next(); }
+        self.usage = line.rest().trim().into();
+        return true;
+    }
+
+    fn next_module(&mut self) -> Option<Module> {
+        loop {
+            if !self.cached {
+                self.cached = self.next_line();
+                if !self.cached { return None; }
+            }
+
+            let mut sig = [0u8; 4];
+            if self.usage.len() > 0 && self.p.read(self.base, &mut sig).is_some() && ELF_SIG == sig {
+                // Moudle Begin
+                let base = self.base;
+                let path = self.usage.clone();
+                let mut size = self.size;
+                let name: Arc<str> = Path::new(path.as_ref()).file_name()
+                                .and_then(|v| v.to_str())
+                                .unwrap_or("").into();
+                loop {
+                    self.cached = self.next_line();
+                    if !self.cached || self.usage != path { break; }
+                    size += self.size;
+                }
+                return Some(Module { comm: CommonModule {base, size}, name, path });
+            } else { self.cached = false; }
+        }
+    }
+}
+
+impl<'a> Iterator for ModuleIter<'a> {
+    type Item = Module;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        while let Some(r) = self.next_module() {
+            if r.path.as_ref() == "[vdso]" { continue; }
+            return Some(r);
+        }
+        None
+    }
+}

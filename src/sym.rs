@@ -409,3 +409,21 @@ impl<T: UDbgModule> SymbolManager<T> {
         }
     }
 }
+
+impl<T: UDbgModule + 'static> UDbgSymMgr for SymbolManager<T> {
+    default fn find_module(&self, address: usize) -> Option<Arc<dyn UDbgModule>> {
+        Some(Self::find_module(self, address)?)
+    }
+
+    default fn get_module(&self, name: &str) -> Option<Arc<dyn UDbgModule>> {
+        Some(Self::get_module(self, name)?)
+    }
+
+    default fn enum_module<'a>(&'a self) -> Box<dyn Iterator<Item=Arc<dyn UDbgModule + 'a>> + 'a> {
+        Self::enum_module(self)
+    }
+
+    default fn remove(&self, address: usize) {
+        self.base.write().remove(address)
+    }
+}

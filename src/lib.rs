@@ -4,6 +4,7 @@
 #![feature(trait_alias)]
 #![feature(naked_functions)]
 #![feature(proc_macro_hygiene)]
+#![feature(min_specialization)]
 #![feature(associated_type_defaults)]
 #![allow(unused_variables)]
 #![allow(unused_must_use)]
@@ -49,12 +50,22 @@ pub use util::*;
 pub use strutil::*;
 
 cfg_if! {
+    if #[cfg(target_os="macos")] {
+        pub mod mac;
+        pub use mac as nix;
+    } else if #[cfg(not(windows))] {
+        pub mod nix;
+    }
+}
+
+cfg_if! {
     if #[cfg(windows)] {
         pub mod win;
-        pub use crate::win::*;
+        pub type pid_t = u32;
+        pub use self::win::{self as os, *};
     } else {
-        pub mod nix;
-        pub use crate::nix::*;
+        pub use std::os::unix::raw::pid_t;
+        pub use self::nix::{self as os, comm::*, *};
     }
 }
 
@@ -71,7 +82,14 @@ use winapi::{
     }
 };
 
-pub type tid_t = pid_t;
+cfg_if! {
+    if #[cfg(target_os="macos")] {
+        pub type tid_t = u64;
+    } else {
+        pub type tid_t = pid_t;
+    }
+}
+
 
 #[cfg(any(target_arch="x86", target_arch="x86_64"))]
 pub const MAX_INSN_SIZE: usize = 16;

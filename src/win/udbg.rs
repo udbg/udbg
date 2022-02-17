@@ -9,6 +9,7 @@ use std::ptr::{null, null_mut};
 use std::ops::Deref;
 use std::cell::UnsafeCell;
 use std::fs::File;
+use std::sync::Arc;
 use std::os::windows::io::FromRawHandle;
 use std::io::{Error as IoErr, Result as IoRes};
 
@@ -27,9 +28,11 @@ use serde_value::Value as SerdeVal;
 use ntapi::ntpebteb::{TEB, PEB};
 use ntapi::ntexapi::SYSTEM_THREAD_INFORMATION;
 use crossbeam::atomic::AtomicCell;
+use parking_lot::RwLock;
 
 use super::pdbfile::*;
-use crate::ntdll::*;
+use super::ntdll::*;
+use crate::{udbg::*, regs::*, sym::*, range::*};
 
 #[cfg(target_arch = "x86")]
 use std::arch::x86::*;
@@ -887,7 +890,7 @@ impl CommonAdaptor {
 
     #[inline(always)]
     pub fn bp_exists(&self, id: BpID) -> bool {
-        self.bp_map.read().unwrap().get(&id).is_some()
+        self.bp_map.read().get(&id).is_some()
     }
 
     fn handle_reply<C: DbgContext>(&self, this: &dyn UDbgAdaptor, reply: UserReply, exception: &ExceptionRecord, context: &mut C) {
@@ -919,7 +922,7 @@ impl CommonAdaptor {
     }
 
     fn get_bp(&self, id: BpID) -> Option<Arc<Breakpoint>> {
-        Some(self.bp_map.read().ok()?.get(&id)?.clone())
+        Some(self.bp_map.read().get(&id)?.clone())
     }
 
     fn check_result<T>(&self, msg: &str, r: UDbgResult<T>) {
@@ -1087,7 +1090,7 @@ impl CommonAdaptor {
 
     pub fn find_table_bp_index(&self) -> Option<isize> {
         for i in -10000..-10 {
-            if self.bp_map.read().unwrap().get(&i).is_none() {
+            if self.bp_map.read().get(&i).is_none() {
                 return Some(i);
             }
         }
@@ -1108,7 +1111,7 @@ impl CommonAdaptor {
                 target: to_weak(this), common: self,
             });
             if opt.enable { self.enable_breadpoint(this, &bp, true)?; }
-            self.bp_map.write().unwrap().insert(bp.get_id(), bp.clone());
+            self.bp_map.write().insert(bp.get_id(), bp.clone());
             Ok(bp)
         } else { Err(UDbgError::InvalidAddress) }
     }
@@ -1135,7 +1138,7 @@ impl CommonAdaptor {
                 });
                 self.occupy_hwbp_index(index, opt.address);
                 // 硬件断点额外记录
-                self.bp_map.write().unwrap().insert(-(index as BpID + 1), bp.clone());
+                self.bp_map.write().insert(-(index as BpID + 1), bp.clone());
                 Ok(bp)
             } else { Err(UDbgError::HWBPSlotMiss) }
         } else if opt.table {
@@ -1152,11 +1155,11 @@ impl CommonAdaptor {
 
                 target: to_weak(this), common: self,
             });
-            self.bp_map.write().unwrap().insert(index, bp.clone());
+            self.bp_map.write().insert(index, bp.clone());
             Ok(bp)
         } else { self.add_int3_bp(this, opt) }?;
         let bpid = bp.get_id();
-        self.bp_map.write().unwrap().insert(bpid, bp.clone());
+        self.bp_map.write().insert(bpid, bp.clone());
 
         if opt.enable {
             self.check_result("enable bp falied", self.enable_breadpoint(this, &bp, true));
@@ -1168,7 +1171,7 @@ impl CommonAdaptor {
         let mut hard_id = 0;
         let mut table_index = None;
         self.check_result("disable bp falied", self.enable_breadpoint(this, &bp, false));
-        if self.bp_map.write().unwrap().remove(&bp.get_id()).is_some() {
+        if self.bp_map.write().remove(&bp.get_id()).is_some() {
             match bp.bp_type {
                 InnerBpType::Hard(info) => {
                     self.occupy_hwbp_index(info.index as usize, 0);
@@ -1181,9 +1184,9 @@ impl CommonAdaptor {
             }
         }
         // delete hardware breakpoint
-        if hard_id < 0 { self.bp_map.write().unwrap().remove(&hard_id); }
+        if hard_id < 0 { self.bp_map.write().remove(&hard_id); }
         // delete table breakpoint
-        table_index.map(|i| self.bp_map.write().unwrap().remove(&i));
+        table_index.map(|i| self.bp_map.write().remove(&i));
     }
 
     #[inline]
@@ -1265,7 +1268,7 @@ impl CommonAdaptor {
                 // Set Context for each thread
                 for tid in self.enum_thread()? {
                     // Ignore threads
-                    if self.protected_thread.read().unwrap().contains(&tid) { continue; }
+                    if self.protected_thread.read().contains(&tid) { continue; }
                     if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) { continue; }
                     // Set Debug Register
                     let th = match dbg.open_thread(tid) {
@@ -1300,14 +1303,14 @@ impl CommonAdaptor {
     }
 
     pub fn enable_bp(&self, dbg: &dyn UDbgAdaptor, id: BpID, enable: bool) -> Result<bool, UDbgError> {
-        if let Some(bp) = self.bp_map.read().unwrap().get(&id) {
+        if let Some(bp) = self.bp_map.read().get(&id) {
             self.enable_breadpoint(dbg, bp, enable)
         } else { Err(UDbgError::NotFound) }
     }
 
     #[inline]
     pub fn get_bp_list(&self) -> Vec<BpID> {
-        self.bp_map.read().unwrap().keys().filter(|&id| *id > 0).cloned().collect()
+        self.bp_map.read().keys().filter(|&id| *id > 0).cloned().collect()
     }
 
     pub fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
@@ -1863,7 +1866,7 @@ impl UDbgAdaptor for StandardAdaptor {
     }
 
     fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
-        Some(self.bp_map.read().ok()?.get(&id)?.clone())
+        Some(self.bp_map.read().get(&id)?.clone())
     }
 
     fn get_bp_list(&self) -> Vec<BpID> { self.debug.get_bp_list() }

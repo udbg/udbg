@@ -260,7 +260,7 @@ pub fn enum_psinfo() -> Box<dyn Iterator<Item=PsInfo>> {
 
 #[cfg(not(windows))]
 pub fn enum_psinfo() -> Box<dyn Iterator<Item=PsInfo>> {
-    use crate::*;
+    use crate::process::*;
     Box::new(enum_pid().map(|pid| {
         PsInfo {
             pid, wow64: false,

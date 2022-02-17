@@ -1,6 +1,7 @@
 
-use super::*;
+use super::{*, util::*};
 use crate::{elf::*, util, AdaptorSpec};
+use crate::{udbg::*, regs::*, sym::*, range::*};
 
 use std::cell::Cell;
 use std::ops::Deref;
@@ -85,65 +86,6 @@ impl SymbolsData {
         e.enum_export().for_each(&mut push_symbol);
         Ok(())
     }
-}
-
-pub struct NixModule {
-    /// 模块基本信息
-    pub data: ModuleData,
-    /// 模块符号信息
-    pub syms: SymbolsData,
-    /// 是否已尝试过加载模块符号
-    pub loaded: Cell<bool>,
-}
-
-impl NixModule {
-    // fn check_loaded(&self) {
-    //     if self.loaded.get() { return; }
-    //     let mut s = self.syms.write();
-    //     self.loaded.set(true);
-    //     match s.load(&self.data.path) {
-    //         Ok(_) => {
-    //         }
-    //         Err(e) => {
-    //             error!("{}", e);
-    //         }
-    //     }
-    // }
-}
-
-impl UDbgModule for NixModule {
-    fn data(&self) -> &ModuleData { &self.data }
-    // fn is_32(&self) -> bool { IS_ARCH_X64 || IS_ARCH_ARM64 }
-    fn symbol_status(&self) -> SymbolStatus {
-        if self.syms.pdb.read().is_some() {
-            SymbolStatus::Loaded
-        } else {
-            SymbolStatus::Unload
-        }
-    }
-    fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
-        self.syms.add_symbol(offset, name)
-    }
-    fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
-        self.syms.find_symbol(offset, max_offset)
-    }
-    fn get_symbol(&self, name: &str) -> Option<Symbol> {
-        self.syms.get_symbol(name)
-    }
-    fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
-        self.syms.pdb.read().clone()
-    }
-
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item=Symbol>>> {
-        Ok(Box::new(self.syms.enum_symbol(pat)?.into_iter()))
-    }
-    fn get_exports(&self) -> Option<Vec<Symbol>> {
-        Some(self.syms.exports.iter().map(|i| i.1.clone()).collect())
-    }
-    // fn load_symbol_file(&self, path: &str) -> UDbgResult<()> {
-    //     // self.syms.write().load_from_pdb(path)?; Ok(())
-    //     Ok(())  // TODO:
-    // }
 }
 
 struct TimeCheck {

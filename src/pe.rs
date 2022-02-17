@@ -12,13 +12,12 @@ impl<'a> PeHelper<'a> {
                        .map(|d| unsafe { CStr::from_ptr(d.filename.as_ptr() as *const c_char) })
     }
 
-    #[cfg(windows)]
     pub fn get_pdb_signature(&self) -> Option<String> {
         use crate::util::HexBuf;
-        use winapi::shared::guiddef::GUID;
+
         self.debug_data.and_then(|d| d.codeview_pdb70_debug_info).map(|d| unsafe {
-            let g = std::mem::transmute::<_, &GUID>(&d.signature);
-            format!("{:08X}{:04X}{:04X}{}{:X}", g.Data1, g.Data2, g.Data3, HexBuf(&g.Data4), d.age)
+            let g = std::mem::transmute::<_, &guid::GUID>(&d.signature);
+            format!("{:08X}{:04X}{:04X}{}{:X}", g.data1(), g.data2(), g.data3(), HexBuf(&g.data4()), d.age)
         })
     }
 

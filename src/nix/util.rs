@@ -129,3 +129,61 @@ pub fn memfd_create(name: &CStr, flags: c_int) -> Option<fs::File> {
         if r > 0 { Some(File::from_raw_fd(r as RawFd)) } else { None }
     }
 }
+
+// pub fn ptrace_peektext(tid: pid_t, address: usize) -> Option<usize> {
+//     unsafe { ptrace(PTRACE_PEEKTEXT, tid, address, 0) == 0 }
+// }
+
+// https://github.com/innogames/android-ndk/blob/master/platforms/android-9/arch-arm/usr/include/asm/ptrace.h
+const NT_PRSTATUS: i32 = 1;
+cfg_if! {
+    if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
+        const PTRACE_GETREGS: i32 = 12;
+        const PTRACE_SETREGS: i32 = 13;
+        const PTRACE_GETREGSET: i32 = 0x4204;
+        const PTRACE_SETREGSET: i32 = 0x4205;
+    }
+}
+pub fn ptrace_getregs(tid: pid_t, regs: &mut user_regs_struct) -> bool {
+    unsafe {
+        let mut io = iovec {
+            iov_len: size_of_val(regs),
+            iov_base: transmute(regs as *mut user_regs_struct),
+            // iov_len: 18 * 4,
+        };
+        if ptrace(PTRACE_GETREGSET, tid, NT_PRSTATUS, &mut io) >= 0 {
+            return true;
+        }
+        ptrace(PTRACE_GETREGS, tid, 0, regs) >= 0
+    }
+}
+
+pub fn ptrace_setregs(tid: pid_t, regs: &user_regs_struct) -> bool {
+    unsafe {
+        let mut io = iovec {
+            iov_base: transmute(regs),
+            iov_len: size_of_val(regs),
+        };
+        if ptrace(PTRACE_SETREGSET, tid, NT_PRSTATUS, &mut io) >= 0 {
+            return true;
+        }
+        return ptrace(PTRACE_SETREGS, tid, 0, regs) >= 0;
+    }
+}
+
+pub fn ptrace_write(pid: pid_t, address: usize, data: &[u8]) {
+    const SSIZE: usize = size_of::<usize>();
+    unsafe {
+        for i in (0..data.len()).step_by(SSIZE) {
+            let val = *((data.as_ptr() as usize + i) as *const usize);
+            ptrace(PTRACE_POKEDATA, pid, address + i, val);
+        }
+        let align_len = data.len() - data.len() % SSIZE;
+        if align_len < data.len() {
+            let rest = &data[align_len..];
+            let mut val = ptrace(PTRACE_PEEKDATA, pid, address + align_len, 0).to_ne_bytes();
+            for i in 0..data.len() % SSIZE { val[i] = rest[i]; }
+            ptrace(PTRACE_POKEDATA, pid, address + align_len, usize::from_ne_bytes(val));
+        }
+    }
+}

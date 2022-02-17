@@ -20,16 +20,22 @@ impl<T: AsRef<str>> ToUnicode for T {
     }
 }
 
-pub trait StrLen {
+pub trait StrLen<T> {
     fn strlen(&self) -> usize;
+    fn strslice(&self) -> &[T];
 }
 
-impl StrLen for &[u16] {
+impl<T: Default + PartialEq> StrLen<T> for [T] {
     fn strlen(&self) -> usize {
-        match self.iter().position(|&x| x == 0) {
+        let zero = &Default::default();
+        match self.iter().position(|x| x == zero) {
             None => self.len(),
             Some(x) => x,
         }
+    }
+
+    fn strslice(&self) -> &[T] {
+        &self[0..self.strlen()]
     }
 }
 

@@ -1,32 +1,24 @@
 
-cfg_if! {
-    if #[cfg(windows)] {
-        mod win;
-        pub use self::win::*;
-    } else {
-        mod nix;
-        pub use self::nix::*;
-    }
-}
-
 mod bp;
 mod event;
 mod shell;
-#[cfg(windows)]
 pub mod pdbfile;
 
+// TODO:
+#[cfg(not(target_os="macos"))]
 mod tests;
 
 use core::ops::Deref;
 use std::cell::Cell;
 use serde::{Deserialize, Serialize};
-use std::sync::{Arc, RwLock, Weak};
+use std::sync::{Arc, Weak};
 pub use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 
 #[cfg(windows)]
 use winapi::um::winnt::{PCONTEXT, PEXCEPTION_RECORD, EXCEPTION_POINTERS};
 
 pub use crate::error::*;
+pub use crate::os::udbg::*;
 pub use {bp::*, shell::*, event::*};
 use crate::{*, regs::*, sym::*};
 
@@ -86,7 +78,7 @@ impl PauseContext {
 #[derive(Clone, Serialize)]
 pub struct UDbgBase {
     pub pid: Cell<pid_t>,
-    pub event_tid: Cell<pid_t>,
+    pub event_tid: Cell<tid_t>,
     pub event_pc: Cell<usize>,
     pub image_path: String,
     pub image_base: usize,
@@ -193,6 +185,8 @@ pub struct ThreadData {
     pub wow64: bool,
     #[cfg(windows)]
     pub handle: Handle,
+    #[cfg(target_os="macos")]
+    pub handle: crate::process::ThreadAct,
 }
 
 #[cfg(windows)]
@@ -324,38 +318,34 @@ pub trait GetProp {
     }
 }
 
-pub trait UDbgAdaptor: Send + Sync + GetProp + ReadMemory + WriteMemory + AdaptorSpec + 'static {
-    fn base(&self) -> &UDbgBase;
+impl<T> GetProp for T {
+    default fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        Err(UDbgError::NotSupport)
+    }
+}
 
-    // target control
+pub trait TargetControl {
     fn detach(&self) -> UDbgResult<()>;
     fn breakk(&self) -> UDbgResult<()> { Err(UDbgError::NotSupport) }
     fn kill(&self) -> UDbgResult<()>;
     fn suspend(&self) -> UDbgResult<()> { Ok(()) }
     fn resume(&self) -> UDbgResult<()> { Ok(()) }
+}
+
+pub trait UDbgAdaptor: Send + Sync + GetProp + TargetMemory + TargetControl + AdaptorSpec + 'static {
+    fn base(&self) -> &UDbgBase;
 
     // memory infomation
-    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>>;
-    fn virtual_query(&self, address: usize) -> Option<MemoryPage>;
     fn get_memory_map(&self) -> Vec<UiMemory>;
-    // size: usize, type: RWX, commit/reverse
-    fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> { Err(UDbgError::NotSupport) }
-    fn virtual_free(&self, address: usize) {}
 
     // thread infomation
     fn get_thread_context(&self, tid: u32) -> Option<Registers> { None }
     fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=tid_t>+'a>>;
     fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> { Err(UDbgError::NotSupport) }
-    fn open_all_thread(&self) -> Vec<(tid_t, Box<dyn UDbgThread>)> {
-        let mut result = Vec::with_capacity(2);
-        if let Ok(iter) = self.enum_thread() {
-            for tid in iter {
-                if let Ok(t) = self.open_thread(tid) {
-                    result.push((tid, t));
-                }
-            }
-        }
-        result
+    fn open_all_thread(&self) -> Vec<Box<dyn UDbgThread>> {
+        self.enum_thread().map(
+            |iter| iter.filter_map(|tid| self.open_thread(tid).ok()).collect::<Vec<_>>()
+        ).unwrap_or_default()
     }
 
     // breakpoint
@@ -631,8 +621,8 @@ pub struct Breakpoint {
     pub hit_count: Cell<usize>,
     pub hit_tid: Option<tid_t>,
 
-    target: Weak<dyn UDbgAdaptor>,
-    common: *const CommonAdaptor,
+    pub target: Weak<dyn UDbgAdaptor>,
+    pub common: *const CommonAdaptor,
 }
 
 impl Breakpoint {

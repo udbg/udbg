@@ -30,10 +30,10 @@ impl PdbFile {
         let pi = db.pdb_information().map_err(|_| "PDBInformation")?;
         if let Some(pe) = pe {
             if !pe.debug_data.and_then(|d| d.codeview_pdb70_debug_info).map(|d| unsafe {
-                let g1 = core::mem::transmute::<_, winapi::shared::guiddef::GUID>(d.signature);
+                let g1 = core::mem::transmute::<_, guid::GUID>(d.signature);
                 let (d1, d2, d3, d4) = pi.guid.as_fields();
                 // println!("{:x?} {:x?} {} {}", d.signature, pi.guid.as_bytes(), pi.age, d.age);
-                g1.Data1 == d1 && g1.Data2 == d2 && g1.Data3 == d3 && g1.Data4.eq(d4)
+                g1.data1() == d1 && g1.data2() == d2 && g1.data3() == d3 && g1.data4().eq(d4)
             }).unwrap_or(true) {
                 return Err("Signature not matched".into());
             }

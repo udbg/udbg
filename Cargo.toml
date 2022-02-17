@@ -21,6 +21,7 @@ log = '0.4'
 spin = '^0.7'
 ctor = '^0.1'
 regex = '1.4'
+pdb = '0.7'
 bitflags = '^1.2'
 anyhow = '1.0'
 futures = '0.3'
@@ -34,6 +35,7 @@ memmap = {version = '0.7.0'}
 encoding = {version = '0.2.3'}
 cpp_demangle = {version = '0.3'}
 capstone = {version = '0.10', optional = true}
+guid = {version = '0.1', package = 'guid-create'}
 # llua = {git = 'https://github.com/udbg/llua', optional = true}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
@@ -46,7 +48,6 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
-pdb = '0.7'
 ntapi = '0.3'
 unicase = '2.6'
 msvc-demangler = {git = 'https://github.com/mstange/msvc-demangler-rust'}
@@ -56,6 +57,10 @@ nix = '^0.20'
 libc = '^0.2'
 errno = '0.2.4'
 text_io = '0.1.8'
+
+[target.'cfg(target_os="macos")'.dependencies]
+mach = '0.3'
+libproc = '0.10'
 
 [dev-dependencies]
 regex = '1.5'

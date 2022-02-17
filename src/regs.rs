@@ -953,7 +953,7 @@ mod plat {
     }    
 }
 
-#[cfg(not(windows))]
+#[cfg(any(target_arch="linux", target_arch="android"))]
 mod plat {
     use super::*;
     #[cfg(target_arch = "x86_64")]
@@ -1082,6 +1082,9 @@ mod plat {
         }
     }
 }
+
+#[cfg(target_os="macos")]
+mod plat {}
 
 pub use self::plat::*;
 

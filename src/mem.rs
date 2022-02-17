@@ -1,5 +1,9 @@
 
-use crate::AsByteArray;
+use crate::{
+    AsByteArray,
+    MemoryPage,
+    UDbgResult, UDbgError,
+};
 
 use alloc::vec::Vec;
 use alloc::string::*;
@@ -142,3 +146,11 @@ pub trait WriteMemUtil: WriteMemory {
 
 impl<T: ReadMemory + ?Sized> ReadMemUtil for T {}
 impl<T: WriteMemory + ?Sized> WriteMemUtil for T {}
+
+pub trait TargetMemory: ReadMemory + WriteMemory {
+    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>>;
+    fn virtual_query(&self, address: usize) -> Option<MemoryPage>;
+    // size: usize, type: RWX, commit/reverse
+    fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> { Err(UDbgError::NotSupport) }
+    fn virtual_free(&self, address: usize) {}
+}
