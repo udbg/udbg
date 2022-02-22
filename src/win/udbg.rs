@@ -648,22 +648,6 @@ fn system_root() -> &'static str {
 }
 
 impl UDbgSymMgr for SymbolManager<WinModule> {
-    fn find_module(&self, address: usize) -> Option<Arc<dyn UDbgModule>> {
-        Some(Self::find_module(self, address)?)
-    }
-
-    fn get_module(&self, name: &str) -> Option<Arc<dyn UDbgModule>> {
-        Some(Self::get_module(self, name)?)
-    }
-
-    fn enum_module<'a>(&'a self) -> Box<dyn Iterator<Item=Arc<dyn UDbgModule + 'a>> + 'a> {
-        Self::enum_module(self)
-    }
-
-    fn remove(&self, address: usize) {
-        self.base.write().remove(address)
-    }
-
     fn check_load_module(&self, read: &dyn ReadMemory, base: usize, size: usize, path: &str, file: HANDLE) -> bool {
         use goblin::pe::header::*;
 
@@ -795,6 +779,34 @@ pub struct CommonAdaptor {
     pub step_tid: Cell<u32>,
     pub show_debug_string: Cell<bool>,
     pub uspy_tid: Cell<u32>,
+}
+
+impl<T> ReadMemory for T where T: Deref<Target=CommonAdaptor> {
+    default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        self.process.read_memory(addr, data)
+    }
+}
+
+impl<T> WriteMemory for T where T: Deref<Target=CommonAdaptor> {
+    default fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
+        match self.process.write_memory(addr, data) {
+            0 => None, s => Some(s),
+        }
+    }
+}
+
+impl<T> TargetMemory for T where T: Deref<Target=CommonAdaptor> {
+    default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
+        self.deref().enum_memory()
+    }
+    
+    default fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
+        self.deref().virtual_query(address)
+    }
+
+    // size: usize, type: RWX, commit/reverse
+    default fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> { Err(UDbgError::NotSupport) }
+    default fn virtual_free(&self, address: usize) {}
 }
 
 impl CommonAdaptor {
@@ -1384,12 +1396,6 @@ impl CommonAdaptor {
     }
 }
 
-impl<T: Deref<Target=CommonAdaptor>> GetProp for T {
-    fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
-        self.deref().get_prop(key)
-    }
-}
-
 pub fn check_dont_set_hwbp() -> bool {
     udbg_ui().get_config("DONT_SET_HWBP").unwrap_or(false)
 }
@@ -1748,22 +1754,6 @@ impl StandardAdaptor {
     }
 }
 
-// #[intertrait::cast_to]
-impl ReadMemory for StandardAdaptor {
-    fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.process.read_memory(addr, data)
-    }
-}
-
-// #[intertrait::cast_to]
-impl WriteMemory for StandardAdaptor {
-    fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
-        match self.process.write_memory(addr, data) {
-            0 => None, s => Some(s),
-        }
-    }
-}
-
 #[inline(always)]
 pub fn wait_for_debug_event(timeout: u32) -> Option<DEBUG_EVENT> {
     unsafe {
@@ -1796,17 +1786,7 @@ impl AdaptorSpec for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase { &self.base }
-
-    fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
-        self.debug.virtual_query(address)
-    }
-
-    fn get_thread_context(&self, tid: u32) -> Option<Registers> {
-        self.debug.get_registers(tid)
-    }
-
+impl TargetControl for StandardAdaptor {
     fn detach(&self) -> Result<(), UDbgError> {
         if self.base.is_opened() {
             self.base.status.set(UDbgStatus::Ended);
@@ -1834,6 +1814,14 @@ impl UDbgAdaptor for StandardAdaptor {
     fn kill(&self) -> Result<(), UDbgError> {
         self.debug.terminate_process()
     }
+}
+
+impl UDbgAdaptor for StandardAdaptor {
+    fn base(&self) -> &UDbgBase { &self.base }
+
+    fn get_thread_context(&self, tid: u32) -> Option<Registers> {
+        self.debug.get_registers(tid)
+    }
 
     fn except_param(&self, i: usize) -> Option<usize> {
         self.record().params.get(i).map(|v| *v as usize)
@@ -1855,10 +1843,6 @@ impl UDbgAdaptor for StandardAdaptor {
             return self.debug.enum_thread();
         }
         Ok(Box::new(self.threads().iter().map(|(_, t)| t.tid)))
-    }
-
-    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage>+'a>> {
-        self.debug.enum_memory()
     }
 
     fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
@@ -1888,7 +1872,7 @@ impl UDbgAdaptor for StandardAdaptor {
         StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
 
-    fn open_all_thread(&self) -> Vec<(tid_t, Box<dyn UDbgThread>)> {
+    fn open_all_thread(&self) -> Vec<Box<dyn UDbgThread>> {
         open_all_thread(&self.process, self.base.pid.get(), Some(self))
     }
 
@@ -2213,7 +2197,7 @@ pub fn open_win_thread(process: *const Process, tid: tid_t) -> UDbgResult<Box<Wi
     }).ok_or(UDbgError::system())
 }
 
-pub fn open_all_thread(p: *const Process, pid: pid_t, map: Option<&StandardAdaptor>) -> Vec<(tid_t, Box<dyn UDbgThread>)> {
+pub fn open_all_thread(p: *const Process, pid: pid_t, map: Option<&StandardAdaptor>) -> Vec<Box<dyn UDbgThread>> {
     let mut info: HashMap<u32, SYSTEM_THREAD_INFORMATION> = HashMap::new();
     let threads = enum_thread().filter_map(|t|
         if t.pid() == pid { Some(t.tid()) } else { None }
@@ -2240,16 +2224,16 @@ pub fn open_all_thread(p: *const Process, pid: pid_t, map: Option<&StandardAdapt
     for tid in threads {
         if let Some(mut t) = map.and_then(|a| StandardAdaptor::open_thread(a, tid).ok()) {
             t.infos = infos.clone();
-            result.push((tid, t as Box<dyn UDbgThread>));
+            result.push(t as Box<dyn UDbgThread>);
             continue;
         }
         if let Ok(mut t) = open_win_thread(p, tid) {
             t.infos = infos.clone();
-            result.push((tid, t as Box<dyn UDbgThread>));
+            result.push(t as Box<dyn UDbgThread>);
         } else {
             let mut t = Box::new(WinThread::new(tid).unwrap());
             t.infos = infos.clone();
-            result.push((tid, t as Box<dyn UDbgThread>));
+            result.push(t as Box<dyn UDbgThread>);
         }
     }
     result

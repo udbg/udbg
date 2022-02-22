@@ -426,4 +426,7 @@ impl<T: UDbgModule + 'static> UDbgSymMgr for SymbolManager<T> {
     default fn remove(&self, address: usize) {
         self.base.write().remove(address)
     }
+
+    #[cfg(windows)]
+    default fn check_load_module(&self, read: &dyn ReadMemory, base: usize, size: usize, path: &str, file: winapi::um::winnt::HANDLE) -> bool { false }
 }

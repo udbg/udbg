@@ -622,7 +622,7 @@ pub struct Breakpoint {
     pub hit_tid: Option<tid_t>,
 
     pub target: Weak<dyn UDbgAdaptor>,
-    pub common: *const CommonAdaptor,
+    pub common: *const crate::os::udbg::CommonAdaptor,
 }
 
 impl Breakpoint {
