@@ -40,45 +40,31 @@ impl CommonAdaptor {
     }
 
     fn update_module(&self) -> Result<(), String> {
-        for m in self.ps.list_module() {
+        use goblin::mach::MachO;
+        use anyhow::Context;
+
+        for mut m in self.ps.list_module() {
             if self.symgr.find_module(m.base).is_some() { continue; }
-            // let name = self.module_name(&m.name);
 
-            // // TODO: use memory data
-            // let mut f = match File::open(m.path.as_ref()) {
-            //     Ok(f) => f, Err(_) => {
-            //         error!("open module file: {}", m.path);
-            //         continue;
-            //     }
-            // };
-            // let mut buf: Header64 = unsafe { std::mem::zeroed() };
-            // if f.read_exact(buf.as_mut_byte_array()).is_err() {
-            //     error!("read file: {}", m.path);
-            //     continue;
-            // }
+            // MachO::parse(bytes, offset)
+            let nm = (|| -> anyhow::Result<_> {
+                let data = util::mapfile(&m.path).with_context(|| format!("map file: {}", m.path))?;
+                let mach = MachO::parse(&data, 0).context("parse macho")?;
+                let base = m.base;
+                let path = m.path.clone();
+                m.entry = mach.entry as _;
+                m.size = mach.segments.iter().map(|s| s.cmdsize).sum::<u32>() as _;
+                Ok(())
+            })();
             
-            // let arch = match elf::machine_to_arch(buf.e_machine) {
-            //     Some(a) => a, None => {
-            //         error!("error e_machine: {} {}", buf.e_machine, m.path);
-            //         continue;
-            //     }
-            // };
-
-            // let entry = match arch {
-            //     "arm64" | "x86_64" => buf.e_entry as usize,
-            //     "x86" | "arm" => unsafe { transmute::<_, &Header32>(&buf).e_entry as usize }
-            //     a => { error!("error arch: {}", a); continue; }
-            // };
-
-            let base = m.base;
-            let path = m.path.clone();
-            self.symgr.base.write().add(NixModule {
-                data: m,
-                loaded: false.into(),
-                syms: Default::default(),
-            });
-            // TODO:
-            // self.base.module_load(&path, base);
+            nm.map_err(|e| udbg_ui().error(format!("{e:?}")));
+            self.symgr.base.write().add(
+                NixModule {
+                    data: m,
+                    loaded: false.into(),
+                    syms: Default::default(),
+                }
+            );
         }
         Ok(())
     }
@@ -104,7 +90,14 @@ impl UDbgAdaptor for StandardAdaptor {
     }
 
     fn get_memory_map(&self) -> Vec<UiMemory> {
-        todo!()
+        self.ps.enum_memory().map(|m| UiMemory {
+            base: m.base,
+            size: m.size,
+            flags: 0,
+            type_: "".into(),
+            protect: m.protect().into(),
+            usage: m.usage.into(),
+        }).collect()
     }
 
     fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=tid_t>+'a>> {
@@ -113,6 +106,11 @@ impl UDbgAdaptor for StandardAdaptor {
 
     fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
         Some(&self.symgr)
+    }
+
+    fn enum_module<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=Arc<dyn UDbgModule+'a>>+'a>> {
+        self.update_module();
+        Ok(self.symgr.enum_module())
     }
 
     fn get_thread_context(&self, tid: u32) -> Option<regs::Registers> { None }
@@ -147,8 +145,7 @@ impl UDbgAdaptor for StandardAdaptor {
     }
 
     fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=UiHandle>+'a>> {
-        // self.ps.
-        todo!()
+        Ok(Box::new(process_fds(self.ps.pid)))
     }
 
     fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn regs::UDbgRegs> {
@@ -190,5 +187,16 @@ impl UDbgEngine for DefaultEngine {
     
     fn create(&self, base: UDbgBase, path: &str, cwd: Option<&str>, args: &[&str]) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         Err(UDbgError::NotSupport)
+    }
+}
+
+#[test]
+fn test() {
+    let a = StandardAdaptor::open(Default::default(), std::process::id() as _).unwrap();
+    for m in a.enum_module() {
+    }
+
+    for p in a.get_memory_map() {
+
     }
 }
