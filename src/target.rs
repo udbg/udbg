@@ -298,17 +298,14 @@ pub trait UDbgAdaptor:
     fn get_thread_context(&self, tid: u32) -> Option<Registers> {
         None
     }
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>>;
+
+    fn enum_thread(
+        &self,
+        detail: bool,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>>;
+
     fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
         Err(UDbgError::NotSupport)
-    }
-    fn open_all_thread(&self) -> Vec<Box<dyn UDbgThread>> {
-        self.enum_thread()
-            .map(|iter| {
-                iter.filter_map(|tid| self.open_thread(tid).ok())
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
     }
 
     // symbol infomation

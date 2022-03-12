@@ -243,12 +243,8 @@ impl MemoryPage {
     }
 }
 
-pub trait ThreadInfo {
-    fn pid(&self) -> u32;
-    fn tid(&self) -> u32;
-}
-
-impl ThreadInfo for THREADENTRY32 {
+#[extend::ext(name = ThreadInfo)]
+pub impl THREADENTRY32 {
     #[inline]
     fn pid(&self) -> u32 {
         self.th32OwnerProcessID
@@ -272,7 +268,8 @@ pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
     }
 }
 
-pub trait ModuleInfo: Deref<Target = MODULEENTRY32W> + Sized {
+#[extend::ext(name = ModuleInfo)]
+pub impl MODULEENTRY32W {
     #[inline(always)]
     fn name(self) -> String {
         self.szModule.as_ref().to_utf8()
@@ -294,7 +291,6 @@ pub trait ModuleInfo: Deref<Target = MODULEENTRY32W> + Sized {
         self.th32ModuleID
     }
 }
-impl ModuleInfo for &MODULEENTRY32W {}
 
 impl crate::range::RangeValue for MODULEENTRY32W {
     fn as_range(&self) -> core::ops::Range<usize> {

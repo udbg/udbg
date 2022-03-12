@@ -420,7 +420,7 @@ pub struct WinThread {
     base: ThreadData,
     pub teb: AtomicCell<usize>,
     pub process: *const Process,
-    pub infos: Arc<HashMap<u32, SYSTEM_THREAD_INFORMATION>>,
+    pub detail: Option<Box<SYSTEM_THREAD_INFORMATION>>,
 }
 
 impl WinThread {
@@ -433,7 +433,7 @@ impl WinThread {
             },
             process: null(),
             teb: AtomicCell::new(0),
-            infos: Arc::new(HashMap::new()),
+            detail: None,
         })
     }
 
@@ -491,8 +491,8 @@ impl UDbgThread for WinThread {
     }
 
     fn status(&self) -> Arc<str> {
-        self.infos
-            .get(&self.tid)
+        self.detail
+            .as_ref()
             .map(|t| t.status())
             .unwrap_or(String::new())
             .into()
@@ -507,7 +507,7 @@ impl UDbgThread for WinThread {
                 GetThreadPriority(*self.handle)
             };
             if p == THREAD_PRIORITY_ERROR_RETURN as i32 {
-                self.infos.get(&self.tid).map(|t| p = t.Priority);
+                self.detail.as_ref().map(|t| p = t.Priority);
             }
             Some(p)
         }
@@ -552,7 +552,7 @@ impl UDbgThread for WinThread {
                 None,
             )
         }
-        .or_else(|| self.infos.get(&self.tid).map(|t| t.StartAddress as usize))
+        .or_else(|| self.detail.as_ref().map(|t| t.StartAddress as usize))
         .unwrap_or(0)
     }
 
@@ -1769,19 +1769,17 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgAdaptor) -> Vec<MemoryPag
         .collect::<Vec<_>>();
 
     // Mark the thread's stack
-    for tid in this.enum_thread().unwrap() {
-        if let Ok(t) = this.open_thread(tid) {
-            let stack = t.teb().and_then(|teb| {
-                this.read_value::<NT_TIB>(teb + FIELD_OFFSET!(TEB, NtTib))
-                    .map(|tib| tib.StackLimit as usize)
-            });
-            stack.map(|stack| {
-                RangeValue::binary_search_mut(&mut result, stack).map(|m| {
-                    m.usage = format!("Stack ~{}", tid).into();
-                    m.flags |= MF_STACK;
-                })
-            });
-        }
+    for t in this.enum_thread(false).unwrap() {
+        let stack = t.teb().and_then(|teb| {
+            this.read_value::<NT_TIB>(teb + FIELD_OFFSET!(TEB, NtTib))
+                .map(|tib| tib.StackLimit as usize)
+        });
+        stack.map(|stack| {
+            RangeValue::binary_search_mut(&mut result, stack).map(|m| {
+                m.usage = format!("Stack ~{}", t.tid).into();
+                m.flags |= MF_STACK;
+            })
+        });
     }
 
     // Mark the process heaps
@@ -2145,7 +2143,7 @@ impl StandardAdaptor {
                 },
                 process: &self.process,
                 teb: AtomicCell::new(t.local_base),
-                infos: Arc::new(HashMap::new()),
+                detail: None,
             }))
         } else {
             self.debug.open_thread(tid)
@@ -2266,13 +2264,6 @@ impl UDbgAdaptor for StandardAdaptor {
         Ok(self.symgr.enum_module())
     }
 
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
-        if self.base.is_opened() {
-            return self.debug.enum_thread();
-        }
-        Ok(Box::new(self.threads().iter().map(|(_, t)| t.tid)))
-    }
-
     fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
         let p = self.cx32.get();
         if p.is_null() {
@@ -2286,8 +2277,11 @@ impl UDbgAdaptor for StandardAdaptor {
         StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
 
-    fn open_all_thread(&self) -> Vec<Box<dyn UDbgThread>> {
-        open_all_thread(&self.process, self.base.pid.get(), Some(self))
+    fn enum_thread(
+        &self,
+        detail: bool,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
+        enum_udbg_thread(&self.process, self.base.pid.get(), detail, Some(self))
     }
 
     fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
@@ -2656,50 +2650,51 @@ pub fn open_win_thread(process: *const Process, tid: tid_t) -> UDbgResult<Box<Wi
         .ok_or(UDbgError::system())
 }
 
-pub fn open_all_thread(
+pub fn enum_udbg_thread<'a>(
     p: *const Process,
     pid: pid_t,
-    map: Option<&StandardAdaptor>,
-) -> Vec<Box<dyn UDbgThread>> {
-    let mut info: HashMap<u32, SYSTEM_THREAD_INFORMATION> = HashMap::new();
-    let threads = enum_thread()
-        .filter_map(|t| if t.pid() == pid { Some(t.tid()) } else { None })
-        .collect::<HashSet<_>>();
-
-    match system_process_information() {
-        Ok(infos) => {
-            for p in infos {
-                for t in p.threads().iter() {
-                    let tid = t.ClientId.UniqueThread as u32;
-                    if threads.contains(&tid) {
-                        info.insert(tid, *t);
-                    }
-                }
+    detail: bool,
+    a: Option<&'a StandardAdaptor>,
+) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + 'a>> {
+    let mut info_iter = detail
+        .then(|| match system_process_information() {
+            Ok(spi) => Some(spi.flat_map(|iter| iter.threads().iter())),
+            Err(e) => {
+                error!("system_process_information: {:x}", e);
+                None
             }
-        }
-        Err(e) => {
-            error!("system_process_information: {:x}", e);
-        }
-    }
+        })
+        .flatten();
 
-    let infos = Arc::new(info);
-    let mut result = Vec::with_capacity(threads.len());
-    for tid in threads {
-        if let Some(mut t) = map.and_then(|a| StandardAdaptor::open_thread(a, tid).ok()) {
-            t.infos = infos.clone();
-            result.push(t as Box<dyn UDbgThread>);
-            continue;
+    let mut cache: HashMap<u32, Box<SYSTEM_THREAD_INFORMATION>> = HashMap::new();
+    let mut threads = enum_thread().filter(move |t| t.pid() == pid);
+    Ok(Box::new(core::iter::from_fn(move || {
+        let thread = threads.next()?;
+        let tid = thread.th32ThreadID;
+        let mut info = cache.remove(&tid);
+        if info.is_none() {
+            info_iter
+                .as_mut()
+                .and_then(|sp| {
+                    sp.find(|&t| {
+                        let result = t.ClientId.UniqueThread as u32 == tid;
+                        if !result && t.ClientId.UniqueProcess as u32 == pid {
+                            cache.insert(t.ClientId.UniqueThread as u32, Box::new(*t));
+                        }
+                        result
+                    })
+                })
+                .map(|si| {
+                    info = Some(Box::new(*si));
+                });
         }
-        if let Ok(mut t) = open_win_thread(p, tid) {
-            t.infos = infos.clone();
-            result.push(t as Box<dyn UDbgThread>);
-        } else {
-            let mut t = Box::new(WinThread::new(tid).unwrap());
-            t.infos = infos.clone();
-            result.push(t as Box<dyn UDbgThread>);
-        }
-    }
-    result
+        let mut result = a
+            .and_then(|a| StandardAdaptor::open_thread(a, tid).ok())
+            .or_else(|| open_win_thread(p, tid).ok())
+            .or_else(|| Some(Box::new(WinThread::new(tid)?)))?;
+        result.detail = info;
+        Some(result as Box<dyn UDbgThread>)
+    })))
 }
 
 pub struct DefaultEngine;
