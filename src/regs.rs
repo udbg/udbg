@@ -1,6 +1,7 @@
-
-use serde::{Deserialize, Serialize};
-use crate::reg_t;
+#[cfg(target_pointer_width = "64")]
+pub type reg_t = u64;
+#[cfg(target_pointer_width = "32")]
+pub type reg_t = u32;
 
 pub const RW_EXECUTE: reg_t = 0;
 pub const RW_WRITE: reg_t = 1;
@@ -104,23 +105,39 @@ pub trait AbstractRegs {
 }
 
 impl AbstractRegs for X86Regs {
-    fn ip(&mut self) -> &mut reg_t { &mut self.eip }
-    fn sp(&mut self) -> &mut reg_t { &mut self.esp }
+    fn ip(&mut self) -> &mut reg_t {
+        &mut self.eip
+    }
+    fn sp(&mut self) -> &mut reg_t {
+        &mut self.esp
+    }
 }
 
 impl AbstractRegs for X64Regs {
-    fn ip(&mut self) -> &mut reg_t { &mut self.rip }
-    fn sp(&mut self) -> &mut reg_t { &mut self.rsp }
+    fn ip(&mut self) -> &mut reg_t {
+        &mut self.rip
+    }
+    fn sp(&mut self) -> &mut reg_t {
+        &mut self.rsp
+    }
 }
 
 impl AbstractRegs for ArmRegs {
-    fn ip(&mut self) -> &mut reg_t { &mut self.r15 }
-    fn sp(&mut self) -> &mut reg_t { &mut self.r13 }
+    fn ip(&mut self) -> &mut reg_t {
+        &mut self.r15
+    }
+    fn sp(&mut self) -> &mut reg_t {
+        &mut self.r13
+    }
 }
 
 impl AbstractRegs for Arm64Regs {
-    fn ip(&mut self) -> &mut reg_t { &mut self.pc }
-    fn sp(&mut self) -> &mut reg_t { &mut self.sp }
+    fn ip(&mut self) -> &mut reg_t {
+        &mut self.pc
+    }
+    fn sp(&mut self) -> &mut reg_t {
+        &mut self.sp
+    }
 }
 
 use core::mem::transmute;
@@ -516,7 +533,10 @@ pub enum CpuReg {
 }
 
 impl serde::Serialize for CpuReg {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error> where S: serde::Serializer {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
         match self {
             Self::Int(val) => serializer.serialize_u64(*val as _),
             Self::Flt(val) => serializer.serialize_f64(*val),
@@ -527,12 +547,18 @@ impl serde::Serialize for CpuReg {
 impl CpuReg {
     #[inline]
     pub fn as_int(&self) -> usize {
-        match *self { Self::Int(n) => n, Self::Flt(n) => n as usize }
+        match *self {
+            Self::Int(n) => n,
+            Self::Flt(n) => n as usize,
+        }
     }
 
     #[inline]
     pub fn as_flt(&self) -> f64 {
-        match *self { Self::Int(n) => n as f64, Self::Flt(n) => n }
+        match *self {
+            Self::Int(n) => n as f64,
+            Self::Flt(n) => n,
+        }
     }
 }
 
@@ -550,17 +576,23 @@ impl From<f64> for CpuReg {
 
 impl Into<u64> for CpuReg {
     #[inline]
-    fn into(self) -> u64 { self.as_int() as u64 }
+    fn into(self) -> u64 {
+        self.as_int() as u64
+    }
 }
 
 impl Into<u32> for CpuReg {
     #[inline]
-    fn into(self) -> u32 { self.as_int() as u32 }
+    fn into(self) -> u32 {
+        self.as_int() as u32
+    }
 }
 
 impl Into<usize> for CpuReg {
     #[inline]
-    fn into(self) -> usize { self.as_int() }
+    fn into(self) -> usize {
+        self.as_int()
+    }
 }
 
 pub trait FromUsize {
@@ -569,13 +601,21 @@ pub trait FromUsize {
 }
 
 impl FromUsize for u32 {
-    fn from_usize(v: usize) -> Self { v as Self }
-    fn to_usize(&self) -> usize { *self as usize }
+    fn from_usize(v: usize) -> Self {
+        v as Self
+    }
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
 }
 
 impl FromUsize for u64 {
-    fn from_usize(v: usize) -> Self { v as Self }
-    fn to_usize(&self) -> usize { *self as usize }
+    fn from_usize(v: usize) -> Self {
+        v as Self
+    }
+    fn to_usize(&self) -> usize {
+        *self as usize
+    }
 }
 
 #[cfg(windows)]
@@ -594,9 +634,13 @@ mod plat {
         type REG = u64;
 
         #[inline]
-        fn ip(&mut self) -> &mut Self::REG { &mut self.Rip }
+        fn ip(&mut self) -> &mut Self::REG {
+            &mut self.Rip
+        }
         #[inline]
-        fn sp(&mut self) -> &mut Self::REG { &mut self.Rsp }
+        fn sp(&mut self) -> &mut Self::REG {
+            &mut self.Rsp
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -604,18 +648,26 @@ mod plat {
         type REG = u64;
 
         #[inline]
-        fn ip(&mut self) -> &mut Self::REG { &mut self.Pc }
+        fn ip(&mut self) -> &mut Self::REG {
+            &mut self.Pc
+        }
         #[inline]
-        fn sp(&mut self) -> &mut Self::REG { &mut self.Sp }
+        fn sp(&mut self) -> &mut Self::REG {
+            &mut self.Sp
+        }
     }
 
     impl AbstractRegs for CONTEXT32 {
         type REG = u32;
 
         #[inline]
-        fn ip(&mut self) -> &mut Self::REG { &mut self.Eip }
+        fn ip(&mut self) -> &mut Self::REG {
+            &mut self.Eip
+        }
         #[inline]
-        fn sp(&mut self) -> &mut Self::REG { &mut self.Esp }
+        fn sp(&mut self) -> &mut Self::REG {
+            &mut self.Esp
+        }
     }
 
     #[cfg(target_arch = "x86_64")]
@@ -630,10 +682,10 @@ mod plat {
                 X86_REG_RBP => c.Rbp,
                 X86_REG_RSI => c.Rsi,
                 X86_REG_RDI => c.Rdi,
-                X86_REG_R8 ..= X86_REG_R15 => unsafe {
+                X86_REG_R8..=X86_REG_R15 => unsafe {
                     let i = (id - X86_REG_R8) as usize;
                     from_raw_parts(&c.R8, 8)[i]
-                }
+                },
                 X86_REG_DR0 => c.Dr0,
                 X86_REG_DR1 => c.Dr1,
                 X86_REG_DR2 => c.Dr2,
@@ -643,22 +695,28 @@ mod plat {
                 X86_REG_RSP | COMM_REG_SP => c.Rsp,
                 X86_REG_RIP | COMM_REG_PC => c.Rip,
                 X86_REG_EFLAGS => c.EFlags as u64,
-                X86_REG_MM0 ..= X86_REG_MM7 => unsafe {
+                X86_REG_MM0..=X86_REG_MM7 => unsafe {
                     let i = (id - X86_REG_MM0) as usize;
                     let mut f = [0.0; 4];
-                    _mm_storeu_ps(f.as_mut_ptr(), transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]));
+                    _mm_storeu_ps(
+                        f.as_mut_ptr(),
+                        transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]),
+                    );
                     return CpuReg::Flt(f[0] as f64).into();
-                }
-                X86_REG_XMM0 ..= X86_REG_XMM15 => unsafe {
+                },
+                X86_REG_XMM0..=X86_REG_XMM15 => unsafe {
                     let i = (id - X86_REG_XMM0) as usize;
                     let mut f = [0.0; 2];
-                    _mm_storeu_pd(f.as_mut_ptr(), transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]));
+                    _mm_storeu_pd(
+                        f.as_mut_ptr(),
+                        transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]),
+                    );
                     return CpuReg::Flt(f[0]).into();
-                }
+                },
                 _ => return None,
             } as usize))
         }
-    
+
         fn set_reg(&mut self, id: u32, val: CpuReg) {
             let c = self;
             match id {
@@ -680,34 +738,48 @@ mod plat {
                 X86_REG_RSP | COMM_REG_SP => c.Rsp = val.into(),
                 X86_REG_RIP | COMM_REG_PC => c.Rip = val.into(),
                 X86_REG_EFLAGS => c.EFlags = val.into(),
-                X86_REG_MM0 ..= X86_REG_MM7 => unsafe {
+                X86_REG_MM0..=X86_REG_MM7 => unsafe {
                     let i = (id - X86_REG_MM0) as usize;
-                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] = transmute(_mm_set1_ps(val.as_flt() as f32));
-                }
-                X86_REG_XMM0 ..= X86_REG_XMM15 => unsafe {
+                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] =
+                        transmute(_mm_set1_ps(val.as_flt() as f32));
+                },
+                X86_REG_XMM0..=X86_REG_XMM15 => unsafe {
                     let i = (id - X86_REG_XMM0) as usize;
-                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] = transmute(_mm_set1_pd(val.as_flt()));
-                }
+                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] =
+                        transmute(_mm_set1_pd(val.as_flt()));
+                },
                 _ => {}
             };
         }
 
         fn get(&self, reg_t: &str) -> Option<CpuReg> {
-            if reg_t.starts_with("mm") {       // float
-                return usize::from_str_radix(&reg_t[3..], 10).map(|o| unsafe {
-                    let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
-                    let mut f = [0.0; 4];
-                    _mm_storeu_ps(f.as_mut_ptr(), transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]));
-                    CpuReg::Flt(f[0] as f64)
-                }).ok();
+            if reg_t.starts_with("mm") {
+                // float
+                return usize::from_str_radix(&reg_t[3..], 10)
+                    .map(|o| unsafe {
+                        let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
+                        let mut f = [0.0; 4];
+                        _mm_storeu_ps(
+                            f.as_mut_ptr(),
+                            transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]),
+                        );
+                        CpuReg::Flt(f[0] as f64)
+                    })
+                    .ok();
             }
-            if reg_t.starts_with("xmm") {       // double
-                return usize::from_str_radix(&reg_t[3..], 10).map(|o| unsafe {
-                    let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
-                    let mut f = [0.0; 2];
-                    _mm_storeu_pd(f.as_mut_ptr(), transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]));
-                    CpuReg::Flt(f[0])
-                }).ok();
+            if reg_t.starts_with("xmm") {
+                // double
+                return usize::from_str_radix(&reg_t[3..], 10)
+                    .map(|o| unsafe {
+                        let c = transmute::<_, &mut CONTEXT>(transmute::<_, usize>(self));
+                        let mut f = [0.0; 2];
+                        _mm_storeu_pd(
+                            f.as_mut_ptr(),
+                            transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]),
+                        );
+                        CpuReg::Flt(f[0])
+                    })
+                    .ok();
             }
             Some(CpuReg::Int(match reg_t {
                 "rax" => self.Rax,
@@ -733,14 +805,18 @@ mod plat {
         }
 
         fn set(&mut self, name: &str, val: CpuReg) {
-            if name.starts_with("mm") {       // float
+            if name.starts_with("mm") {
+                // float
                 usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
-                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] = transmute(_mm_set1_ps(val.as_flt() as f32));
+                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] =
+                        transmute(_mm_set1_ps(val.as_flt() as f32));
                 });
             }
-            if name.starts_with("xmm") {       // double
+            if name.starts_with("xmm") {
+                // double
                 usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
-                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] = transmute(_mm_set1_pd(val.as_flt()));
+                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] =
+                        transmute(_mm_set1_pd(val.as_flt()));
                 });
             }
             let val = val.as_int() as u64;
@@ -770,8 +846,10 @@ mod plat {
         fn to_regs(&self) -> RegType {
             RegType::X64(context_to_regs(self))
         }
-    
-        fn as_raw(&self) -> Option<&CONTEXT> { Some(self) }
+
+        fn as_raw(&self) -> Option<&CONTEXT> {
+            Some(self)
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -785,13 +863,14 @@ mod plat {
                 _ => return None,
             } as usize))
         }
-    
+
         fn set_reg(&mut self, id: u32, val: CpuReg) {
             // TODO:
         }
 
         fn to_regs(&self) -> RegType {
-            #[cfg(target_arch = "aarch64")] {
+            #[cfg(target_arch = "aarch64")]
+            {
                 RegType::Arm64(context_to_regs(self))
             }
         }
@@ -836,7 +915,7 @@ mod plat {
                 _ => return None,
             } as usize))
         }
-    
+
         fn set_reg(&mut self, id: u32, val: CpuReg) {
             let c = self;
             match id {
@@ -853,20 +932,24 @@ mod plat {
                 _ => {}
             };
         }
-    
+
         fn to_regs(&self) -> RegType {
-            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))] {
+            #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
+            {
                 RegType::X86(context_to_regs32(self))
             }
-            #[cfg(target_arch = "x86")] {
+            #[cfg(target_arch = "x86")]
+            {
                 RegType::X86(context_to_regs(self))
             }
         }
 
         #[cfg(target_arch = "x86_64")]
-        fn as_wow64(&self) -> Option<&WOW64_CONTEXT> { Some(self) }
+        fn as_wow64(&self) -> Option<&WOW64_CONTEXT> {
+            Some(self)
+        }
     }
-    
+
     #[cfg(target_arch = "x86_64")]
     pub fn context_to_regs(c: &CONTEXT) -> Registers {
         Registers {
@@ -907,7 +990,7 @@ mod plat {
             pstate: c.Cpsr as _,
         }
     }
-    
+
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub fn context_to_regs32(c: &WOW64_CONTEXT) -> X86Regs {
         X86Regs {
@@ -929,7 +1012,7 @@ mod plat {
             ss: c.SegSs as u16,
         }
     }
-    
+
     #[cfg(target_arch = "x86")]
     pub fn context_to_regs(c: &CONTEXT) -> Registers {
         Registers {
@@ -950,16 +1033,16 @@ mod plat {
             gs: c.SegGs as u16,
             ss: c.SegSs as u16,
         }
-    }    
+    }
 }
 
-#[cfg(any(target_arch="linux", target_arch="android"))]
+#[cfg(any(target_arch = "linux", target_arch = "android"))]
 mod plat {
     use super::*;
-    #[cfg(target_arch = "x86_64")]
-    use libc::user_regs_struct;
     #[cfg(target_arch = "aarch64")]
     use crate::nix::user_regs_struct;
+    #[cfg(target_arch = "x86_64")]
+    use libc::user_regs_struct;
 
     #[cfg(target_arch = "x86_64")]
     impl UDbgRegs for user_regs_struct {
@@ -1025,7 +1108,7 @@ mod plat {
             Some(CpuReg::Int(match id {
                 ARM_REG_SP | COMM_REG_SP => c.sp,
                 ARM_REG_PC | COMM_REG_PC => c.pc,
-                ARM_REG_S0..=ARM_REG_S31 => c.regs[(id-ARM_REG_S0) as usize],
+                ARM_REG_S0..=ARM_REG_S31 => c.regs[(id - ARM_REG_S0) as usize],
                 _ => return None,
             } as usize))
         }
@@ -1035,7 +1118,7 @@ mod plat {
             match id {
                 ARM_REG_SP | COMM_REG_SP => c.sp = val.into(),
                 ARM_REG_PC | COMM_REG_PC => c.pc = val.into(),
-                ARM_REG_S0..=ARM_REG_S31 => c.regs[(id-ARM_REG_S0) as usize] = val.into(),
+                ARM_REG_S0..=ARM_REG_S31 => c.regs[(id - ARM_REG_S0) as usize] = val.into(),
                 _ => {}
             };
         }
@@ -1077,13 +1160,11 @@ mod plat {
 
     #[cfg(target_arch = "aarch64")]
     pub fn context_to_regs(regs: &user_regs_struct) -> Registers {
-        unsafe {
-            core::mem::transmute_copy(regs)
-        }
+        unsafe { core::mem::transmute_copy(regs) }
     }
 }
 
-#[cfg(target_os="macos")]
+#[cfg(target_os = "macos")]
 mod plat {}
 
 pub use self::plat::*;
@@ -1129,7 +1210,8 @@ pub struct Registers32 {
 
 #[cfg(target_arch = "aarch64")]
 #[derive(Copy, Clone)]
-pub struct Registers32 {   // pt_regs: https://android.googlesource.com/platform/external/kernel-headers/+/froyo/original/asm-arm/ptrace.h
+pub struct Registers32 {
+    // pt_regs: https://android.googlesource.com/platform/external/kernel-headers/+/froyo/original/asm-arm/ptrace.h
     pub regs: [reg_t; 18],
 }
 
@@ -1157,12 +1239,16 @@ pub trait UDbgRegs: crate::util::AsByteArray {
     fn to_regs(&self) -> RegType;
 
     #[cfg(windows)]
-    fn as_raw(&self) -> Option<&CONTEXT> { None }
+    fn as_raw(&self) -> Option<&CONTEXT> {
+        None
+    }
     #[cfg(all(windows, target_arch = "x86_64"))]
-    fn as_wow64(&self) -> Option<&WOW64_CONTEXT> { None }
+    fn as_wow64(&self) -> Option<&WOW64_CONTEXT> {
+        None
+    }
 }
 
-#[cfg(any(target_arch="x86", target_arch="x86_64"))]
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 pub fn get_regid(r: &str) -> Option<u32> {
     Some(match r {
         "rax" => X86_REG_RAX,
@@ -1194,17 +1280,27 @@ pub fn get_regid(r: &str) -> Option<u32> {
         "_pc" => COMM_REG_PC,
         "_sp" => COMM_REG_SP,
         "eflags" => X86_REG_EFLAGS,
-        _ => if r.starts_with("xmm") {
-            u32::from_str_radix(&r[3..], 10).map(|i| X86_REG_XMM0 + i).ok()?
-        } else if r.starts_with("mm") {
-            u32::from_str_radix(&r[2..], 10).map(|i| X86_REG_MM0 + i).ok()?
-        } else if r.starts_with("dr") {
-            u32::from_str_radix(&r[2..], 10).map(|i| X86_REG_DR0 + i).ok()?
-        } else { return None }
+        _ => {
+            if r.starts_with("xmm") {
+                u32::from_str_radix(&r[3..], 10)
+                    .map(|i| X86_REG_XMM0 + i)
+                    .ok()?
+            } else if r.starts_with("mm") {
+                u32::from_str_radix(&r[2..], 10)
+                    .map(|i| X86_REG_MM0 + i)
+                    .ok()?
+            } else if r.starts_with("dr") {
+                u32::from_str_radix(&r[2..], 10)
+                    .map(|i| X86_REG_DR0 + i)
+                    .ok()?
+            } else {
+                return None;
+            }
+        }
     })
 }
 
-#[cfg(any(target_arch="arm", target_arch="aarch64"))]
+#[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
 pub fn get_regid(r: &str) -> Option<u32> {
     Some(match r {
         "apsr" => ARM_REG_APSR,

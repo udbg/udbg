@@ -1,21 +1,20 @@
-
-use super::{*, util::*};
+use super::{util::*, *};
 use crate::{elf::*, util, AdaptorSpec};
-use crate::{udbg::*, regs::*, sym::*, range::*};
+use crate::{range::*, regs::*, sym::*, udbg::*};
 
-use std::cell::Cell;
-use std::ops::Deref;
-use std::time::{Instant, Duration};
-use std::sync::Arc;
 use parking_lot::RwLock;
-use std::mem::{transmute, zeroed, size_of};
+use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
+use std::mem::{size_of, transmute, zeroed};
+use std::ops::Deref;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use goblin::elf::sym::Sym;
 
-use ::nix::sys::wait::*;
-use ::nix::unistd::Pid;
-use ::nix::sys::signal::Signal;
+use nix::sys::signal::Signal;
+use nix::sys::wait::*;
+use nix::unistd::Pid;
 
 cfg_if! {
     if #[cfg(target_os = "android")] {
@@ -38,12 +37,17 @@ impl Deref for ElfSymbol {
     type Target = Sym;
 
     #[inline]
-    fn deref(&self) -> &Self::Target { &self.sym }
+    fn deref(&self) -> &Self::Target {
+        &self.sym
+    }
 }
 
 impl From<ElfSym<'_>> for ElfSymbol {
     fn from(s: ElfSym<'_>) -> Self {
-        ElfSymbol { sym: s.sym, name: s.name.into() }
+        ElfSymbol {
+            sym: s.sym,
+            name: s.name.into(),
+        }
     }
 }
 
@@ -57,15 +61,31 @@ pub struct NixThread {
 impl GetProp for NixThread {}
 
 impl UDbgThread for NixThread {
-    fn name(&self) -> Arc<str> { self.stat.name.as_str().into() }
-    fn status(&self) -> Arc<str> { self.stat.state().into() }
-    fn priority(&self) -> Arc<str> { format!("{}", self.stat.priority).into() }
+    fn name(&self) -> Arc<str> {
+        self.stat.name.as_str().into()
+    }
+    fn status(&self) -> Arc<str> {
+        self.stat.state().into()
+    }
+    fn priority(&self) -> Arc<str> {
+        format!("{}", self.stat.priority).into()
+    }
 }
 
 #[inline(always)]
 fn to_symbol(s: ElfSym) -> Symbol {
-    let flags = if s.is_function() { SymbolFlags::FUNCTION } else { SymbolFlags::NONE };
-    Symbol { offset: s.st_value as u32, name: s.name.into(), flags: flags.bits(), len: s.st_size as u32, type_id: 0 }
+    let flags = if s.is_function() {
+        SymbolFlags::FUNCTION
+    } else {
+        SymbolFlags::NONE
+    };
+    Symbol {
+        offset: s.st_value as u32,
+        name: s.name.into(),
+        flags: flags.bits(),
+        len: s.st_size as u32,
+        type_id: 0,
+    }
 }
 
 impl SymbolsData {
@@ -79,8 +99,12 @@ impl SymbolsData {
         let map = util::mapfile(path.as_ref()).ok_or("map failed")?;
         let e = elf::parse(&map).ok_or("parse failed")?;
         let mut push_symbol = |s: ElfSym| {
-            if s.name.starts_with("$x.") { return; }
-            self.exports.entry(s.offset()).or_insert_with(|| to_symbol(s));
+            if s.name.starts_with("$x.") {
+                return;
+            }
+            self.exports
+                .entry(s.offset())
+                .or_insert_with(|| to_symbol(s));
         };
         e.enum_symbol().for_each(&mut push_symbol);
         e.enum_export().for_each(&mut push_symbol);
@@ -136,7 +160,9 @@ impl CommonAdaptor {
         base.pid.set(ps.pid());
         base.image_path = ps.image_path().unwrap_or_default();
         Self {
-            base, ps, regs: unsafe { zeroed() },
+            base,
+            ps,
+            regs: unsafe { zeroed() },
             bp_map: RwLock::new(HashMap::new()),
             symgr: SymbolManager::<NixModule>::new("".into()),
             tc_module: TimeCheck::new(Duration::from_secs(10)),
@@ -144,7 +170,8 @@ impl CommonAdaptor {
             mem_pages: RwLock::new(Vec::new()),
             threads: RwLock::new(HashSet::new()),
             trace_opts,
-            waiting: Cell::new(false), detaching: Cell::new(false),
+            waiting: Cell::new(false),
+            detaching: Cell::new(false),
         }
     }
 
@@ -154,7 +181,9 @@ impl CommonAdaptor {
     }
 
     fn update_memory_page_check_time(&self) {
-        self.tc_memory.check(|| { self.update_memory_page(); });
+        self.tc_memory.check(|| {
+            self.update_memory_page();
+        });
     }
 
     // fn update_thread(&self) {
@@ -176,27 +205,36 @@ impl CommonAdaptor {
         if tv.len() < te.len() && !base.contains(tv) {
             return tv;
         }
-        if !base.contains(te) { return te; }
+        if !base.contains(te) {
+            return te;
+        }
         let te = trim_lastext(name);
-        if !base.contains(te) { return te; }
+        if !base.contains(te) {
+            return te;
+        }
         name
     }
 
     fn update_module(&self) -> Result<(), String> {
         use goblin::elf::header::header32::Header as Header32;
         use goblin::elf::header::header64::Header as Header64;
-        use std::io::Read;
         use std::fs::File;
+        use std::io::Read;
 
         // self.md.write().clear();
         for m in self.ps.enum_module()? {
-            if self.find_module(m.base).is_some() ||
-                m.name.ends_with(".oat") || m.name.ends_with(".apk") { continue; }
+            if self.find_module(m.base).is_some()
+                || m.name.ends_with(".oat")
+                || m.name.ends_with(".apk")
+            {
+                continue;
+            }
             let name = self.module_name(&m.name);
 
             // TODO: use memory data
             let mut f = match File::open(m.path.as_ref()) {
-                Ok(f) => f, Err(_) => {
+                Ok(f) => f,
+                Err(_) => {
                     error!("open module file: {}", m.path);
                     continue;
                 }
@@ -206,9 +244,10 @@ impl CommonAdaptor {
                 error!("read file: {}", m.path);
                 continue;
             }
-            
+
             let arch = match elf::machine_to_arch(buf.e_machine) {
-                Some(a) => a, None => {
+                Some(a) => a,
+                None => {
                     error!("error e_machine: {} {}", buf.e_machine, m.path);
                     continue;
                 }
@@ -216,16 +255,21 @@ impl CommonAdaptor {
 
             let entry = match arch {
                 "arm64" | "x86_64" => buf.e_entry as usize,
-                "x86" | "arm" => unsafe { transmute::<_, &Header32>(&buf).e_entry as usize }
-                a => { error!("error arch: {}", a); continue; }
+                "x86" | "arm" => unsafe { transmute::<_, &Header32>(&buf).e_entry as usize },
+                a => {
+                    error!("error arch: {}", a);
+                    continue;
+                }
             };
 
             let base = m.base;
             let path = m.path.clone();
             self.symgr.base.write().add(NixModule {
                 data: ModuleData {
-                    base, size: m.size,
-                    arch, entry,
+                    base,
+                    size: m.size,
+                    arch,
+                    entry,
                     user_module: false.into(),
                     name: name.into(),
                     path: path.clone(),
@@ -260,9 +304,11 @@ impl CommonAdaptor {
                 if written.unwrap_or(0) > 0 {
                     bp.enabled.set(enable);
                     Ok(enable)
-                } else { Err(UDbgError::MemoryError) }
+                } else {
+                    Err(UDbgError::MemoryError)
+                }
             }
-            _ => { Err(UDbgError::NotSupport) }
+            _ => Err(UDbgError::NotSupport),
         }
     }
 
@@ -273,13 +319,19 @@ impl CommonAdaptor {
             let pdata: *mut u8 = transmute(&mut val);
             let mut data = std::slice::from_raw_parts_mut(pdata, size);
             let readed = self.ps.read(address, &mut data);
-            if readed?.len() == size { Some(val) } else { None }
+            if readed?.len() == size {
+                Some(val)
+            } else {
+                None
+            }
         }
     }
 
     fn update_regs(&self, tid: pid_t) {
         if let Some(regs) = self.ps.get_regs(tid) {
-            unsafe { *mutable(&self.regs) = regs; }
+            unsafe {
+                *mutable(&self.regs) = regs;
+            }
         } else {
             error!("get_regs failed: {}", get_last_error_string());
         }
@@ -288,7 +340,9 @@ impl CommonAdaptor {
     fn set_regs(&self) -> UDbgResult<()> {
         if !ptrace_setregs(self.base.event_tid.get(), &self.regs) {
             Err(UDbgError::system())
-        } else { Ok(()) }
+        } else {
+            Ok(())
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -339,33 +393,39 @@ impl CommonAdaptor {
         self.base.status.set(UDbgStatus::Running);
         self.waiting.set(true);
         let mut status = 0;
-        let tid = unsafe {
-            libc::waitpid(-1, &mut status, __WALL | WUNTRACED)
-        };
+        let tid = unsafe { libc::waitpid(-1, &mut status, __WALL | WUNTRACED) };
         // let status = ::nix::sys::wait::waitpid(None, WaitPidFlag::__WALL | WaitPidFlag::__WNOTHREAD | WaitPidFlag::WNOHANG).unwrap();
         self.waiting.set(false);
         self.base.event_tid.set(tid);
         self.base.status.set(UDbgStatus::Paused);
 
-        if tid <= 0 { return None; }
+        if tid <= 0 {
+            return None;
+        }
 
         let status = WaitStatus::from_raw(Pid::from_raw(tid), status).unwrap();
         println!("[status] {status:?}");
         Some(status)
     }
 
-    fn handle_event(&self, tb: &mut TraceBuf) {
+    fn handle_event(&self, tb: &mut TraceBuf) {}
 
-    }
-
-    fn handle_reply(&self, this: &dyn UDbgAdaptor, mut reply: UserReply, tid: pid_t, bpid: Option<BpID>) -> UserReply {
+    fn handle_reply(
+        &self,
+        this: &dyn UDbgAdaptor,
+        mut reply: UserReply,
+        tid: pid_t,
+        bpid: Option<BpID>,
+    ) -> UserReply {
         let mut revert = None;
         let ui = udbg_ui();
         if let Some(bpid) = bpid {
-            this.get_bp(bpid).map(|bp| if bp.enabled() {
-                // Disable breakpoint temporarily
-                bp.enable(false);
-                revert = Some(bpid);
+            this.get_bp(bpid).map(|bp| {
+                if bp.enabled() {
+                    // Disable breakpoint temporarily
+                    bp.enable(false);
+                    revert = Some(bpid);
+                }
             });
         }
         ptrace_step_and_wait(tid);
@@ -377,42 +437,62 @@ impl CommonAdaptor {
             UserReply::StepOut => {
                 let regs = unsafe { mutable(&self.regs) };
                 temp_address = this.check_call(*regs.ip() as usize);
-                if temp_address.is_none() { reply = UserReply::StepIn; }
+                if temp_address.is_none() {
+                    reply = UserReply::StepIn;
+                }
             }
             UserReply::Goto(a) => {
                 temp_address = Some(a);
             }
-            UserReply::StepIn => {} _ => {}
+            UserReply::StepIn => {}
+            _ => {}
         }
 
         if let Some(address) = temp_address {
             this.add_bp(BpOpt::int3(address).enable(true).temp(true));
         }
 
-        self.update_regs(tid); reply
+        self.update_regs(tid);
+        reply
     }
 
     fn get_bp_(&self, id: BpID) -> Option<Arc<Breakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
 
-    pub fn handle_breakpoint(&self, this: &dyn UDbgAdaptor, tid: pid_t, info: &siginfo_t, bp: Arc<Breakpoint>, callback: &mut UDbgCallback) {
+    pub fn handle_breakpoint(
+        &self,
+        this: &dyn UDbgAdaptor,
+        tid: pid_t,
+        info: &siginfo_t,
+        bp: Arc<Breakpoint>,
+        callback: &mut UDbgCallback,
+    ) {
         bp.hit_count.set(bp.hit_count.get() + 1);
         let regs = unsafe { mutable(&self.regs) };
-        if bp.temp.get() { bp.remove(); }
-        let mut reply = self.handle_reply(this, callback(UEvent::Breakpoint(bp.clone())), tid, Some(bp.get_id()));
+        if bp.temp.get() {
+            bp.remove();
+        }
+        let mut reply = self.handle_reply(
+            this,
+            callback(UEvent::Breakpoint(bp.clone())),
+            tid,
+            Some(bp.get_id()),
+        );
         while reply == UserReply::StepIn {
             reply = self.handle_reply(this, callback(UEvent::Step), tid, None);
         }
     }
 
     pub fn attach_and_stop(&self, tid: tid_t) -> bool {
-        ptrace_attach(tid)      // will cause Stopped(Signal::SIGSTOP)
-        // ptrace_seize(tid, self.trace_opts) &&
-        // ptrace_interrupt(tid)   // will cause PTRACE_EVENT_STOP
+        ptrace_attach(tid) // will cause Stopped(Signal::SIGSTOP)
+                           // ptrace_seize(tid, self.trace_opts) &&
+                           // ptrace_interrupt(tid)   // will cause PTRACE_EVENT_STOP
     }
 
-    fn enum_module<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=Arc<dyn UDbgModule+'a>>+'a>> {
+    fn enum_module<'a>(
+        &'a self,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
         self.update_module();
         Ok(self.symgr.enum_module())
     }
@@ -423,46 +503,67 @@ impl CommonAdaptor {
     }
 
     fn get_memory_map(&self) -> Vec<UiMemory> {
-        self.enum_memory().unwrap().map(|m| {
-            let mut flags = 0u32;
-            if m.usage.as_ref() == "[heap]" {
-                flags |= MF_HEAP;
-            }
-            if m.usage.as_ref() == "[stack]" {
-                flags |= MF_STACK;
-            }
-            UiMemory {
-                base: m.base, size: m.size, flags,
-                type_: m.type_str().into(),
-                protect: m.protect().into(),
-                usage: m.usage.clone(),
-            }
-        }).collect::<Vec<_>>()
+        self.enum_memory()
+            .unwrap()
+            .map(|m| {
+                let mut flags = 0u32;
+                if m.usage.as_ref() == "[heap]" {
+                    flags |= MF_HEAP;
+                }
+                if m.usage.as_ref() == "[stack]" {
+                    flags |= MF_STACK;
+                }
+                UiMemory {
+                    base: m.base,
+                    size: m.size,
+                    flags,
+                    type_: m.type_str().into(),
+                    protect: m.protect().into(),
+                    usage: m.usage.clone(),
+                }
+            })
+            .collect::<Vec<_>>()
     }
 
     fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = UiHandle> + 'a>, UDbgError> {
         use std::os::unix::fs::FileTypeExt;
 
-        Ok(Box::new(process_fd(self.ps.pid).ok_or(UDbgError::system())?.map(|(id, path)| {
-            let ps = path.to_str().unwrap_or("");
-            let ts = path.metadata().map(|m| {
-                let ft = m.file_type();
-                if ft.is_fifo() { "FIFO" }
-                else if ft.is_socket() { "Socket" }
-                else if ft.is_block_device() { "Block" }
-                else { "File" }
-            }).unwrap_or_else(|_|
-                if ps.starts_with("socket:") { "Socket" }
-                else if ps.starts_with("pipe:") { "Pipe" }
-                else { "" }
-            );
-            UiHandle {
-                ty: 0,
-                handle: id,
-                type_name: ts.to_string(),
-                name: ps.to_string(),
-            }
-        })))
+        Ok(Box::new(
+            process_fd(self.ps.pid)
+                .ok_or(UDbgError::system())?
+                .map(|(id, path)| {
+                    let ps = path.to_str().unwrap_or("");
+                    let ts = path
+                        .metadata()
+                        .map(|m| {
+                            let ft = m.file_type();
+                            if ft.is_fifo() {
+                                "FIFO"
+                            } else if ft.is_socket() {
+                                "Socket"
+                            } else if ft.is_block_device() {
+                                "Block"
+                            } else {
+                                "File"
+                            }
+                        })
+                        .unwrap_or_else(|_| {
+                            if ps.starts_with("socket:") {
+                                "Socket"
+                            } else if ps.starts_with("pipe:") {
+                                "Pipe"
+                            } else {
+                                ""
+                            }
+                        });
+                    UiHandle {
+                        ty: 0,
+                        handle: id,
+                        type_name: ts.to_string(),
+                        name: ps.to_string(),
+                    }
+                }),
+        ))
     }
 
     fn get_regs(&self) -> UDbgResult<Registers> {
@@ -605,8 +706,12 @@ pub struct TraceBuf<'a> {
 }
 
 fn trim_ver(name: &str) -> &str {
-    use ::regex::Regex;
-    &name[..Regex::new(r"-\d").unwrap().find(name).map(|p| p.start()).unwrap_or(name.len())]
+    use regex::Regex;
+    &name[..Regex::new(r"-\d")
+        .unwrap()
+        .find(name)
+        .map(|p| p.start())
+        .unwrap_or(name.len())]
 }
 
 #[inline]
@@ -641,7 +746,7 @@ pub fn ptrace_step_and_wait(tid: pid_t) -> bool {
             error!("step unexpect tid: {}", t.0);
             false
         }
-        None => false
+        None => false,
     }
 }
 
@@ -659,7 +764,10 @@ impl StandardAdaptor {
                 0 => {
                     ptrace(PTRACE_TRACEME, 0, 0, 0);
                     let path = CString::new(path).unwrap();
-                    let args = args.iter().map(|&arg| CString::new(arg).unwrap()).collect::<Vec<_>>();
+                    let args = args
+                        .iter()
+                        .map(|&arg| CString::new(arg).unwrap())
+                        .collect::<Vec<_>>();
                     let mut argv = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
                     argv.insert(0, path.as_ptr());
                     argv.push(core::ptr::null());
@@ -693,7 +801,9 @@ impl StandardAdaptor {
             if threads.is_empty() {
                 callback(UEvent::ProcessExit(s as u32));
                 true
-            } else { false }
+            } else {
+                false
+            }
         } else {
             udbg_ui().error(&format!("tid {} not found", tid));
             // ui.on_pause();
@@ -721,7 +831,9 @@ impl WriteMemory for StandardAdaptor {
 impl GetProp for StandardAdaptor {}
 
 impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase { &self.base }
+    fn base(&self) -> &UDbgBase {
+        &self.base
+    }
 
     fn detach(&self) -> UDbgResult<()> {
         if self.base.is_opened() {
@@ -738,7 +850,11 @@ impl UDbgAdaptor for StandardAdaptor {
     }
 
     fn kill(&self) -> UDbgResult<()> {
-        if unsafe { kill(self.ps.pid, SIGKILL) } == 0 { Ok(()) } else { Err(UDbgError::system()) }
+        if unsafe { kill(self.ps.pid, SIGKILL) } == 0 {
+            Ok(())
+        } else {
+            Err(UDbgError::system())
+        }
     }
 
     fn breakk(&self) -> UDbgResult<()> {
@@ -752,15 +868,18 @@ impl UDbgAdaptor for StandardAdaptor {
         // }
         // return Err(UDbgError::system());
         match unsafe { kill(self.ps.pid, SIGSTOP) } {
-            0 => Ok(()), code => Err(UDbgError::system())
+            0 => Ok(()),
+            code => Err(UDbgError::system()),
         }
     }
 
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=tid_t>+'a>> {
+    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
         Ok(Box::new(self.ps.enum_thread()))
     }
 
-    fn enum_module<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=Arc<dyn UDbgModule+'a>>+'a>> {
+    fn enum_module<'a>(
+        &'a self,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
         self.0.enum_module()
     }
 
@@ -799,7 +918,9 @@ impl UDbgAdaptor for StandardAdaptor {
 
     fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         self.base.check_opened()?;
-        if self.bp_exists(opt.address as BpID) { return Err(UDbgError::BpExists); }
+        if self.bp_exists(opt.address as BpID) {
+            return Err(UDbgError::BpExists);
+        }
 
         let enable = opt.enable;
         let result = if let Some(rw) = opt.rw {
@@ -814,16 +935,23 @@ impl UDbgAdaptor for StandardAdaptor {
                     hit_count: Cell::new(0),
                     bp_type: InnerBpType::Soft(origin),
 
-                    target: to_weak(self),
+                    target: unsafe { to_weak(self) },
                     common: &self.0,
                 };
                 let bp = Arc::new(bp);
                 self.bp_map.write().insert(bp.get_id(), bp.clone());
                 Ok(bp)
-            } else { Err(UDbgError::InvalidAddress) }
+            } else {
+                Err(UDbgError::InvalidAddress)
+            }
         };
 
-        Ok(result.map(|bp| { if enable { bp.enable(true); } bp})?)
+        Ok(result.map(|bp| {
+            if enable {
+                bp.enable(true);
+            }
+            bp
+        })?)
     }
 
     fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
@@ -840,8 +968,8 @@ impl UDbgAdaptor for StandardAdaptor {
 
     fn open_thread(&self, tid: tid_t) -> Result<Box<dyn UDbgThread>, UDbgError> {
         Ok(Box::new(NixThread {
-            base: ThreadData {tid, wow64: false},
-            stat: ThreadStat::from(self.ps.pid, tid).ok_or(UDbgError::system())?
+            base: ThreadData { tid, wow64: false },
+            stat: ThreadStat::from(self.ps.pid, tid).ok_or(UDbgError::system())?,
         }))
     }
 
@@ -861,10 +989,10 @@ impl UDbgAdaptor for StandardAdaptor {
 
     fn event_loop<'a>(&self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
         use UEvent::*;
-    
+
         self.update_module();
         self.update_memory_page();
-    
+
         if self.base.is_opened() {
             use std::time::Duration;
             while self.base.status.get() != UDbgStatus::Ended {
@@ -872,213 +1000,231 @@ impl UDbgAdaptor for StandardAdaptor {
             }
             return Ok(());
         }
-    
+
         let base = &self.base;
         let ui = udbg_ui();
         let mut inited = false;
         let INVALID_SIGNAL_NUMBER: Signal = unsafe { core::mem::transmute_copy(&-1) };
-    
-        loop {unsafe {
-            let mut status: c_int = 0;
-            
-            // http://man7.org/linux/man-pages/man2/waitpid.2.html
-            self.base.status.set(UDbgStatus::Running);
-            self.waiting.set(true);
-            let tid = libc::waitpid(-1, &mut status, __WALL | WUNTRACED);
-            // let status = ::nix::sys::wait::waitpid(None, WaitPidFlag::__WALL | WaitPidFlag::__WNOTHREAD | WaitPidFlag::WNOHANG).unwrap();
-            self.waiting.set(false);
-            if tid <= 0 { break; }
-            
-            self.base.event_tid.set(tid);
-            base.status.set(UDbgStatus::Paused);
-            
-            let status = WaitStatus::from_raw(Pid::from_raw(tid), status).unwrap();
-            println!("[status] {status:?}");
-    
-            let insert_thread = |tid| {
-                if self.threads.write().insert(tid) {
-                    if !ptrace_setopt(tid, self.trace_opts) {
-                        ui.error(&format!("ptrace_setopt {} {}", tid, get_last_error_string()));
-                    }
-                    return true;
+
+        loop {
+            unsafe {
+                let mut status: c_int = 0;
+
+                // http://man7.org/linux/man-pages/man2/waitpid.2.html
+                self.base.status.set(UDbgStatus::Running);
+                self.waiting.set(true);
+                let tid = libc::waitpid(-1, &mut status, __WALL | WUNTRACED);
+                // let status = ::nix::sys::wait::waitpid(None, WaitPidFlag::__WALL | WaitPidFlag::__WNOTHREAD | WaitPidFlag::WNOHANG).unwrap();
+                self.waiting.set(false);
+                if tid <= 0 {
+                    break;
                 }
-                self.detaching.get()
-            };
-            let mut handle_initbp = || {
-                callback(InitBp);
-                insert_thread(tid);
-                true
-            };
-    
-            let mut cont_sig = 0;
-            if match status {
-                WaitStatus::Stopped(_, sig) => loop {
-                    self.update_regs(tid);
-                    let regs = mutable(&self.regs);
-                    if !inited && matches!(sig, Signal::SIGSTOP | Signal::SIGTRAP) {
-                        inited = handle_initbp();
+
+                self.base.event_tid.set(tid);
+                base.status.set(UDbgStatus::Paused);
+
+                let status = WaitStatus::from_raw(Pid::from_raw(tid), status).unwrap();
+                println!("[status] {status:?}");
+
+                let insert_thread = |tid| {
+                    if self.threads.write().insert(tid) {
+                        if !ptrace_setopt(tid, self.trace_opts) {
+                            ui.error(&format!(
+                                "ptrace_setopt {} {}",
+                                tid,
+                                get_last_error_string()
+                            ));
+                        }
+                        return true;
+                    }
+                    self.detaching.get()
+                };
+                let mut handle_initbp = || {
+                    callback(InitBp);
+                    insert_thread(tid);
+                    true
+                };
+
+                let mut cont_sig = 0;
+                if match status {
+                    WaitStatus::Stopped(_, sig) => loop {
+                        self.update_regs(tid);
+                        let regs = mutable(&self.regs);
+                        if !inited && matches!(sig, Signal::SIGSTOP | Signal::SIGTRAP) {
+                            inited = handle_initbp();
+                            break false;
+                        }
+                        match sig {
+                            // maybe thread created (by ptrace_attach or ptrace_interrupt)
+                            // maybe kill by SIGSTOP
+                            Signal::SIGSTOP => {
+                                if self.threads.read().get(&tid).is_none() {
+                                    insert_thread(tid);
+                                    break false;
+                                }
+                            }
+                            Signal::SIGTRAP | Signal::SIGILL => {
+                                let si = ::nix::sys::ptrace::getsiginfo(Pid::from_raw(tid))
+                                    .expect("siginfo");
+                                // let info = self.ps.siginfo(tid).expect("siginfo");
+                                println!("stop info: {si:?}, pc: {:p}", si.si_addr());
+                                // match info.si_code {
+                                //     TRAP_BRKPT => println!("info.si_code TRAP_BRKPT"),
+                                //     TRAP_HWBKPT => println!("info.si_code TRAP_HWBKPT"),
+                                //     TRAP_TRACE => println!("info.si_code TRAP_TRACE"),
+                                //     code => println!("info.si_code {}", code),
+                                // };
+                                let ip = *regs.ip();
+                                let address = if sig == Signal::SIGTRAP && ip > 0 {
+                                    ip - 1
+                                } else {
+                                    ip
+                                };
+                                *regs.ip() = address;
+                                // println!("sigtrap address {:x}", address);
+                                if let Some(bp) = self.get_bp_(address as BpID) {
+                                    self.handle_breakpoint(self, tid, &si, bp, callback);
+                                    break false;
+                                }
+                            }
+                            _ => {}
+                        }
+                        cont_sig = sig as _;
+                        callback(UEvent::Exception {
+                            first: true,
+                            code: sig as _,
+                        });
                         break false;
-                    }
-                    match sig {
-                        // maybe thread created (by ptrace_attach or ptrace_interrupt)
-                        // maybe kill by SIGSTOP
-                        Signal::SIGSTOP => {
-                            if self.threads.read().get(&tid).is_none() {
+                    },
+                    WaitStatus::PtraceEvent(_, sig, code) => {
+                        match code {
+                            PTRACE_EVENT_STOP => {
                                 insert_thread(tid);
-                                break false;
+                                if !inited && tid == self.ps.pid {
+                                    inited = handle_initbp();
+                                }
                             }
-                        }
-                        Signal::SIGTRAP | Signal::SIGILL => {
-                            let si = ::nix::sys::ptrace::getsiginfo(Pid::from_raw(tid)).expect("siginfo");
-                            // let info = self.ps.siginfo(tid).expect("siginfo");
-                            println!("stop info: {si:?}, pc: {:p}", si.si_addr());
-                            // match info.si_code {
-                            //     TRAP_BRKPT => println!("info.si_code TRAP_BRKPT"),
-                            //     TRAP_HWBKPT => println!("info.si_code TRAP_HWBKPT"),
-                            //     TRAP_TRACE => println!("info.si_code TRAP_TRACE"),
-                            //     code => println!("info.si_code {}", code),
-                            // };
-                            let ip = *regs.ip();
-                            let address = if sig == Signal::SIGTRAP && ip > 0 { ip - 1 } else { ip };
-                            *regs.ip() = address;
-                            // println!("sigtrap address {:x}", address);
-                            if let Some(bp) = self.get_bp_(address as BpID) {
-                                self.handle_breakpoint(self, tid, &si, bp, callback);
-                                break false;
+                            PTRACE_EVENT_CLONE => {
+                                let mut new_tid: tid_t = 0;
+                                ptrace_getevtmsg(tid, &mut new_tid);
+                                callback(ThreadCreate(new_tid));
+                                self.attach_and_stop(new_tid);
                             }
+                            PTRACE_EVENT_FORK => {}
+                            _ => {}
                         }
-                        _ => {}
+                        false
                     }
-                    cont_sig = sig as _;
-                    callback(UEvent::Exception {first: true, code: sig as _});
-                    break false;
-                }
-                WaitStatus::PtraceEvent(_, sig, code) => {
-                    match code {
-                        PTRACE_EVENT_STOP => {
-                            insert_thread(tid);
-                            if !inited && tid == self.ps.pid {
-                                inited = handle_initbp();
-                            }
+                    // exited with exception
+                    WaitStatus::Signaled(_, sig, coredump) => {
+                        cont_sig = sig as _;
+                        callback(UEvent::Exception {
+                            first: false,
+                            code: sig as _,
+                        });
+                        if !matches!(sig, Signal::SIGSTOP) {
+                            self.remove_thread(tid, -1, callback)
+                        } else {
+                            false
                         }
-                        PTRACE_EVENT_CLONE => {
-                            let mut new_tid: tid_t = 0;
-                            ptrace_getevtmsg(tid, &mut new_tid);
-                            callback(ThreadCreate(new_tid));
-                            self.attach_and_stop(new_tid);
-                        }
-                        PTRACE_EVENT_FORK => {
-                        }
-                        _ => {}
                     }
-                    false
+                    // exited normally
+                    WaitStatus::Exited(_, code) => self.remove_thread(tid, code, callback),
+                    _ => unreachable!("status: {status:?}"),
+                } {
+                    println!("breaking...");
+                    break;
                 }
-                // exited with exception
-                WaitStatus::Signaled(_, sig, coredump) => {
-                    cont_sig = sig as _;
-                    callback(UEvent::Exception {first: false, code: sig as _});
-                    if !matches!(sig, Signal::SIGSTOP) {
-                        self.remove_thread(tid, -1, callback)
-                    } else { false }
+
+                // if WIFSTOPPED(status) {
+                //     this.update_regs(tid);
+                //     let regs = mutable(&this.regs);
+                //     // ui.on_info(&format!("WIFSTOPPED {} status: {:x}", tid, status));
+                //     let event = (status >> 16) & 0xffff;
+                //     let sig = WSTOPSIG(status);
+                //     // https://www.mkssoftware.com/docs/man5/siginfo_t.5.asp#Signal_Codes
+
+                //     match (event, sig) {
+                //         // Stop before return from clone(2).
+                //         (PTRACE_EVENT_CLONE, _) => {
+                //             let mut new_tid: tid_t = 0;
+                //             ptrace_getevtmsg(tid, &mut new_tid);
+                //             this.base.event_tid.set(new_tid);   // TODO: new_tid
+                //             state.on(ThreadCreate).await;
+                //             ptrace_attach(new_tid);
+                //             handle_thread(new_tid);
+                //         }
+                //         // Stop before return from execve(2)
+                //         (PTRACE_EVENT_EXEC, _) => {
+                //             // TODO:
+                //             // let mut new_tid: tid_t = 0;
+                //             // ptrace_getevtmsg(tid, &mut new_tid);
+                //             // ui.check_event_pause(new_tid, c_str!("on_event_exec"));
+                //             info!("PTRACE_EVENT_EXEC");
+                //             if sig == SIGTRAP && !init {
+                //                 init = true;
+                //                 state.on(InitBp).await;
+                //             }
+                //         }
+                //         // Stop before return from fork(2) or clone(2) with the exit sig‐nal set to SIGCHLD
+                //         (PTRACE_EVENT_FORK, _) => {
+                //             // TODO:
+                //             // let mut new_tid: tid_t = 0;
+                //             // ptrace_getevtmsg(tid, &mut new_tid);
+                //             // ui.check_event_pause(new_tid, c_str!("on_event_fork"));
+                //         }
+                //         // Stop before return from vfork(2) or clone(2) with the CLONE_VFORK flag
+                //         (PTRACE_EVENT_VFORK, _) => {
+                //             // TODO:
+                //             // let mut new_tid: tid_t = 0;
+                //             // ptrace_getevtmsg(tid, &mut new_tid);
+                //             // ui.check_event_pause(new_tid, c_str!("on_event_vfork"));
+                //         }
+                //         (PTRACE_EVENT_VFORK_DONE, _) => {
+                //             // TODO:
+                //             // let mut new_tid: tid_t = 0;
+                //             // ptrace_getevtmsg(tid, &mut new_tid);
+                //             // ui.check_event_pause(new_tid, c_str!("on_event_vfork_done"));
+                //         }
+                //         // Stop before exit
+                //         (PTRACE_EVENT_EXIT, _) => {
+                //             // TODO:
+                //             // let mut status: c_int = 0;
+                //             // ptrace_getevtmsg(tid, &mut status);
+                //             // ui.check_event_pause(status, c_str!("on_event_exit"));
+                //         }
+                //         // Stop induced by PTRACE_INTERRUPT command, or group-stop, or
+                //         //   initial ptrace-stop when a new child is attached (only if attached using PTRACE_SEIZE)
+                //         (PTRACE_EVENT_STOP, _) => {
+                //             if sig == SIGTRAP {
+                //                 if !init {
+                //                     init = true;
+                //                     state.on(InitBp).await;
+                //                 }
+                //                 handle_thread(tid);
+                //                 // nothing
+                //             } else {
+                //                 let not_except = sig == SIGSTOP && this.detaching.get();
+                //                 if !not_except {
+                //                     // TODO:
+                //                     // ui.check_event_pause((tid, sig), c_str!("on_event_stop"));
+                //                 }
+                //             }
+                //         }
+                ptrace_cont(tid, cont_sig as _);
+                if self.detaching.get() {
+                    for bp in self.get_breakpoints() {
+                        bp.remove();
+                    }
+                    for &tid in self.threads.read().iter() {
+                        if !ptrace_detach(tid) {
+                            error!("ptrace_detach({tid}) failed");
+                        }
+                    }
+                    break;
                 }
-                // exited normally
-                WaitStatus::Exited(_, code) => {
-                    self.remove_thread(tid, code, callback)
-                }
-                _ => unreachable!("status: {status:?}"),
-            } {
-                println!("breaking...");
-                break;
             }
-    
-            // if WIFSTOPPED(status) {
-            //     this.update_regs(tid);
-            //     let regs = mutable(&this.regs);
-            //     // ui.on_info(&format!("WIFSTOPPED {} status: {:x}", tid, status));
-            //     let event = (status >> 16) & 0xffff;
-            //     let sig = WSTOPSIG(status);
-            //     // https://www.mkssoftware.com/docs/man5/siginfo_t.5.asp#Signal_Codes
-    
-            //     match (event, sig) {
-            //         // Stop before return from clone(2).
-            //         (PTRACE_EVENT_CLONE, _) => {
-            //             let mut new_tid: tid_t = 0;
-            //             ptrace_getevtmsg(tid, &mut new_tid);
-            //             this.base.event_tid.set(new_tid);   // TODO: new_tid
-            //             state.on(ThreadCreate).await;
-            //             ptrace_attach(new_tid);
-            //             handle_thread(new_tid);
-            //         }
-            //         // Stop before return from execve(2)
-            //         (PTRACE_EVENT_EXEC, _) => {
-            //             // TODO:
-            //             // let mut new_tid: tid_t = 0;
-            //             // ptrace_getevtmsg(tid, &mut new_tid);
-            //             // ui.check_event_pause(new_tid, c_str!("on_event_exec"));
-            //             info!("PTRACE_EVENT_EXEC");
-            //             if sig == SIGTRAP && !init {
-            //                 init = true;
-            //                 state.on(InitBp).await;
-            //             }
-            //         }
-            //         // Stop before return from fork(2) or clone(2) with the exit sig‐nal set to SIGCHLD
-            //         (PTRACE_EVENT_FORK, _) => {
-            //             // TODO:
-            //             // let mut new_tid: tid_t = 0;
-            //             // ptrace_getevtmsg(tid, &mut new_tid);
-            //             // ui.check_event_pause(new_tid, c_str!("on_event_fork"));
-            //         }
-            //         // Stop before return from vfork(2) or clone(2) with the CLONE_VFORK flag
-            //         (PTRACE_EVENT_VFORK, _) => {
-            //             // TODO:
-            //             // let mut new_tid: tid_t = 0;
-            //             // ptrace_getevtmsg(tid, &mut new_tid);
-            //             // ui.check_event_pause(new_tid, c_str!("on_event_vfork"));
-            //         }
-            //         (PTRACE_EVENT_VFORK_DONE, _) => {
-            //             // TODO:
-            //             // let mut new_tid: tid_t = 0;
-            //             // ptrace_getevtmsg(tid, &mut new_tid);
-            //             // ui.check_event_pause(new_tid, c_str!("on_event_vfork_done"));
-            //         }
-            //         // Stop before exit
-            //         (PTRACE_EVENT_EXIT, _) => {
-            //             // TODO:
-            //             // let mut status: c_int = 0;
-            //             // ptrace_getevtmsg(tid, &mut status);
-            //             // ui.check_event_pause(status, c_str!("on_event_exit"));
-            //         }
-            //         // Stop induced by PTRACE_INTERRUPT command, or group-stop, or
-            //         //   initial ptrace-stop when a new child is attached (only if attached using PTRACE_SEIZE)
-            //         (PTRACE_EVENT_STOP, _) => {
-            //             if sig == SIGTRAP {
-            //                 if !init {
-            //                     init = true;
-            //                     state.on(InitBp).await;
-            //                 }
-            //                 handle_thread(tid);
-            //                 // nothing
-            //             } else {
-            //                 let not_except = sig == SIGSTOP && this.detaching.get();
-            //                 if !not_except {
-            //                     // TODO:
-            //                     // ui.check_event_pause((tid, sig), c_str!("on_event_stop"));
-            //                 }
-            //             }
-            //         }
-            ptrace_cont(tid, cont_sig as _);
-            if self.detaching.get() {
-                for bp in self.get_breakpoints() {
-                    bp.remove();
-                }
-                for &tid in self.threads.read().iter() {
-                    if !ptrace_detach(tid) {
-                        error!("ptrace_detach({tid}) failed");
-                    }
-                }
-                break;
-            }
-        }}
+        }
         Ok(())
     }
 }
@@ -1099,8 +1245,14 @@ impl UDbgEngine for DefaultEngine {
         }
         Ok(this)
     }
-    
-    fn create(&self, base: UDbgBase, path: &str, cwd: Option<&str>, args: &[&str]) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+
+    fn create(
+        &self,
+        base: UDbgBase,
+        path: &str,
+        cwd: Option<&str>,
+        args: &[&str],
+    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         Ok(StandardAdaptor::create(base, path, args)?)
     }
 }

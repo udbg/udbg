@@ -1,11 +1,14 @@
+//!
+//! Utilities for accessing symbols in pdb file
+//!
 
-use pdb::{FallibleIterator, ItemIter, MemberType, PDB, SymbolData, TypeData, TypeIndex};
+use pdb::{FallibleIterator, ItemIter, MemberType, SymbolData, TypeData, TypeIndex, PDB};
 
+use spin::Mutex;
 use std::fs::File;
 use std::sync::Arc;
-use spin::Mutex;
 
-use crate::{*, sym::*};
+use crate::{pe, prelude::*, shell::udbg_ui};
 
 fn to_field_info(m: MemberType) -> FieldInfo {
     FieldInfo {
@@ -24,17 +27,23 @@ pub struct PdbFile {
 
 impl PdbFile {
     pub fn load(path: &str, pe: Option<&pe::PeHelper>) -> Result<Self, String> {
-        let mut db = Box::new(pdb::PDB::open(
-            File::open(path).map_err(|e| format!("open file {}: {:}", path, e))?
-        ).map_err(|e| format!("open pdb {}: {:?}", path, e))?);
+        let mut db = Box::new(
+            pdb::PDB::open(File::open(path).map_err(|e| format!("open file {}: {:}", path, e))?)
+                .map_err(|e| format!("open pdb {}: {:?}", path, e))?,
+        );
         let pi = db.pdb_information().map_err(|_| "PDBInformation")?;
         if let Some(pe) = pe {
-            if !pe.debug_data.and_then(|d| d.codeview_pdb70_debug_info).map(|d| unsafe {
-                let g1 = core::mem::transmute::<_, guid::GUID>(d.signature);
-                let (d1, d2, d3, d4) = pi.guid.as_fields();
-                // println!("{:x?} {:x?} {} {}", d.signature, pi.guid.as_bytes(), pi.age, d.age);
-                g1.data1() == d1 && g1.data2() == d2 && g1.data3() == d3 && g1.data4().eq(d4)
-            }).unwrap_or(true) {
+            if !pe
+                .debug_data
+                .and_then(|d| d.codeview_pdb70_debug_info)
+                .map(|d| unsafe {
+                    let g1 = core::mem::transmute::<_, guid::GUID>(d.signature);
+                    let (d1, d2, d3, d4) = pi.guid.as_fields();
+                    // println!("{:x?} {:x?} {} {}", d.signature, pi.guid.as_bytes(), pi.age, d.age);
+                    g1.data1() == d1 && g1.data2() == d2 && g1.data3() == d3 && g1.data4().eq(d4)
+                })
+                .unwrap_or(true)
+            {
                 return Err("Signature not matched".into());
             }
         }
@@ -44,14 +53,20 @@ impl PdbFile {
         unsafe {
             let finder = pti.as_ref().unwrap().finder();
             // let ii = db.id_information().map_err(|_| "IdInformation")?;
-            Ok(Self {db, ti, finder: core::mem::transmute(finder)})
+            Ok(Self {
+                db,
+                ti,
+                finder: core::mem::transmute(finder),
+            })
         }
     }
 
     pub fn global(&mut self) -> Result<Syms, String> {
         let pdb = &mut self.db;
         let address_map = pdb.address_map().map_err(|_| "address_map failed")?;
-        let dbi = pdb.debug_information().map_err(|_| "debug_information failed")?;
+        let dbi = pdb
+            .debug_information()
+            .map_err(|_| "debug_information failed")?;
         let mut modules = dbi.modules().map_err(|_| "get modules failed")?;
 
         let mut result = Syms::new();
@@ -61,29 +76,38 @@ impl PdbFile {
                     let rva = p.offset.to_rva(&address_map).unwrap_or_default().0;
                     // println!("0x{:x} {}", rva, p.name);
                     let mut flags = SymbolFlags::NONE;
-                    if p.function { flags |= SymbolFlags::FUNCTION; }
+                    if p.function {
+                        flags |= SymbolFlags::FUNCTION;
+                    }
                     result.entry(rva as usize).or_insert_with(|| Symbol {
-                        offset: rva, name: p.name.to_string().into(),
-                        type_id: 0, flags: flags.bits(), len: SYM_NOLEN
+                        offset: rva,
+                        name: p.name.to_string().into(),
+                        type_id: 0,
+                        flags: flags.bits(),
+                        len: SYM_NOLEN,
                     });
                 }
                 SymbolData::Procedure(p) => {
                     let rva = p.offset.to_rva(&address_map).unwrap_or_default().0;
                     // println!("Proc: {} {} {:x} {:x}", p.name.to_string(), p.global, rva, p.len);
                     result.entry(rva as usize).or_insert_with(|| Symbol {
-                        offset: rva, name: p.name.to_string().into(),
+                        offset: rva,
+                        name: p.name.to_string().into(),
                         type_id: p.type_index.0,
-                        flags: SymbolFlags::FUNCTION.bits(), len: p.len,
+                        flags: SymbolFlags::FUNCTION.bits(),
+                        len: p.len,
                     });
                 }
                 SymbolData::Data(p) => {
                     // if let Err(_) = std::panic::catch_unwind(|| {
-                        let rva = p.offset.to_rva(&address_map).unwrap_or_default().0;
-                        result.entry(rva as usize).or_insert_with(|| Symbol {
-                            offset: rva, name: p.name.to_string().into(),
-                            flags: SymbolFlags::NONE.bits(), len: 0,
-                            type_id: p.type_index.0,
-                        });
+                    let rva = p.offset.to_rva(&address_map).unwrap_or_default().0;
+                    result.entry(rva as usize).or_insert_with(|| Symbol {
+                        offset: rva,
+                        name: p.name.to_string().into(),
+                        flags: SymbolFlags::NONE.bits(),
+                        len: 0,
+                        type_id: p.type_index.0,
+                    });
                     // }) { error!("push_symbol error"); }
                 }
                 _ => {}
@@ -95,7 +119,9 @@ impl PdbFile {
                     while let Ok(Some(symbol)) = syms.next() {
                         symbol.parse().map(|sym| push_symbol(sym)).ok();
                     }
-                } else { error!("get symbols failed: {}", module.module_name()); }
+                } else {
+                    error!("get symbols failed: {}", module.module_name());
+                }
             }
             // println!("module name: {}, object file name: {}", module.module_name(), module.object_file_name());
         }
@@ -110,68 +136,86 @@ impl PdbFile {
 
     pub fn td2ti(&mut self, id: u32, data: TypeData, name: Option<&str>) -> Option<TypeInfo> {
         let (tn, kind) = match data {
-            TypeData::Procedure(p) => {
-                ("".into(), TypeKind::Proc {
-                        args_tid: p.argument_list.0,
-                        return_tid: p.return_type.map(|i| i.0).unwrap_or_default(),
-                    }
-                )
-            }
+            TypeData::Procedure(p) => (
+                "".into(),
+                TypeKind::Proc {
+                    args_tid: p.argument_list.0,
+                    return_tid: p.return_type.map(|i| i.0).unwrap_or_default(),
+                },
+            ),
             TypeData::Class(cls) => {
                 // if cls.fields.is_none() { return None; }
-                (cls.name.to_string(), TypeKind::Class {
-                    fields: cls.fields.map(|x| x.0),
-                    vtable: cls.vtable_shape.map(|x| x.0),
-                    derive: cls.derived_from.map(|x| x.0),
-                    size: cls.size
-                })
+                (
+                    cls.name.to_string(),
+                    TypeKind::Class {
+                        fields: cls.fields.map(|x| x.0),
+                        vtable: cls.vtable_shape.map(|x| x.0),
+                        derive: cls.derived_from.map(|x| x.0),
+                        size: cls.size,
+                    },
+                )
             }
-            TypeData::Nested(n) => {
-                (n.name.to_string(), TypeKind::Nested)
-            }
+            TypeData::Nested(n) => (n.name.to_string(), TypeKind::Nested),
             // TypeData::BaseClass(cls) => {
             //     ("BaseClass".into(), TypeKind::Class {tid: cls.base_class.0.into(), vtable: None, size: 0})
             // }
-            TypeData::Array(a) => {
-                ("".into(), TypeKind::Array {tid: a.element_type.0, dimensions: a.dimensions.clone()})
-            }
-            TypeData::Bitfield(b) => {
-                ("".into(), TypeKind::Bitfield {
+            TypeData::Array(a) => (
+                "".into(),
+                TypeKind::Array {
+                    tid: a.element_type.0,
+                    dimensions: a.dimensions.clone(),
+                },
+            ),
+            TypeData::Bitfield(b) => (
+                "".into(),
+                TypeKind::Bitfield {
                     tid: b.underlying_type.0,
-                    len: b.length, pos: b.position,
-                })
-            }
-            TypeData::Union(cls) => {
-                (cls.name.to_string(), TypeKind::Union)
-            }
+                    len: b.length,
+                    pos: b.position,
+                },
+            ),
+            TypeData::Union(cls) => (cls.name.to_string(), TypeKind::Union),
             // TypeData::Enumerate(cls) => {
             //     (cls.name.to_string(), TypeKind::Enum)
             // }
-            TypeData::Enumeration(cls) => {
-                (cls.name.to_string(), TypeKind::Enum)
+            TypeData::Enumeration(cls) => (cls.name.to_string(), TypeKind::Enum),
+            TypeData::Pointer(pt) => (
+                "".into(),
+                TypeKind::Pointer {
+                    tid: pt.underlying_type.0,
+                },
+            ),
+            TypeData::Primitive(p) => (
+                format!("{:?}", p.kind).into(),
+                TypeKind::Primitive {
+                    pointer: p.indirection.is_some(),
+                },
+            ),
+            TypeData::Modifier(m) => {
+                if name.is_none() {
+                    let id = m.underlying_type.0;
+                    let x = self.find_type(id).and_then(|x| x.parse().ok())?;
+                    return self.td2ti(id, x, None);
+                } else {
+                    return None;
+                }
             }
-            TypeData::Pointer(pt) => {
-                ("".into(), TypeKind::Pointer {tid: pt.underlying_type.0})
-            }
-            TypeData::Primitive(p) => {
-                (format!("{:?}", p.kind).into(), TypeKind::Primitive {pointer: p.indirection.is_some()})
-            }
-            TypeData::Modifier(m) => if name.is_none() {
-                let id = m.underlying_type.0;
-                let x = self.find_type(id).and_then(|x| x.parse().ok())?;
-                return self.td2ti(id, x, None);
-            } else {
-                return None;
-            },
             _ => return None,
         };
         if let Some(pattern) = name.and_then(|n| glob::Pattern::new(n).ok()) {
-            let options = glob::MatchOptions {case_sensitive: true, ..Default::default()};
+            let options = glob::MatchOptions {
+                case_sensitive: true,
+                ..Default::default()
+            };
             if !pattern.matches_with(&tn, options) {
                 return None;
             }
         }
-        Some(TypeInfo {id, name: tn.into(), kind})
+        Some(TypeInfo {
+            id,
+            name: tn.into(),
+            kind,
+        })
     }
 
     pub fn get_type(&mut self, id: u32) -> Option<TypeInfo> {
@@ -180,20 +224,25 @@ impl PdbFile {
     }
 
     pub fn find_type_info(&mut self, name: &str) -> Vec<TypeInfo> {
-        let mut type_iter: ItemIter<'static, TypeIndex> = unsafe {
-            core::mem::transmute(self.ti.iter())
-        };
+        let mut type_iter: ItemIter<'static, TypeIndex> =
+            unsafe { core::mem::transmute(self.ti.iter()) };
         let mut cache = vec![];
         while let Some(typ) = type_iter.next().ok().flatten() {
             self.finder.update(&type_iter);
             let id = typ.index().0;
-            if let Some(r) = typ.parse().ok().and_then(|ty| self.td2ti(id, ty, Some(name))) {
+            if let Some(r) = typ
+                .parse()
+                .ok()
+                .and_then(|ty| self.td2ti(id, ty, Some(name)))
+            {
                 let canbreak = match &r.kind {
-                    TypeKind::Class {fields, ..} => fields.is_some(),
+                    TypeKind::Class { fields, .. } => fields.is_some(),
                     _ => true,
                 };
                 cache.push(r);
-                if canbreak { break; }
+                if canbreak {
+                    break;
+                }
             }
         }
         cache
@@ -201,9 +250,8 @@ impl PdbFile {
 
     pub fn find_type(&mut self, id: u32) -> Option<pdb::Item<'static, TypeIndex>> {
         self.finder.find(id.into()).ok().or_else(|| {
-            let mut type_iter: ItemIter<'static, TypeIndex> = unsafe {
-                core::mem::transmute(self.ti.iter())
-            };
+            let mut type_iter: ItemIter<'static, TypeIndex> =
+                unsafe { core::mem::transmute(self.ti.iter()) };
             while let Some(item) = type_iter.next().ok()? {
                 self.finder.update(&type_iter);
                 if item.index().0 == id {
@@ -226,7 +274,7 @@ impl PdbFile {
             _ => {
                 // println!("find field list or parse failed");
                 None
-            },
+            }
         }
     }
 
@@ -239,7 +287,11 @@ impl PdbFile {
                         result.push(to_field_info(m));
                     }
                     TypeData::Enumerate(cls) => {
-                        result.push(FieldInfo {type_id: 0, offset: 0, name: cls.name.to_string().into()});
+                        result.push(FieldInfo {
+                            type_id: 0,
+                            offset: 0,
+                            name: cls.name.to_string().into(),
+                        });
                     }
                     _ => continue,
                 }

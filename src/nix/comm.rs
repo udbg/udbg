@@ -1,7 +1,6 @@
-
-use core::{fmt, cell::Cell};
+use crate::{sym::*, UDbgResult};
+use core::{cell::Cell, fmt};
 use std::sync::Arc;
-use crate::{UDbgResult, sym::*};
 
 #[derive(Clone, Serialize, Deserialize)]
 pub struct MemoryPage {
@@ -16,7 +15,9 @@ impl fmt::Debug for MemoryPage {
         f.debug_struct("MemoryPage")
             .field("base", &format!("0x{:x}", self.base))
             .field("size", &format!("0x{:x}", self.size))
-            .field("prot", &unsafe { String::from_utf8_unchecked(self.prot.to_vec()) })
+            .field("prot", &unsafe {
+                String::from_utf8_unchecked(self.prot.to_vec())
+            })
             .field("usage", &self.usage)
             .finish()
     }
@@ -24,22 +25,36 @@ impl fmt::Debug for MemoryPage {
 
 impl MemoryPage {
     #[inline]
-    pub fn is_commit(&self) -> bool { true }
+    pub fn is_commit(&self) -> bool {
+        true
+    }
 
     #[inline]
-    pub fn is_reserve(&self) -> bool { false }
+    pub fn is_reserve(&self) -> bool {
+        false
+    }
 
     #[inline]
-    pub fn is_free(&self) -> bool { false }
+    pub fn is_free(&self) -> bool {
+        false
+    }
 
     #[inline]
-    pub fn is_private(&self) -> bool { self.prot[3] == b'p' }
+    pub fn is_private(&self) -> bool {
+        self.prot[3] == b'p'
+    }
 
     #[inline]
-    pub fn is_shared(&self) -> bool { self.prot[3] == b's' }
+    pub fn is_shared(&self) -> bool {
+        self.prot[3] == b's'
+    }
 
-    pub fn is_executable(&self) -> bool { self.prot[2] == b'x' }
-    pub fn is_writable(&self) -> bool { self.prot[1] == b'w' }
+    pub fn is_executable(&self) -> bool {
+        self.prot[2] == b'x'
+    }
+    pub fn is_writable(&self) -> bool {
+        self.prot[1] == b'w'
+    }
     pub fn is_readonly(&self) -> bool {
         self.prot[0] == b'r' && !self.is_writable() && !self.is_executable()
     }
@@ -49,7 +64,13 @@ impl MemoryPage {
     }
 
     pub fn type_str(&self) -> &'static str {
-        if self.is_private() { "PRV" } else if self.is_shared() { "SHR" } else { "" }
+        if self.is_private() {
+            "PRV"
+        } else if self.is_shared() {
+            "SHR"
+        } else {
+            ""
+        }
     }
 }
 
@@ -78,7 +99,9 @@ impl NixModule {
 }
 
 impl UDbgModule for NixModule {
-    fn data(&self) -> &ModuleData { &self.data }
+    fn data(&self) -> &ModuleData {
+        &self.data
+    }
     // fn is_32(&self) -> bool { IS_ARCH_X64 || IS_ARCH_ARM64 }
     fn symbol_status(&self) -> SymbolStatus {
         if self.syms.pdb.read().is_some() {
@@ -100,7 +123,7 @@ impl UDbgModule for NixModule {
         self.syms.pdb.read().clone()
     }
 
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item=Symbol>>> {
+    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol>>> {
         Ok(Box::new(self.syms.enum_symbol(pat)?.into_iter()))
     }
     fn get_exports(&self) -> Option<Vec<Symbol>> {

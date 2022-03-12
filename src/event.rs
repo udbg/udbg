@@ -1,21 +1,22 @@
+//!
+//! Utilities for dealing debugger event
+//!
 
-use super::*;
-use crate::sym::UDbgModule;
-
-use std::{sync::Arc, time::Instant};
-use std::rc::Rc;
-use core::pin::Pin;
+use crate::{breakpoint::UDbgBreakpoint, shell::*, symbol::UDbgModule, tid_t};
 use core::marker::Unpin;
+use core::pin::Pin;
 use core::{
     future::Future,
     task::{Context, Poll},
 };
-use spin::mutex::Mutex;
 use futures::task::{waker_ref, ArcWake};
+use spin::mutex::Mutex;
+use std::rc::Rc;
+use std::{sync::Arc, time::Instant};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum UserReply {
-    Run(bool),      // handled: bool, for exception
+    Run(bool), // handled: bool, for exception
     StepIn,
     StepOut,
     Goto(usize),
@@ -23,7 +24,7 @@ pub enum UserReply {
     Lua,
 }
 
-pub type EventPumper = Pin<Box<dyn Future<Output=()> + 'static>>;
+pub type EventPumper = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
 pub struct EventState {
     pub reply: Option<UserReply>,
@@ -42,7 +43,8 @@ impl UEventState {
     }
 
     pub fn cont(&self, reply: UserReply) -> AsyncEvent {
-        let r = self.0.clone(); {
+        let r = self.0.clone();
+        {
             let mut c = r.lock();
             c.reply = Some(reply);
             c.event = None;
@@ -79,26 +81,26 @@ impl Future for Reply {
 
 #[derive(Display)]
 pub enum UEvent {
-    #[display(fmt="InitBp")]
+    #[display(fmt = "InitBp")]
     InitBp,
-    #[display(fmt="Step")]
+    #[display(fmt = "Step")]
     Step,
-    #[display(fmt="Bp(address={:x} type={:?})", "_0.address()", "_0.get_type()")]
+    #[display(fmt = "Bp(address={:x} type={:?})", "_0.address()", "_0.get_type()")]
     Breakpoint(Arc<dyn UDbgBreakpoint>),
-    #[display(fmt="ThreadCreate({_0})")]
+    #[display(fmt = "ThreadCreate({_0})")]
     ThreadCreate(tid_t),
-    #[display(fmt="ThreadExit({_0})")]
+    #[display(fmt = "ThreadExit({_0})")]
     ThreadExit(u32),
-    #[display(fmt="ModuleLoad({:x?})", "_0.data()")]
+    #[display(fmt = "ModuleLoad({:x?})", "_0.data()")]
     ModuleLoad(Arc<dyn UDbgModule>),
-    #[display(fmt="ModuleUnload({:x?})", "_0.data()")]
+    #[display(fmt = "ModuleUnload({:x?})", "_0.data()")]
     ModuleUnload(Arc<dyn UDbgModule>),
-    #[display(fmt="ProcessCreate")]
+    #[display(fmt = "ProcessCreate")]
     ProcessCreate,
-    #[display(fmt="ProcessExit({_0})")]
+    #[display(fmt = "ProcessExit({_0})")]
     ProcessExit(u32),
-    #[display(fmt="Exception {{ first: {first}, code: 0x{code:x} }}")]
-    Exception {first: bool, code: u32},
+    #[display(fmt = "Exception {{ first: {first}, code: 0x{code:x} }}")]
+    Exception { first: bool, code: u32 },
 }
 
 impl Unpin for UEvent {}
@@ -136,9 +138,7 @@ impl DummyTask {
     fn get() -> &'static Arc<DummyTask> {
         static mut INSTANCE: Option<Arc<DummyTask>> = None;
 
-        unsafe {
-            INSTANCE.get_or_insert_with(|| Arc::new(Self))
-        }
+        unsafe { INSTANCE.get_or_insert_with(|| Arc::new(Self)) }
     }
 }
 
@@ -156,12 +156,15 @@ impl<'a> UDbgTracer<'a> {
     pub fn new() -> Self {
         Self {
             begin_time: Instant::now(),
-            tid: None, step_in: false,
+            tid: None,
+            step_in: false,
             util: Box::new(Self::dummy_util),
         }
     }
 
-    fn dummy_util() -> Result<bool, &'static str> { Err("") }
+    fn dummy_util() -> Result<bool, &'static str> {
+        Err("")
+    }
 
     pub fn start(&mut self, tid: tid_t, step_in: bool, util: impl UtilFunc + 'a) {
         self.tid = Some(tid);

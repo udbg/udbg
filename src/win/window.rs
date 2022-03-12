@@ -1,7 +1,6 @@
-
-use core::mem::{zeroed, transmute};
-use core::ptr::null_mut;
 use alloc::string::String;
+use core::mem::{transmute, zeroed};
+use core::ptr::null_mut;
 
 use winapi::shared::minwindef::*;
 use winapi::shared::windef::*;
@@ -23,18 +22,8 @@ pub fn enum_window(mut callback: impl FnMut(HWND) -> bool) {
     }
 }
 
-pub trait WindowInfo {
-    fn get_tid_pid(self) -> (u32, u32);
-    fn is_visible(self) -> bool;
-    fn get_text(self) -> String;
-    fn get_class_name(self) -> String;
-    fn get_wndproc(self) -> usize;
-    fn set_wndproc(self, ptr: usize) -> usize;
-    fn client_area(self) -> Option<RECT>;
-    fn client_size(self) -> (usize, usize);
-}
-
-impl WindowInfo for HWND {
+#[extend::ext(name = WindowInfo)]
+pub impl HWND {
     fn get_tid_pid(self) -> (u32, u32) {
         unsafe {
             let mut pid: u32 = 0;
@@ -54,7 +43,9 @@ impl WindowInfo for HWND {
             let get_text = InternalGetWindowText;
             if get_text(self, buf.as_mut_ptr(), buf.len() as i32) > 0 {
                 buf.as_ref().to_utf8()
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         }
     }
 
@@ -63,7 +54,9 @@ impl WindowInfo for HWND {
             let mut buf = [0u16; 2000];
             if GetClassNameW(self, buf.as_mut_ptr(), buf.len() as i32) > 0 {
                 buf.as_ref().to_utf8()
-            } else { String::new() }
+            } else {
+                String::new()
+            }
         }
     }
 
@@ -72,14 +65,14 @@ impl WindowInfo for HWND {
             let r = GetWindowLongPtrW(self, GWL_WNDPROC) as usize;
             if r == 0 {
                 GetClassLongPtrW(self, GCL_WNDPROC) as usize
-            } else { r }
+            } else {
+                r
+            }
         }
     }
 
     fn set_wndproc(self, ptr: usize) -> usize {
-        unsafe {
-            transmute(SetWindowLongPtrW(self, GWL_WNDPROC, transmute(ptr)))
-        }
+        unsafe { transmute(SetWindowLongPtrW(self, GWL_WNDPROC, transmute(ptr))) }
     }
 
     fn client_area(self) -> Option<RECT> {
@@ -87,7 +80,9 @@ impl WindowInfo for HWND {
             let mut rect: RECT = zeroed();
             if GetClientRect(self, &mut rect) > 0 {
                 Some(rect)
-            } else { None }
+            } else {
+                None
+            }
         }
     }
 
@@ -97,25 +92,33 @@ impl WindowInfo for HWND {
             None => (0, 0),
         }
     }
+
+    fn iter(self) -> Box<dyn Iterator<Item = HWND>> {
+        let mut hwnd = self;
+        Box::new(core::iter::from_fn(move || {
+            let w = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
+            if w.is_null() {
+                None
+            } else {
+                hwnd = w;
+                Some(w)
+            }
+        }))
+    }
 }
 
 #[inline]
 pub fn enum_process_window(pid: u32, mut callback: impl FnMut(HWND) -> bool) {
-    enum_window(|hwnd| if hwnd.get_tid_pid().1 == pid { callback(hwnd) } else { true })
+    enum_window(|hwnd| {
+        if hwnd.get_tid_pid().1 == pid {
+            callback(hwnd)
+        } else {
+            true
+        }
+    })
 }
 
-pub struct Hwnd(pub HWND);
-
-impl Iterator for Hwnd {
-    type Item = HWND;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let hwnd = unsafe { GetWindow(self.0, GW_HWNDNEXT) };
-        if hwnd.is_null() { None } else { self.0 = hwnd; Some(hwnd) }
-    }
-}
-
-/// Wrapper of GetTopWindow, GetWindow
-pub fn get_top_window() -> Hwnd {
-    unsafe { Hwnd(GetTopWindow(null_mut())) }
+/// Wrapper of GetTopWindow
+pub fn get_top_window() -> HWND {
+    unsafe { GetTopWindow(null_mut()) }
 }

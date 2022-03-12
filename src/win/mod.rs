@@ -3,22 +3,12 @@ mod window;
 
 #[cfg(feature = "dbglog")]
 pub mod dbglog;
-pub mod disasm;
-pub mod error;
-#[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-pub mod hook;
-pub mod inject;
 pub mod ntdll;
-pub mod sc;
 pub mod string;
 pub mod symbol;
-pub mod time;
-pub mod util;
-pub mod wintrust;
-
 pub mod udbg;
+pub mod util;
 
-pub use self::symbol::SymbolApi;
 pub use self::util::*;
 pub use self::window::*;
 
@@ -28,28 +18,25 @@ use core::mem::{size_of, size_of_val, transmute, zeroed};
 use core::ops::Deref;
 use core::ptr::{null, null_mut};
 use core::slice::{from_raw_parts, from_raw_parts_mut};
+use winapi::um::winbase::QueryFullProcessImageNameW;
 
 use ntapi::ntpsapi::PROCESS_BASIC_INFORMATION;
+use winapi::shared::minwindef::*;
 use winapi::shared::ntdef::UNICODE_STRING;
 use winapi::shared::windef::*;
-use winapi::um::dbghelp::*;
-use winapi::um::debugapi::OutputDebugStringW;
 use winapi::um::handleapi::*;
-use winapi::um::libloaderapi::GetProcAddress;
 use winapi::um::memoryapi::*;
 use winapi::um::processthreadsapi::*;
 use winapi::um::psapi::*;
 use winapi::um::tlhelp32::*;
+use winapi::um::winnt::*;
 use winapi::um::winuser::*;
 
 use anyhow::{Error, Result};
-use serde::{Deserialize, Serialize};
-use std::io::Error as StdError;
+use std::io::Error as IoError;
 
 use super::ntdll::*;
-use crate::*;
-
-pub type pid_t = u32;
+use crate::{pid_t, prelude::*};
 
 #[derive(Deref)]
 pub struct Handle(HANDLE);
@@ -72,7 +59,7 @@ impl Handle {
         Self(handle)
     }
 
-    pub unsafe fn clone_from_raw(handle: HANDLE) -> Result<Self, StdError> {
+    pub unsafe fn clone_from_raw(handle: HANDLE) -> Result<Self, IoError> {
         let mut result = null_mut();
         if DuplicateHandle(
             GetCurrentProcess(),
@@ -86,12 +73,12 @@ impl Handle {
         {
             Ok(Self::from_raw_handle(result))
         } else {
-            Err(StdError::last_os_error())
+            Err(IoError::last_os_error())
         }
     }
 
     #[inline(always)]
-    pub fn clone(&self) -> Result<Self, StdError> {
+    pub fn clone(&self) -> Result<Self, IoError> {
         unsafe { Self::clone_from_raw(self.0) }
     }
 }
@@ -110,22 +97,22 @@ impl Drop for Handle {
     }
 }
 
-type ToolHelper<T> = unsafe extern "system" fn(HANDLE, *mut T) -> BOOL;
+type ToolHelperFnPtr<T> = unsafe extern "system" fn(HANDLE, *mut T) -> BOOL;
 
 pub struct ToolHelperIter<T: Copy> {
     count: u32,
     handle: Handle,
     data: T,
-    first: ToolHelper<T>,
-    next: ToolHelper<T>,
+    first: ToolHelperFnPtr<T>,
+    next: ToolHelperFnPtr<T>,
 }
 
 impl<T: Copy> ToolHelperIter<T> {
     fn new(
         handle: HANDLE,
         data: T,
-        first: ToolHelper<T>,
-        next: ToolHelper<T>,
+        first: ToolHelperFnPtr<T>,
+        next: ToolHelperFnPtr<T>,
     ) -> ToolHelperIter<T> {
         // assert!(handle != INVALID_HANDLE_VALUE);
         let handle = unsafe { Handle::from_raw_handle(handle) };
@@ -163,119 +150,6 @@ impl<T: Copy> Iterator for ToolHelperIter<T> {
     }
 }
 
-pub trait ThreadInfo {
-    fn pid(&self) -> u32;
-    fn tid(&self) -> u32;
-}
-
-impl ThreadInfo for THREADENTRY32 {
-    #[inline]
-    fn pid(&self) -> u32 {
-        self.th32OwnerProcessID
-    }
-    #[inline]
-    fn tid(&self) -> u32 {
-        self.th32ThreadID
-    }
-}
-
-pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
-    unsafe {
-        let mut te32: THREADENTRY32 = zeroed();
-        te32.dwSize = size_of_val(&te32) as u32;
-        ToolHelperIter::new(
-            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).into(),
-            te32,
-            Thread32First,
-            Thread32Next,
-        )
-    }
-}
-
-pub trait ModuleInfo: Deref<Target = MODULEENTRY32W> + Sized {
-    #[inline(always)]
-    fn name(self) -> String {
-        self.szModule.as_ref().to_utf8()
-    }
-    #[inline(always)]
-    fn path(self) -> String {
-        self.szExePath.as_ref().to_utf8()
-    }
-    #[inline(always)]
-    fn base(self) -> usize {
-        self.modBaseAddr as usize
-    }
-    #[inline(always)]
-    fn size(self) -> usize {
-        self.modBaseSize as usize
-    }
-    #[inline(always)]
-    fn id(self) -> u32 {
-        self.th32ModuleID
-    }
-}
-impl ModuleInfo for &MODULEENTRY32W {}
-
-impl range::RangeValue for MODULEENTRY32W {
-    fn as_range(&self) -> core::ops::Range<usize> {
-        self.base()..self.base() + self.size()
-    }
-}
-
-pub trait ProcessInfo: Deref<Target = PROCESSENTRY32W> + Sized {
-    #[inline]
-    fn pid(self) -> u32 {
-        self.th32ProcessID
-    }
-    #[inline]
-    fn name(self) -> String {
-        self.szExeFile.as_ref().to_utf8()
-    }
-}
-impl ProcessInfo for &PROCESSENTRY32W {}
-
-pub fn enum_process() -> ToolHelperIter<PROCESSENTRY32W> {
-    unsafe {
-        let mut pe32: PROCESSENTRY32W = zeroed();
-        pe32.dwSize = size_of_val(&pe32) as u32;
-        ToolHelperIter::new(
-            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0),
-            pe32,
-            Process32FirstW,
-            Process32NextW,
-        )
-    }
-}
-
-#[inline]
-pub fn enum_process_filter_name(name: &str) -> impl Iterator<Item = PROCESSENTRY32W> + '_ {
-    enum_process().filter(move |p| p.name().eq_ignore_ascii_case(name))
-}
-
-pub fn get_thread_context(tid: u32, context: &mut CONTEXT, flags: u32) -> bool {
-    let handle = open_thread(tid, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, false);
-    unsafe {
-        context.ContextFlags = flags;
-        SuspendThread(handle.0);
-        let r = GetThreadContext(handle.0, context);
-        ResumeThread(handle.0);
-        return r > 0;
-    }
-}
-
-pub fn enum_module(pid: u32) -> ToolHelperIter<MODULEENTRY32W> {
-    unsafe {
-        let mut te32: MODULEENTRY32W = zeroed();
-        te32.dwSize = size_of_val(&te32) as u32;
-        ToolHelperIter::new(
-            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid),
-            te32,
-            Module32FirstW,
-            Module32NextW,
-        )
-    }
-}
-
 #[derive(Serialize, Deserialize)]
 pub struct MemoryPage {
     pub base: usize,
@@ -285,6 +159,13 @@ pub struct MemoryPage {
     pub state: u32,
     pub protect: u32,
     pub alloc_protect: u32,
+}
+
+impl crate::range::RangeValue for MemoryPage {
+    #[inline]
+    fn as_range(&self) -> core::ops::Range<usize> {
+        self.base..self.base + self.size
+    }
 }
 
 impl MemoryPage {
@@ -359,6 +240,119 @@ impl MemoryPage {
             MEM_MAPPED => "MAP",
             _ => "",
         }
+    }
+}
+
+pub trait ThreadInfo {
+    fn pid(&self) -> u32;
+    fn tid(&self) -> u32;
+}
+
+impl ThreadInfo for THREADENTRY32 {
+    #[inline]
+    fn pid(&self) -> u32 {
+        self.th32OwnerProcessID
+    }
+    #[inline]
+    fn tid(&self) -> u32 {
+        self.th32ThreadID
+    }
+}
+
+pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
+    unsafe {
+        let mut te32: THREADENTRY32 = zeroed();
+        te32.dwSize = size_of_val(&te32) as u32;
+        ToolHelperIter::new(
+            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).into(),
+            te32,
+            Thread32First,
+            Thread32Next,
+        )
+    }
+}
+
+pub trait ModuleInfo: Deref<Target = MODULEENTRY32W> + Sized {
+    #[inline(always)]
+    fn name(self) -> String {
+        self.szModule.as_ref().to_utf8()
+    }
+    #[inline(always)]
+    fn path(self) -> String {
+        self.szExePath.as_ref().to_utf8()
+    }
+    #[inline(always)]
+    fn base(self) -> usize {
+        self.modBaseAddr as usize
+    }
+    #[inline(always)]
+    fn size(self) -> usize {
+        self.modBaseSize as usize
+    }
+    #[inline(always)]
+    fn id(self) -> u32 {
+        self.th32ModuleID
+    }
+}
+impl ModuleInfo for &MODULEENTRY32W {}
+
+impl crate::range::RangeValue for MODULEENTRY32W {
+    fn as_range(&self) -> core::ops::Range<usize> {
+        self.base()..self.base() + self.size()
+    }
+}
+
+pub trait ProcessInfo: Deref<Target = PROCESSENTRY32W> + Sized {
+    #[inline]
+    fn pid(self) -> u32 {
+        self.th32ProcessID
+    }
+    #[inline]
+    fn name(self) -> String {
+        self.szExeFile.as_ref().to_utf8()
+    }
+}
+impl ProcessInfo for &PROCESSENTRY32W {}
+
+pub fn enum_process() -> ToolHelperIter<PROCESSENTRY32W> {
+    unsafe {
+        let mut pe32: PROCESSENTRY32W = zeroed();
+        pe32.dwSize = size_of_val(&pe32) as u32;
+        ToolHelperIter::new(
+            CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0),
+            pe32,
+            Process32FirstW,
+            Process32NextW,
+        )
+    }
+}
+
+#[inline]
+pub fn enum_process_filter_name(name: &str) -> impl Iterator<Item = PROCESSENTRY32W> + '_ {
+    enum_process().filter(move |p| p.name().eq_ignore_ascii_case(name))
+}
+
+pub fn get_thread_context(tid: u32, context: &mut CONTEXT, flags: u32) -> bool {
+    let handle = open_thread(tid, THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, false);
+    unsafe {
+        context.ContextFlags = flags;
+        SuspendThread(handle.0);
+        let r = GetThreadContext(handle.0, context);
+        ResumeThread(handle.0);
+        return r > 0;
+    }
+}
+
+pub fn enum_module(pid: u32) -> ToolHelperIter<MODULEENTRY32W> {
+    unsafe {
+        let mut te32: MODULEENTRY32W = zeroed();
+        te32.dwSize = size_of_val(&te32) as u32;
+        ToolHelperIter::new(
+            CreateToolhelp32Snapshot(TH32CS_SNAPMODULE | TH32CS_SNAPMODULE32, pid),
+            te32,
+            Module32FirstW,
+            Module32NextW,
+        )
     }
 }
 
@@ -550,7 +544,7 @@ impl Process {
         let handle = duplicate_process(pid, access)
             .next()
             .ok_or(Error::msg("dup not found"))?;
-        Self::from_handle(handle).ok_or_else(|| StdError::last_os_error().into())
+        Self::from_handle(handle).ok_or_else(|| IoError::last_os_error().into())
     }
 
     pub fn from_name(name: &str, access: Option<u32>) -> Result<Process> {
@@ -558,7 +552,7 @@ impl Process {
             .next()
             .ok_or(Error::msg("name not found"))?
             .pid();
-        Self::open(pid, access).ok_or_else(|| StdError::last_os_error().into())
+        Self::open(pid, access).ok_or_else(|| IoError::last_os_error().into())
     }
 
     pub fn from_handle(handle: Handle) -> Option<Process> {
@@ -588,7 +582,7 @@ impl Process {
         self.basic_information().map(|i| i.PebBaseAddress as usize)
     }
 
-    // https://docs.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process
+    /// https://docs.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process
     pub fn is_wow64(&self) -> bool {
         use winapi::um::wow64apiset::IsWow64Process;
         let mut result: BOOL = 0;
@@ -610,7 +604,7 @@ impl Process {
             {
                 Ok(name.as_ref().to_utf8())
             } else {
-                Err(StdError::last_os_error().into())
+                Err(IoError::last_os_error().into())
             }
         }
     }
@@ -750,12 +744,12 @@ impl Process {
         write_process_memory(*self.handle, address, data)
     }
 
-    pub fn write_code(&self, address: usize, data: &[u8]) -> Result<usize, StdError> {
+    pub fn write_code(&self, address: usize, data: &[u8]) -> Result<usize, IoError> {
         let r = write_process_memory(*self.handle, address, data);
         if unsafe { FlushInstructionCache(*self.handle, address as LPCVOID, data.len()) > 0 } {
             Ok(r)
         } else {
-            Err(StdError::last_os_error())
+            Err(IoError::last_os_error())
         }
     }
 
@@ -800,35 +794,6 @@ impl Process {
         }
     }
 
-    pub fn for_each_symbol(
-        &self,
-        module: usize,
-        callback: &dyn FnMut(usize, Arc<str>) -> bool,
-    ) -> bool {
-        // const SYMENUM_OPTIONS_DEFAULT: u32 = 1;
-        unsafe extern "system" fn enum_proc(
-            si: *mut SYMBOL_INFOW,
-            _size: ULONG,
-            arg: PVOID,
-        ) -> BOOL {
-            let si = &*si;
-            let callback: *mut &'static mut dyn FnMut(usize, Arc<str>) -> bool = transmute(arg);
-            let name: Arc<str> = from_raw_parts(si.Name.as_ptr(), si.NameLen as usize)
-                .to_utf8()
-                .into();
-            (*callback)(si.Address as usize, name) as BOOL
-        }
-        unsafe {
-            SymEnumSymbolsW(
-                *self.handle,
-                module as u64,
-                transmute(b"*\0\0\0".as_ptr()),
-                Some(enum_proc),
-                transmute(&callback),
-            ) > 0
-        }
-    }
-
     // https://docs.microsoft.com/zh-cn/windows/win32/memory/obtaining-a-file-name-from-a-file-handle
     pub fn get_mapped_file_name(&self, address: usize) -> Option<String> {
         unsafe {
@@ -848,14 +813,6 @@ impl Process {
             }
         }
     }
-}
-
-pub fn sym_get_options() -> u32 {
-    unsafe { SymGetOptions() }
-}
-
-pub fn sym_set_options(option: u32) -> u32 {
-    unsafe { SymSetOptions(option) }
 }
 
 #[inline(always)]
@@ -897,7 +854,7 @@ const LEN2: usize = 26;
 const RW3: usize = 28;
 const LEN3: usize = 30;
 
-pub trait ReadMemUtilWin: ReadMemUtil {
+pub trait ReadMemUtilWin: ReadMemoryUtil {
     fn read_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         let r = self.read_cstring(address, max)?;
         Some(r.to_unicode().to_utf8())
@@ -941,4 +898,4 @@ pub trait ReadMemUtilWin: ReadMemUtil {
     }
 }
 
-impl<T: ReadMemUtil + ?Sized> ReadMemUtilWin for T {}
+impl<T: ReadMemoryUtil + ?Sized> ReadMemUtilWin for T {}

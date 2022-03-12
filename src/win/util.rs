@@ -1,13 +1,16 @@
-
 use super::*;
-use core::ops::{Deref, DerefMut};
-use core::mem;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
+use core::mem;
+use core::ops::{Deref, DerefMut};
+use winapi::um::debugapi::OutputDebugStringW;
+use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::libloaderapi::GetProcAddress;
+use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
 
-use winapi::um::processthreadsapi::*;
-use winapi::shared::{ntdef::*, minwindef::*};
 use winapi::shared::ntdef::HANDLE;
+use winapi::shared::{minwindef::*, ntdef::*};
+use winapi::um::processthreadsapi::*;
 
 #[inline]
 pub fn get_current_tid() -> u32 {
@@ -25,34 +28,54 @@ pub fn open_thread(tid: u32, access: u32, inherit: bool) -> Handle {
 
 pub fn suspend_thread(tid: u32) -> Handle {
     let handle = open_thread(tid, THREAD_SUSPEND_RESUME, false);
-    if handle.is_valid() { unsafe { SuspendThread(handle.0); } }
+    if handle.is_valid() {
+        unsafe {
+            SuspendThread(handle.0);
+        }
+    }
     return handle;
 }
 
 #[inline]
-pub fn resume_thread(handle: HANDLE) -> u32 { unsafe { ResumeThread(handle) } }
+pub fn resume_thread(handle: HANDLE) -> u32 {
+    unsafe { ResumeThread(handle) }
+}
 
 pub fn enable_privilege(name: &str) -> Result<(), String> {
     use winapi::shared::winerror::ERROR_NOT_ALL_ASSIGNED;
-    use winapi::um::winbase::LookupPrivilegeValueW;
     use winapi::um::securitybaseapi::AdjustTokenPrivileges;
+    use winapi::um::winbase::LookupPrivilegeValueW;
 
     unsafe {
         let mut token: HANDLE = null_mut();
         let mut tp: TOKEN_PRIVILEGES = zeroed();
         let mut luid: LUID = zeroed();
 
-        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token).check_errstr("open")?;
+        OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token)
+            .check_errstr("open")?;
 
         let token = Handle(token);
-        LookupPrivilegeValueW(null(), name.to_unicode_with_null().as_ptr(), &mut luid).check_errstr("lookup")?;
+        LookupPrivilegeValueW(null(), name.to_unicode_with_null().as_ptr(), &mut luid)
+            .check_errstr("lookup")?;
 
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = luid;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
-        AdjustTokenPrivileges(token.0, 0, &mut tp, size_of_val(&tp) as u32, null_mut(), null_mut()).check_errstr("adjust")?;
+        AdjustTokenPrivileges(
+            token.0,
+            0,
+            &mut tp,
+            size_of_val(&tp) as u32,
+            null_mut(),
+            null_mut(),
+        )
+        .check_errstr("adjust")?;
 
-        if get_last_error() == ERROR_NOT_ALL_ASSIGNED { Err("not all".into()) } else { Ok(()) }
+        if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
+            Err("not all".into())
+        } else {
+            Ok(())
+        }
     }
 }
 
@@ -65,16 +88,21 @@ pub fn output_debug_string<T: AsRef<str>>(s: T) {
 }
 
 // refer to PhCallNtQueryObjectWithTimeout
-pub fn call_with_timeout<T>(timeout: std::time::Duration, callback: impl FnOnce() -> T) -> Option<T> {
+pub fn call_with_timeout<T>(
+    timeout: std::time::Duration,
+    callback: impl FnOnce() -> T,
+) -> Option<T> {
     use std::sync::mpsc::*;
 
     let (sender, recver) = channel::<T>();
-    let (th, tid) = create_thread(move || {
-        match sender.send(callback()) { _ => {} }
+    let (th, tid) = create_thread(move || match sender.send(callback()) {
+        _ => {}
     })?;
     let result = recver.recv_timeout(timeout).ok();
     if result.is_none() {
-        unsafe { TerminateThread(th, 1); }
+        unsafe {
+            TerminateThread(th, 1);
+        }
     }
     result
 }
@@ -91,8 +119,12 @@ macro_rules! dlog {
 #[cfg(not(debug_assertions))]
 #[macro_export]
 macro_rules! dlog {
-    () => (());
-    ($($arg:tt)*) => (());
+    () => {
+        ()
+    };
+    ($($arg:tt)*) => {
+        ()
+    };
 }
 
 pub fn msgbox<T: AsRef<str>>(msg: T) {
@@ -100,7 +132,9 @@ pub fn msgbox<T: AsRef<str>>(msg: T) {
         MessageBoxW(
             null_mut(),
             msg.as_ref().to_unicode().as_ptr(),
-            "\0\0".as_ptr() as *const u16, 0u32);
+            "\0\0".as_ptr() as *const u16,
+            0u32,
+        );
     }
 }
 
@@ -110,12 +144,18 @@ pub fn to_dos_path(path: &mut [u16]) -> Option<&[u16]> {
     let mut buf = [016; 100];
     for d in b'C'..=b'Z' {
         unsafe {
-            let mut len = QueryDosDeviceW([d as u16, b':' as u16, 0].as_ptr(), buf.as_mut_ptr(), buf.len() as u32) as usize;
-            while len > 0 && buf[len-1] == 0 { len -= 1; }
+            let mut len = QueryDosDeviceW(
+                [d as u16, b':' as u16, 0].as_ptr(),
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+            ) as usize;
+            while len > 0 && buf[len - 1] == 0 {
+                len -= 1;
+            }
             if len > 0 && path.starts_with(&buf[..len]) {
-                path[len-2] = d as u16;
-                path[len-1] = b':' as u16;
-                return Some(&path[len-2..]);
+                path[len - 2] = d as u16;
+                path[len - 1] = b':' as u16;
+                return Some(&path[len - 2..]);
             }
         }
     }
@@ -146,7 +186,8 @@ pub struct BufferType<T>(pub Vec<u8>, PhantomData<T>);
 impl<T> BufferType<T> {
     pub fn with_size(size: usize) -> Self {
         let mut r = Vec::with_capacity(size);
-        r.resize(r.capacity(), 0); Self(r, PhantomData)
+        r.resize(r.capacity(), 0);
+        Self(r, PhantomData)
     }
 
     pub fn from_vec(data: Vec<u8>) -> Self {
@@ -185,23 +226,31 @@ impl<T> Align16<T> {
     pub fn as_mut(&mut self) -> &mut T {
         unsafe {
             let align_address = transmute::<_, usize>(&self._align);
-            if align_address & 0x0F > 0 { &mut self._data } else { transmute(align_address) }
+            if align_address & 0x0F > 0 {
+                &mut self._data
+            } else {
+                transmute(align_address)
+            }
         }
     }
 }
 
 pub fn register_dll_notification(handler: PLDR_DLL_NOTIFICATION_FUNCTION) -> Result<(), NTSTATUS> {
-    use winapi::um::libloaderapi::*;
     use winapi::shared::ntstatus::STATUS_NOT_FOUND;
+    use winapi::um::libloaderapi::*;
 
     unsafe {
         let ntdll = GetModuleHandleA(b"ntdll.dll\0".as_ptr().cast());
-        let fun: Option<FnLdrRegisterDllNotification> =
-            transmute(GetProcAddress(ntdll, b"LdrRegisterDllNotification\0".as_ptr().cast()));
+        let fun: Option<FnLdrRegisterDllNotification> = transmute(GetProcAddress(
+            ntdll,
+            b"LdrRegisterDllNotification\0".as_ptr().cast(),
+        ));
         if let Some(LdrRegisterDllNotification) = fun {
             let mut dll_cookie = 0usize;
             LdrRegisterDllNotification(0, handler, null_mut(), &mut dll_cookie).check()
-        } else { Err(STATUS_NOT_FOUND) }
+        } else {
+            Err(STATUS_NOT_FOUND)
+        }
     }
 }
 
@@ -216,13 +265,22 @@ pub fn init_object_attributes(name: PUNICODE_STRING, attr: u32) -> OBJECT_ATTRIB
 
 pub fn get_window(pid: pid_t) -> Option<HWND> {
     let mut w = null_mut();
-    enum_process_window(pid, |hwnd| { w = hwnd; !w.is_visible() });
-    if w.is_null() { None } else { Some(w) }
+    enum_process_window(pid, |hwnd| {
+        w = hwnd;
+        !w.is_visible()
+    });
+    if w.is_null() {
+        None
+    } else {
+        Some(w)
+    }
 }
 
-pub fn duplicate_process(pid: u32, access: u32) -> impl Iterator<Item=Handle> {
+pub fn duplicate_process(pid: u32, access: u32) -> impl Iterator<Item = Handle> {
     find_handle(7, access).filter_map(move |h| unsafe {
-        if h.pid() < 5 { return None; }
+        if h.pid() < 5 {
+            return None;
+        }
         let p = Handle(OpenProcess(PROCESS_DUP_HANDLE, 0, h.pid()));
         if p.is_null() {
             // error!("OpenProcess {} failed {}", h.pid(), get_last_error_string());
@@ -236,10 +294,18 @@ pub fn duplicate_process(pid: u32, access: u32) -> impl Iterator<Item=Handle> {
             h.HandleValue as HANDLE,
             GetCurrentProcess(),
             &mut target,
-            0, 0, DUPLICATE_SAME_ACCESS
-        ) == 0 || target.is_null() || pid != GetProcessId(target) {
-            CloseHandle(target); None
-        } else { Some(Handle::from_raw_handle(target)) }
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        ) == 0
+            || target.is_null()
+            || pid != GetProcessId(target)
+        {
+            CloseHandle(target);
+            None
+        } else {
+            Some(Handle::from_raw_handle(target))
+        }
     })
 }
 
@@ -251,7 +317,8 @@ impl<F: FnOnce()> IntoThreadProc for F {
     fn into_thread_fn(self) -> (LPTHREAD_START_ROUTINE, LPVOID) {
         unsafe extern "system" fn wrapper(p: LPVOID) -> u32 {
             let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(transmute(p));
-            closure(); 0
+            closure();
+            0
         }
         let closure: Box<dyn FnOnce()> = Box::new(self);
         (Some(wrapper), Box::into_raw(Box::new(closure)) as LPVOID)
@@ -263,6 +330,10 @@ pub fn create_thread(proc: impl IntoThreadProc) -> Option<(HANDLE, u32)> {
         let mut id: DWORD = 0;
         let (f, p) = proc.into_thread_fn();
         let handle = CreateThread(null_mut(), 0, f, p, 0, &mut id);
-        if handle.is_null() { None } else { Some((handle, id)) }
+        if handle.is_null() {
+            None
+        } else {
+            Some((handle, id))
+        }
     }
 }

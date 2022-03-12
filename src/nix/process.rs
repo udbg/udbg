@@ -1,4 +1,3 @@
-
 use super::*;
 use core::mem::zeroed;
 
@@ -11,9 +10,10 @@ pub fn process_name(pid: pid_t) -> Option<String> {
 
 pub fn process_cmdline(pid: pid_t) -> Vec<String> {
     let data = std::fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or(vec![]);
-    let mut result = data.split(|b| *b == 0u8).map(|b| unsafe {
-        String::from_utf8_unchecked(b.to_vec())
-    }).collect::<Vec<_>>();
+    let mut result = data
+        .split(|b| *b == 0u8)
+        .map(|b| unsafe { String::from_utf8_unchecked(b.to_vec()) })
+        .collect::<Vec<_>>();
     while result.last().map(String::is_empty).unwrap_or(false) {
         result.pop();
     }
@@ -21,8 +21,10 @@ pub fn process_cmdline(pid: pid_t) -> Vec<String> {
 }
 
 pub fn process_path(pid: pid_t) -> Option<String> {
-    read_link(format!("/proc/{}/exe", pid)).ok()?.to_str()
-                             .map(|path| path.to_string())
+    read_link(format!("/proc/{}/exe", pid))
+        .ok()?
+        .to_str()
+        .map(|path| path.to_string())
 }
 
 pub fn process_tasks(pid: pid_t) -> PidIter {
@@ -30,9 +32,14 @@ pub fn process_tasks(pid: pid_t) -> PidIter {
 }
 
 pub fn process_fd(pid: pid_t) -> Option<impl Iterator<Item = (usize, PathBuf)>> {
-    Some(PidIter(Some(read_dir(format!("/proc/{}/fd", pid)).ok()?)).filter_map(move |id|
-        Some((id as usize, read_link(format!("/proc/{}/fd/{}", pid, id)).ok()?))
-    ))
+    Some(
+        PidIter(Some(read_dir(format!("/proc/{}/fd", pid)).ok()?)).filter_map(move |id| {
+            Some((
+                id as usize,
+                read_link(format!("/proc/{}/fd/{}", pid, id)).ok()?,
+            ))
+        }),
+    )
 }
 
 pub fn process_environ(pid: pid_t) -> HashMap<String, String> {
@@ -56,47 +63,81 @@ pub struct Process {
 impl Process {
     pub fn from_pid(pid: pid_t) -> Option<Self> {
         if Path::new(&format!("/proc/{}", pid)).exists() {
-            Some(Self { pid, mem: RwLock::new(None), })
-        } else { None }
+            Some(Self {
+                pid,
+                mem: RwLock::new(None),
+            })
+        } else {
+            None
+        }
     }
 
     pub fn from_comm(name: &str) -> Option<Self> {
-        enum_pid().find(|&pid| process_name(pid).as_ref().map(String::as_str) == Some(name)).and_then(Process::from_pid)
+        enum_pid()
+            .find(|&pid| process_name(pid).as_ref().map(String::as_str) == Some(name))
+            .and_then(Process::from_pid)
     }
 
     pub fn from_name(name: &str) -> Option<Self> {
-        enum_pid().find(|&pid| process_cmdline(pid).get(0).map(String::as_str) == Some(name)).and_then(Process::from_pid)
+        enum_pid()
+            .find(|&pid| process_cmdline(pid).get(0).map(String::as_str) == Some(name))
+            .and_then(Process::from_pid)
     }
 
     pub fn current() -> Self {
         unsafe { Self::from_pid(getpid()).unwrap() }
     }
 
-    pub fn pid(&self) -> pid_t { self.pid }
+    pub fn pid(&self) -> pid_t {
+        self.pid
+    }
 
     #[inline]
-    pub fn name(&self) -> Option<String> { process_name(self.pid) }
+    pub fn name(&self) -> Option<String> {
+        process_name(self.pid)
+    }
 
     #[inline]
-    pub fn cmdline(&self) -> Vec<String> { process_cmdline(self.pid) }
+    pub fn cmdline(&self) -> Vec<String> {
+        process_cmdline(self.pid)
+    }
 
     #[inline]
-    pub fn image_path(&self) -> Option<String> { process_path(self.pid) }
+    pub fn image_path(&self) -> Option<String> {
+        process_path(self.pid)
+    }
 
     #[inline]
-    pub fn environ(&self) -> HashMap<String, String> { process_environ(self.pid) }
+    pub fn environ(&self) -> HashMap<String, String> {
+        process_environ(self.pid)
+    }
 
     pub fn read_mem(mem: &File, address: usize, buf: &mut [u8]) -> usize {
         unsafe {
-            let n = pread64(mem.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), address as _);
-            if n == -1 { 0 } else { n as _ }
+            let n = pread64(
+                mem.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                address as _,
+            );
+            if n == -1 {
+                0
+            } else {
+                n as _
+            }
         }
     }
 
     #[inline]
     fn open_mem(&self) -> Option<()> {
         if self.mem.read().is_none() {
-            *self.mem.write() = Some(Box::new(File::options().read(true).write(true).open(format!("/proc/{}/mem", self.pid)).ok()?));
+            *self.mem.write() = Some(Box::new(
+                File::options()
+                    .read(true)
+                    .write(true)
+                    .open(format!("/proc/{}/mem", self.pid))
+                    .ok()?,
+            ));
         }
         Some(())
     }
@@ -105,7 +146,11 @@ impl Process {
         self.open_mem()?;
         self.mem.read().as_ref().and_then(move |f| {
             let result = Self::read_mem(f, address, buf);
-            if result > 0 { Some(&mut buf[..result]) } else { None }
+            if result > 0 {
+                Some(&mut buf[..result])
+            } else {
+                None
+            }
         })
     }
 
@@ -113,7 +158,11 @@ impl Process {
         self.open_mem()?;
         self.mem.read().as_ref().and_then(move |f| unsafe {
             let n = pwrite64(f.as_raw_fd(), buf.as_ptr().cast(), buf.len(), address as _);
-            if n == -1 { None } else { Some(n as _) }
+            if n == -1 {
+                None
+            } else {
+                Some(n as _)
+            }
         })
     }
 
@@ -122,7 +171,9 @@ impl Process {
     }
 
     pub fn enum_memory(&self) -> Result<MemoryIter, String> {
-        Ok(MemoryIter(self.lines("maps").map_err(|e| format!("{}", e))?))
+        Ok(MemoryIter(
+            self.lines("maps").map_err(|e| format!("{}", e))?,
+        ))
     }
 
     #[inline]
@@ -133,7 +184,11 @@ impl Process {
     pub fn enum_module(&self) -> Result<ModuleIter, String> {
         Ok(ModuleIter {
             f: read_lines(format!("/proc/{}/maps", self.pid)).map_err(|e| format!("{}", e))?,
-            p: self, base: 0, size: 0, usage: "".into(), cached: false,
+            p: self,
+            base: 0,
+            size: 0,
+            usage: "".into(),
+            cached: false,
         })
     }
 
@@ -144,7 +199,11 @@ impl Process {
     pub fn get_regs(&self, tid: pid_t) -> Option<user_regs_struct> {
         unsafe {
             let mut regs: user_regs_struct = zeroed();
-            if ptrace_getregs(tid, &mut regs) { Some(regs) } else { None }
+            if ptrace_getregs(tid, &mut regs) {
+                Some(regs)
+            } else {
+                None
+            }
         }
     }
 
@@ -153,7 +212,9 @@ impl Process {
             let info: libc::siginfo_t = zeroed();
             if ptrace(PTRACE_GETSIGINFO, tid, 0, &info) >= 0 {
                 Some(info)
-            } else { None }
+            } else {
+                None
+            }
         }
     }
 }
@@ -183,10 +244,17 @@ impl Iterator for MemoryIter {
         let end = usize::from_str_radix(line.next().unwrap(), 16).unwrap();
         let size = end - base;
         let prot = line.next().unwrap();
-        for i in 0..3 { line.next(); }
+        for i in 0..3 {
+            line.next();
+        }
         let usage: Arc<str> = line.rest().trim().into();
 
-        let mut result = MemoryPage { base, size, usage, prot: [0; 4] };
+        let mut result = MemoryPage {
+            base,
+            size,
+            usage,
+            prot: [0; 4],
+        };
         result.prot.copy_from_slice(prot.as_bytes());
         Some(result)
     }
@@ -198,12 +266,6 @@ pub struct Module {
     pub comm: CommonModule,
     pub name: Arc<str>,
     pub path: Arc<str>,
-}
-
-impl HKitModule for Module {
-    fn comm(&self) -> &CommonModule { &self.comm }
-    fn name(&self) -> Arc<str> { self.name.clone() }
-    fn path(&self) -> Arc<str> { self.path.clone() }
 }
 
 pub struct ModuleIter<'a> {
@@ -219,7 +281,10 @@ pub const ELF_SIG: [u8; 4] = [127, b'E', b'L', b'F'];
 
 impl ModuleIter<'_> {
     fn next_line(&mut self) -> bool {
-        let line = match self.f.next() { Some(r) => r, None => return false, };
+        let line = match self.f.next() {
+            Some(r) => r,
+            None => return false,
+        };
         let mut line = LineParser::new(line.as_ref());
         let base = line.till('-').unwrap();
         self.base = usize::from_str_radix(base, 16).expect("page base");
@@ -227,7 +292,9 @@ impl ModuleIter<'_> {
         let end = usize::from_str_radix(line.next().unwrap(), 16).expect("page end");
         self.size = end - self.base;
         let _prot = line.next().unwrap().to_string();
-        for _i in 0..3 { line.next(); }
+        for _i in 0..3 {
+            line.next();
+        }
         self.usage = line.rest().trim().into();
         return true;
     }
@@ -236,25 +303,38 @@ impl ModuleIter<'_> {
         loop {
             if !self.cached {
                 self.cached = self.next_line();
-                if !self.cached { return None; }
+                if !self.cached {
+                    return None;
+                }
             }
 
             let mut sig = [0u8; 4];
-            if self.usage.len() > 0 && self.p.read(self.base, &mut sig).is_some() && ELF_SIG == sig {
+            if self.usage.len() > 0 && self.p.read(self.base, &mut sig).is_some() && ELF_SIG == sig
+            {
                 // Moudle Begin
                 let base = self.base;
                 let path = self.usage.clone();
                 let mut size = self.size;
-                let name: Arc<str> = Path::new(path.as_ref()).file_name()
-                                .and_then(|v| v.to_str())
-                                .unwrap_or("").into();
+                let name: Arc<str> = Path::new(path.as_ref())
+                    .file_name()
+                    .and_then(|v| v.to_str())
+                    .unwrap_or("")
+                    .into();
                 loop {
                     self.cached = self.next_line();
-                    if !self.cached || self.usage != path { break; }
+                    if !self.cached || self.usage != path {
+                        break;
+                    }
                     size += self.size;
                 }
-                return Some(Module { comm: CommonModule {base, size}, name, path });
-            } else { self.cached = false; }
+                return Some(Module {
+                    comm: CommonModule { base, size },
+                    name,
+                    path,
+                });
+            } else {
+                self.cached = false;
+            }
         }
     }
 }
@@ -264,7 +344,9 @@ impl<'a> Iterator for ModuleIter<'a> {
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(r) = self.next_module() {
-            if r.path.as_ref() == "[vdso]" { continue; }
+            if r.path.as_ref() == "[vdso]" {
+                continue;
+            }
             return Some(r);
         }
         None

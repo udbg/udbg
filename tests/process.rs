@@ -1,5 +1,4 @@
-
-use udbg_base::*;
+use udbg::*;
 
 #[cfg(target_os = "linux")]
 #[test]
@@ -19,7 +18,8 @@ fn mac() {
             Err(_) => continue,
         };
 
-        println!("{pid} {:?} {:?}",
+        println!(
+            "{pid} {:?} {:?}",
             process_name(pid),
             process_path(pid),
             // process_cmdline(pid)
@@ -28,7 +28,7 @@ fn mac() {
         for i in ps.list_module() {
             println!("{:x} {:?}", i.base, i.path);
         }
-    
+
         // process_fds(pid);
     }
 }

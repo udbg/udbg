@@ -1,7 +1,6 @@
-
-use std::sync::Arc;
-use core::ops::Range;
 use core::cmp::Ordering;
+use core::ops::Range;
+use std::sync::Arc;
 
 pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
     fn as_range(&self) -> Range<T>;
@@ -12,7 +11,9 @@ pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
             Ordering::Equal
         } else if val < r.start {
             Ordering::Greater
-        } else { Ordering::Less }
+        } else {
+            Ordering::Less
+        }
     }
 
     #[inline]
@@ -20,22 +21,29 @@ pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
         self.as_range().contains(&v)
     }
 
-    fn binary_search<'a, S: AsRef<[Self]>+'a>(s: &'a S, val: T) -> Option<&'a Self> {
+    fn binary_search<'a, S: AsRef<[Self]> + 'a>(s: &'a S, val: T) -> Option<&'a Self> {
         let slice = s.as_ref();
-        slice.binary_search_by(|x| x.cmp(val)).ok().and_then(|i| slice.get(i))
+        slice
+            .binary_search_by(|x| x.cmp(val))
+            .ok()
+            .and_then(|i| slice.get(i))
     }
 
-    fn binary_search_mut<'a, S: AsMut<[Self]>+'a>(s: &'a mut S, val: T) -> Option<&'a mut Self> {
+    fn binary_search_mut<'a, S: AsMut<[Self]> + 'a>(s: &'a mut S, val: T) -> Option<&'a mut Self> {
         let slice = s.as_mut();
         let i = slice.binary_search_by(|x| x.cmp(val)).ok()?;
         slice.get_mut(i)
     }
 }
 
-impl<T: RangeValue> RangeValue for Box<T> {
-    fn as_range(&self) -> Range<usize> { self.as_ref().as_range() }
+impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Box<R> {
+    fn as_range(&self) -> Range<S> {
+        self.as_ref().as_range()
+    }
 }
 
-impl<T: RangeValue> RangeValue for Arc<T> {
-    fn as_range(&self) -> Range<usize> { self.as_ref().as_range() }
+impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Arc<R> {
+    fn as_range(&self) -> Range<S> {
+        self.as_ref().as_range()
+    }
 }

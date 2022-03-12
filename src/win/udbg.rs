@@ -1,43 +1,36 @@
-
 use super::*;
-
 use core::time::Duration;
 use std::cell::Cell;
-use std::collections::{HashMap, HashSet};
-use std::mem::{transmute, size_of_val};
-use std::ptr::{null, null_mut};
-use std::ops::Deref;
 use std::cell::UnsafeCell;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::sync::Arc;
-use std::os::windows::io::FromRawHandle;
 use std::io::{Error as IoErr, Result as IoRes};
+use std::mem::{size_of_val, transmute};
+use std::ops::Deref;
+use std::os::windows::io::FromRawHandle;
+use std::ptr::{null, null_mut};
+use std::sync::Arc;
 
-use winapi::um::processthreadsapi::*;
-use winapi::um::winbase::INFINITE;
-use winapi::um::minwinbase::*;
-use winapi::um::debugapi::*;
-use winapi::um::handleapi::*;
 use ntapi::FIELD_OFFSET;
+use winapi::um::debugapi::*;
+use winapi::um::errhandlingapi::GetLastError;
+use winapi::um::handleapi::*;
+use winapi::um::minwinbase::*;
+use winapi::um::processthreadsapi::*;
+use winapi::um::winbase::*;
 
 use winapi::shared::ntstatus::*;
 const EXCEPTION_WX86_BREAKPOINT: u32 = STATUS_WX86_BREAKPOINT as u32;
 const EXCEPTION_WX86_SINGLE_STEP: u32 = STATUS_WX86_SINGLE_STEP as u32;
 
-use serde_value::Value as SerdeVal;
-use ntapi::ntpebteb::{TEB, PEB};
-use ntapi::ntexapi::SYSTEM_THREAD_INFORMATION;
 use crossbeam::atomic::AtomicCell;
+use ntapi::ntexapi::SYSTEM_THREAD_INFORMATION;
+use ntapi::ntpebteb::{PEB, TEB};
 use parking_lot::RwLock;
+use serde_value::Value as SerdeVal;
 
-use super::pdbfile::*;
 use super::ntdll::*;
-use crate::{udbg::*, regs::*, sym::*, range::*};
-
-#[cfg(target_arch = "x86")]
-use std::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
+use crate::{pdbfile::*, pe::PeHelper, range::*, regs::*, shell::udbg_ui, util::to_weak};
 
 pub trait DbgReg {}
 
@@ -55,12 +48,18 @@ pub enum HandleResult {
 
 macro_rules! set_bit {
     ($n:expr, $x:expr, $set:expr) => {
-        if $set { $n |= 1 << $x; } else { $n &= !(1 << $x); }
-    }
+        if $set {
+            $n |= 1 << $x;
+        } else {
+            $n &= !(1 << $x);
+        }
+    };
 }
 
 macro_rules! test_bit {
-    ($n:expr, $x:expr) => { ($n & (1 << $x) > 0) }
+    ($n:expr, $x:expr) => {
+        ($n & (1 << $x) > 0)
+    };
 }
 
 macro_rules! set_bit2 {
@@ -107,14 +106,20 @@ pub trait HWBPRegs: AbstractRegs {
     fn dr6(&self) -> usize;
 }
 
-#[cfg(target_arch="x86_64")]
+#[cfg(target_arch = "x86_64")]
 impl HWBPRegs for CONTEXT {
     fn set_step(&mut self, step: bool) {
         let flags = self.EFlags;
-        self.EFlags = if step { flags | EFLAGS_TF } else { flags & (!EFLAGS_TF) };
+        self.EFlags = if step {
+            flags | EFLAGS_TF
+        } else {
+            flags & (!EFLAGS_TF)
+        };
     }
 
-    fn set_rf(&mut self) { self.EFlags |= EFLAGS_RF; }
+    fn set_rf(&mut self) {
+        self.EFlags |= EFLAGS_RF;
+    }
 
     fn test_eflags(&self, flag: u32) -> bool {
         self.EFlags & flag > 0
@@ -183,20 +188,30 @@ impl HWBPRegs for CONTEXT {
             2 => self.Dr2 = 0,
             _ => self.Dr3 = 0,
         };
-        if self.empty() { self.l_enable(false); }
+        if self.empty() {
+            self.l_enable(false);
+        }
     }
 
     #[inline(always)]
-    fn dr6(&self) -> usize { self.Dr6 as usize }
+    fn dr6(&self) -> usize {
+        self.Dr6 as usize
+    }
 }
 
 impl HWBPRegs for CONTEXT32 {
     fn set_step(&mut self, step: bool) {
         let flags = self.EFlags;
-        self.EFlags = if step { flags | EFLAGS_TF } else { flags & (!EFLAGS_TF) };
+        self.EFlags = if step {
+            flags | EFLAGS_TF
+        } else {
+            flags & (!EFLAGS_TF)
+        };
     }
 
-    fn set_rf(&mut self) { self.EFlags |= EFLAGS_RF; }
+    fn set_rf(&mut self) {
+        self.EFlags |= EFLAGS_RF;
+    }
 
     fn test_eflags(&self, flag: u32) -> bool {
         self.EFlags & flag > 0
@@ -265,11 +280,15 @@ impl HWBPRegs for CONTEXT32 {
             2 => self.Dr2 = 0,
             _ => self.Dr3 = 0,
         };
-        if self.empty() { self.l_enable(false); }
+        if self.empty() {
+            self.l_enable(false);
+        }
     }
 
     #[inline(always)]
-    fn dr6(&self) -> usize { self.Dr6 as usize }
+    fn dr6(&self) -> usize {
+        self.Dr6 as usize
+    }
 }
 
 // TODO
@@ -277,19 +296,25 @@ impl HWBPRegs for CONTEXT32 {
 impl HWBPRegs for CONTEXT {
     fn set_step(&mut self, step: bool) {}
     fn set_rf(&mut self) {}
-    fn test_eflags(&self, flag: u32) -> bool { false }
+    fn test_eflags(&self, flag: u32) -> bool {
+        false
+    }
 
     fn l_enable(&mut self, enable: bool) {}
     fn set_local(&mut self, idx: usize, set: bool) {}
     fn set_rw(&mut self, idx: usize, val: u8) {}
     fn set_len(&mut self, idx: usize, val: u8) {}
 
-    fn empty(&self) -> bool {false}
+    fn empty(&self) -> bool {
+        false
+    }
 
     fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8) {}
     fn unset_bp(&mut self, idx: usize) {}
 
-    fn dr6(&self) -> usize {0}
+    fn dr6(&self) -> usize {
+        0
+    }
 }
 
 pub trait DbgContext: HWBPRegs {
@@ -363,30 +388,36 @@ pub struct DbgThread {
 impl DbgThread {
     pub fn new(thread: HANDLE, local_base: usize, start_address: usize) -> Self {
         unsafe {
-            DbgThread { handle: thread, tid: GetThreadId(thread), local_base, start_address }
+            DbgThread {
+                handle: thread,
+                tid: GetThreadId(thread),
+                local_base,
+                start_address,
+            }
         }
     }
 }
 
 impl From<&CREATE_THREAD_DEBUG_INFO> for DbgThread {
     fn from(info: &CREATE_THREAD_DEBUG_INFO) -> DbgThread {
-        DbgThread::new(info.hThread,
-            info.lpThreadLocalBase as usize,
-            unsafe { transmute(info.lpStartAddress) })
+        DbgThread::new(info.hThread, info.lpThreadLocalBase as usize, unsafe {
+            transmute(info.lpStartAddress)
+        })
     }
 }
 
 impl From<&CREATE_PROCESS_DEBUG_INFO> for DbgThread {
     fn from(info: &CREATE_PROCESS_DEBUG_INFO) -> DbgThread {
-        DbgThread::new(info.hThread,
-            info.lpThreadLocalBase as usize,
-            unsafe { transmute(info.lpStartAddress) })
+        DbgThread::new(info.hThread, info.lpThreadLocalBase as usize, unsafe {
+            transmute(info.lpStartAddress)
+        })
     }
 }
 
 #[derive(Deref)]
 pub struct WinThread {
-    #[deref] base: ThreadData,
+    #[deref]
+    base: ThreadData,
     pub teb: AtomicCell<usize>,
     pub process: *const Process,
     pub infos: Arc<HashMap<u32, SYSTEM_THREAD_INFORMATION>>,
@@ -402,7 +433,7 @@ impl WinThread {
             },
             process: null(),
             teb: AtomicCell::new(0),
-            infos: Arc::new(HashMap::new())
+            infos: Arc::new(HashMap::new()),
         })
     }
 
@@ -421,7 +452,7 @@ impl WinThread {
     }
 }
 
-static mut GetThreadDescription: Option<extern "system" fn(HANDLE, *mut PWSTR)->HRESULT> = None;
+static mut GetThreadDescription: Option<extern "system" fn(HANDLE, *mut PWSTR) -> HRESULT> = None;
 
 #[ctor]
 unsafe fn foo() {
@@ -429,7 +460,7 @@ unsafe fn foo() {
 
     GetThreadDescription = transmute(GetProcAddress(
         GetModuleHandleA(cstr!("kernelbase").as_ptr().cast()),
-        cstr!("GetThreadDescription").as_ptr().cast()
+        cstr!("GetThreadDescription").as_ptr().cast(),
     ));
 }
 
@@ -446,20 +477,25 @@ impl GetProp for WinThread {
 impl UDbgThread for WinThread {
     fn name(&self) -> Arc<str> {
         unsafe {
-            GetThreadDescription.map(|get| {
-                let mut s = null_mut();
-                get(*self.handle, &mut s);
-                let result = String::from_wide_ptr(s);
-                LocalFree(s as _);
-                result
-            }).unwrap_or_default().into()
+            GetThreadDescription
+                .map(|get| {
+                    let mut s = null_mut();
+                    get(*self.handle, &mut s);
+                    let result = String::from_wide_ptr(s);
+                    LocalFree(s as _);
+                    result
+                })
+                .unwrap_or_default()
+                .into()
         }
     }
 
     fn status(&self) -> Arc<str> {
-        self.infos.get(&self.tid).map(|t| {
-            t.status()
-        }).unwrap_or(String::new()).into()
+        self.infos
+            .get(&self.tid)
+            .map(|t| t.status())
+            .unwrap_or(String::new())
+            .into()
     }
 
     fn priority(&self) -> Option<i32> {
@@ -482,13 +518,27 @@ impl UDbgThread for WinThread {
         if teb == 0 {
             teb = if self.handle.is_null() {
                 let h = open_thread(self.tid, THREAD_QUERY_INFORMATION, false);
-                query_thread::<THREAD_BASIC_INFORMATION>(*h, ThreadInfoClass::BasicInformation, None)
+                query_thread::<THREAD_BASIC_INFORMATION>(
+                    *h,
+                    ThreadInfoClass::BasicInformation,
+                    None,
+                )
             } else {
-                query_thread::<THREAD_BASIC_INFORMATION>(*self.handle, ThreadInfoClass::BasicInformation, None)
-            }.map(|t| t.TebBaseAddress as usize).unwrap_or(0);
+                query_thread::<THREAD_BASIC_INFORMATION>(
+                    *self.handle,
+                    ThreadInfoClass::BasicInformation,
+                    None,
+                )
+            }
+            .map(|t| t.TebBaseAddress as usize)
+            .unwrap_or(0);
             self.teb.store(teb);
         }
-        if teb > 0 { teb.into() } else { None }
+        if teb > 0 {
+            teb.into()
+        } else {
+            None
+        }
     }
 
     fn entry(&self) -> usize {
@@ -496,8 +546,14 @@ impl UDbgThread for WinThread {
             let h = open_thread(self.tid, THREAD_QUERY_INFORMATION, false);
             query_thread::<usize>(*h, ThreadInfoClass::QuerySetWin32StartAddress, None)
         } else {
-            query_thread::<usize>(*self.handle, ThreadInfoClass::QuerySetWin32StartAddress, None)
-        }.or_else(|| self.infos.get(&self.tid).map(|t| t.StartAddress as usize)).unwrap_or(0)
+            query_thread::<usize>(
+                *self.handle,
+                ThreadInfoClass::QuerySetWin32StartAddress,
+                None,
+            )
+        }
+        .or_else(|| self.infos.get(&self.tid).map(|t| t.StartAddress as usize))
+        .unwrap_or(0)
     }
 
     fn suspend(&self) -> IoRes<i32> {
@@ -510,9 +566,7 @@ impl UDbgThread for WinThread {
         }
     }
     fn resume(&self) -> IoRes<u32> {
-        unsafe {
-            Ok(ResumeThread(*self.handle))
-        }
+        unsafe { Ok(ResumeThread(*self.handle)) }
     }
     fn get_context(&self, cx: &mut ThreadContext) -> IoRes<()> {
         if cx.get_context(*self.handle) {
@@ -546,7 +600,9 @@ impl UDbgThread for WinThread {
     fn last_error(&self) -> Option<u32> {
         self.teb().and_then(|teb| unsafe {
             use ntapi::ntpebteb::TEB;
-            self.process.as_ref()?.read_value::<u32>(teb + ntapi::FIELD_OFFSET!(TEB, LastErrorValue))
+            self.process
+                .as_ref()?
+                .read_value::<u32>(teb + ntapi::FIELD_OFFSET!(TEB, LastErrorValue))
         })
     }
 }
@@ -555,7 +611,9 @@ pub fn get_selector_entry(th: HANDLE, s: u32) -> usize {
     unsafe {
         let mut ldt: LDT_ENTRY = core::mem::zeroed();
         let r = GetThreadSelectorEntry(th, s, transmute(&mut ldt));
-        ldt.BaseLow as usize | ((ldt.HighWord.Bits_mut().BaseMid() as usize) << 16) | ((ldt.HighWord.Bits_mut().BaseHi() as usize) << 24)
+        ldt.BaseLow as usize
+            | ((ldt.HighWord.Bits_mut().BaseMid() as usize) << 16)
+            | ((ldt.HighWord.Bits_mut().BaseHi() as usize) << 24)
     }
 }
 
@@ -563,7 +621,9 @@ pub fn get_selector_entry_wow64(th: HANDLE, s: u32) -> u32 {
     unsafe {
         let mut ldt: WOW64_LDT_ENTRY = core::mem::zeroed();
         let r = Wow64GetThreadSelectorEntry(th, s, &mut ldt);
-        ldt.BaseLow as u32 | ((ldt.HighWord.Bits_mut().BaseMid() as u32) << 16) | ((ldt.HighWord.Bits_mut().BaseHi() as u32) << 24)
+        ldt.BaseLow as u32
+            | ((ldt.HighWord.Bits_mut().BaseMid() as u32) << 16)
+            | ((ldt.HighWord.Bits_mut().BaseHi() as u32) << 24)
     }
 }
 
@@ -591,11 +651,12 @@ pub struct WinModule {
     file: HANDLE,
 }
 
-impl WinModule {
-}
+impl WinModule {}
 
 impl UDbgModule for WinModule {
-    fn data(&self) -> &sym::ModuleData { &self.data }
+    fn data(&self) -> &ModuleData {
+        &self.data
+    }
     // fn is_32(&self) -> bool { IS_ARCH_X64 || IS_ARCH_ARM64 }
     fn symbol_status(&self) -> SymbolStatus {
         if self.syms.pdb.read().is_some() {
@@ -607,16 +668,16 @@ impl UDbgModule for WinModule {
     fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
         self.syms.add_symbol(offset, name)
     }
-    fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<sym::Symbol> {
+    fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
         self.syms.find_symbol(offset, max_offset)
     }
     fn runtime_function(&self) -> Option<&[RUNTIME_FUNCTION]> {
         self.funcs.as_slice().into()
     }
-    fn get_symbol(&self, name: &str) -> Option<sym::Symbol> {
+    fn get_symbol(&self, name: &str) -> Option<Symbol> {
         self.syms.get_symbol(name)
     }
-    fn symbol_file(&self) -> Option<Arc<dyn sym::SymbolFile>> {
+    fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
         self.syms.pdb.read().clone()
     }
     fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
@@ -624,16 +685,16 @@ impl UDbgModule for WinModule {
             Some(path) => Arc::new(PDBData::load(path, None)?),
             None => {
                 let mmap = map_or_open(self.file, &self.data.path).ok_or("map failed")?;
-                let pe = pe::parse(&mmap).ok_or("parse pe")?;
+                let pe = PeHelper::parse(&mmap).ok_or("parse pe")?;
                 find_pdb(&self.data.path, &pe)? as Arc<dyn SymbolFile>
             }
         });
         Ok(())
     }
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item=sym::Symbol>>> {
+    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol>>> {
         Ok(Box::new(self.syms.enum_symbol(pat)?.into_iter()))
     }
-    fn get_exports(&self) -> Option<Vec<sym::Symbol>> {
+    fn get_exports(&self) -> Option<Vec<Symbol>> {
         Some(self.syms.exports.iter().map(|i| i.1.clone()).collect())
     }
 }
@@ -641,25 +702,37 @@ impl UDbgModule for WinModule {
 fn system_root() -> &'static str {
     static mut ROOT: Option<Box<str>> = None;
     unsafe {
-        ROOT.get_or_insert_with(||
-            std::env::var("SystemRoot").map(Into::into).unwrap_or_else(|_| r"C:\Windows".into())
-        )
+        ROOT.get_or_insert_with(|| {
+            std::env::var("SystemRoot")
+                .map(Into::into)
+                .unwrap_or_else(|_| r"C:\Windows".into())
+        })
     }
 }
 
 impl UDbgSymMgr for SymbolManager<WinModule> {
-    fn check_load_module(&self, read: &dyn ReadMemory, base: usize, size: usize, path: &str, file: HANDLE) -> bool {
+    fn check_load_module(
+        &self,
+        read: &dyn ReadMemory,
+        base: usize,
+        size: usize,
+        path: &str,
+        file: HANDLE,
+    ) -> bool {
         use goblin::pe::header::*;
 
         let mut symgr = self.base.write();
-        if symgr.exists(base) { return false; }
+        if symgr.exists(base) {
+            return false;
+        }
         // println!("check_load_module: {:x} {} {}", base, path, symgr.list.len());
 
         let ui = udbg_ui();
         let mut buf = vec![0u8; 0x1000];
         let mmap = map_or_open(file, path);
         let m = match &mmap {
-            Some(m) => m, None => {
+            Some(m) => m,
+            None => {
                 ui.warn(format!("map {} failed", path));
                 if read.read_memory(base, &mut buf).is_none() {
                     ui.error(format!("read pe falied: {:x} {}", base, path));
@@ -669,24 +742,31 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
             }
         };
         let h = match Header::parse(&m) {
-            Ok(h) => h, Err(err) => {
+            Ok(h) => h,
+            Err(err) => {
                 ui.error(format!("parse {} failed: {:?}", path, err));
                 return false;
             }
         };
         let o = match &h.optional_header {
-            Some(o) => o, None => {
+            Some(o) => o,
+            None => {
                 ui.error(format!("no optional_header: {}", path));
                 return false;
             }
         };
         let name = match path.rfind(|c| c == '\\' || c == '/') {
-            Some(p) => &path[p+1..], None => &path,
+            Some(p) => &path[p + 1..],
+            None => &path,
         };
 
         let entry = o.standard_fields.address_of_entry_point as usize;
-        let size = if size > 0 { size } else { o.windows_fields.size_of_image as usize };
-        let arch = pe::machine_to_arch(h.coff_header.machine);
+        let size = if size > 0 {
+            size
+        } else {
+            o.windows_fields.size_of_image as usize
+        };
+        let arch = PeHelper::arch_name(h.coff_header.machine).unwrap_or_default();
         // info!("load {:x} {} {}", base, arch, name);
 
         let mut name: Arc<str> = name.into();
@@ -698,18 +778,32 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
         }
         let root = system_root();
         let data = ModuleData {
-            user_module: (unicase::Ascii::new(root) != path.chars().take(root.len()).collect::<String>()).into(),
-            base, size, entry, arch, name, path: path.into(),
+            user_module: (unicase::Ascii::new(root)
+                != path.chars().take(root.len()).collect::<String>())
+            .into(),
+            base,
+            size,
+            entry,
+            arch,
+            name,
+            path: path.into(),
         };
 
         let mut funcs: Vec<RUNTIME_FUNCTION> = Default::default();
         let mut pdb_sig = String::new();
         let mut pdb_name = String::new();
-        let syms = if let Some(pe) = pe::parse(&m) {
-            pdb_sig = pe.get_pdb_signature().unwrap_or_default().to_ascii_uppercase();
-            pdb_name = pe.debug_data.and_then(|d| d.codeview_pdb70_debug_info)
-                                    .and_then(|d| std::str::from_utf8(&d.filename).ok())
-                                    .unwrap_or_default().trim_matches(|c: char| c.is_whitespace() || c == '\0').to_string();
+        let syms = if let Some(pe) = PeHelper::parse(&m) {
+            pdb_sig = pe
+                .get_pdb_signature()
+                .unwrap_or_default()
+                .to_ascii_uppercase();
+            pdb_name = pe
+                .debug_data
+                .and_then(|d| d.codeview_pdb70_debug_info)
+                .and_then(|d| std::str::from_utf8(&d.filename).ok())
+                .unwrap_or_default()
+                .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+                .to_string();
             let pdb = match find_pdb(&path, &pe) {
                 Ok(p) => {
                     // info!("load pdb: {}", p.path);
@@ -723,25 +817,40 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
                 }
             };
 
-            pub fn get_exports_from_pe(pe: &pe::PeHelper) -> Syms {
+            pub fn get_exports_from_pe(pe: &PeHelper) -> Syms {
                 let mut result = Syms::new();
                 for e in pe.exports.iter() {
-                    let len = pe.exception_data.as_ref().and_then(|x| x.find_function(e.rva as u32).ok())
-                        .and_then(|f| f.map(|f| f.end_address - f.begin_address)).unwrap_or(SYM_NOLEN);
-                    result.insert(e.rva, Symbol {
-                        name: e.name.unwrap_or("<>").into(),
-                        type_id: 0, len,
-                        offset: e.rva as u32,
-                        flags: (SymbolFlags::FUNCTION | SymbolFlags::EXPORT).bits(),
-                    });
+                    let len = pe
+                        .exception_data
+                        .as_ref()
+                        .and_then(|x| x.find_function(e.rva as u32).ok())
+                        .and_then(|f| f.map(|f| f.end_address - f.begin_address))
+                        .unwrap_or(SYM_NOLEN);
+                    result.insert(
+                        e.rva,
+                        Symbol {
+                            name: e.name.unwrap_or("<>").into(),
+                            type_id: 0,
+                            len,
+                            offset: e.rva as u32,
+                            flags: (SymbolFlags::FUNCTION | SymbolFlags::EXPORT).bits(),
+                        },
+                    );
                 }
                 result
             }
 
             // TODO: aarch64
-            #[cfg(any(target_arch="x86_64", target_arch="x86"))] {
-                funcs = pe.exception_data.iter().map(|e| e.functions()).flatten().filter_map(|x| x.ok())
-                                                .map(|x| unsafe { transmute::<_, RUNTIME_FUNCTION>(x) }).collect::<Vec<_>>();
+            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+            {
+                funcs = pe
+                    .exception_data
+                    .iter()
+                    .map(|e| e.functions())
+                    .flatten()
+                    .filter_map(|x| x.ok())
+                    .map(|x| unsafe { transmute::<_, RUNTIME_FUNCTION>(x) })
+                    .collect::<Vec<_>>();
             }
             SymbolsData {
                 pdb: pdb.into(),
@@ -760,7 +869,10 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
             }
         };
         symgr.add(WinModule {
-            data, funcs, syms: syms.into(), file
+            data,
+            funcs,
+            syms: syms.into(),
+            file,
         });
         true
     }
@@ -768,7 +880,7 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
 
 pub struct CommonAdaptor {
     pub base: UDbgBase,
-    tid_to_run: UnsafeCell<HashSet<u32>>,       // 标记为继续运行的线程ID
+    tid_to_run: UnsafeCell<HashSet<u32>>, // 标记为继续运行的线程ID
     dbg_reg: [Cell<usize>; 4],
     pub symgr: SymbolManager<WinModule>,
     pub protected_thread: RwLock<Vec<u32>>,
@@ -781,62 +893,104 @@ pub struct CommonAdaptor {
     pub uspy_tid: Cell<u32>,
 }
 
-impl<T> ReadMemory for T where T: Deref<Target=CommonAdaptor> {
+impl<T> ReadMemory for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
     default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         self.process.read_memory(addr, data)
     }
 }
 
-impl<T> WriteMemory for T where T: Deref<Target=CommonAdaptor> {
+impl<T> WriteMemory for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
     default fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
         match self.process.write_memory(addr, data) {
-            0 => None, s => Some(s),
+            0 => None,
+            s => Some(s),
         }
     }
 }
 
-impl<T> TargetMemory for T where T: Deref<Target=CommonAdaptor> {
+impl<T> TargetMemory for T
+where
+    T: Deref<Target = CommonAdaptor> + UDbgAdaptor,
+{
     default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
         self.deref().enum_memory()
     }
-    
+
     default fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
         self.deref().virtual_query(address)
     }
 
     // size: usize, type: RWX, commit/reverse
-    default fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> { Err(UDbgError::NotSupport) }
+    default fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> {
+        Err(UDbgError::NotSupport)
+    }
     default fn virtual_free(&self, address: usize) {}
+
+    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+        collect_memory_info(&self.process, self)
+    }
+}
+
+impl<T> BpManager for T
+where
+    T: Deref<Target = CommonAdaptor> + UDbgAdaptor,
+{
+    default fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
+        Ok(self.deref().add_bp(self, &opt)?)
+    }
+
+    default fn get_bp(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+        Some(self.deref().bp_map.read().get(&id)?.clone())
+    }
+
+    default fn get_bp_list(&self) -> Vec<BpID> {
+        self.deref().get_bp_list()
+    }
 }
 
 impl CommonAdaptor {
     pub fn new(mut base: UDbgBase, p: Process) -> CommonAdaptor {
         let ui = udbg_ui();
-        let symbol_cache = ui.get_config::<String>("symbol_cache").or_else(|| {
-            let var = std::env::var("_NT_SYMBOL_PATH").ok();
-            var.and_then(|s| s.split('*').nth(1).map(ToString::to_string))
-        }).unwrap_or_default();
+        let symbol_cache = ui
+            .get_config::<String>("symbol_cache")
+            .or_else(|| {
+                let var = std::env::var("_NT_SYMBOL_PATH").ok();
+                var.and_then(|s| s.split('*').nth(1).map(ToString::to_string))
+            })
+            .unwrap_or_default();
         let sds = ui.get_config::<bool>("show_debug_string").unwrap_or(true);
         let symgr = SymbolManager::new(symbol_cache.into());
         symgr.is_wow64.set(p.is_wow64());
-        let image_base = p.peb().and_then(|peb| p.read_value::<PEB>(peb))
-            .map(|peb| peb.ImageBaseAddress).unwrap_or(null_mut()) as usize;
+        let image_base = p
+            .peb()
+            .and_then(|peb| p.read_value::<PEB>(peb))
+            .map(|peb| peb.ImageBaseAddress)
+            .unwrap_or(null_mut()) as usize;
         base.pid.set(p.pid());
         base.image_base = image_base;
 
         let result = Self {
-            process: p, dbg_reg: Default::default(),
+            process: p,
+            dbg_reg: Default::default(),
             bp_map: RwLock::new(HashMap::new()),
             show_debug_string: sds.into(),
             protected_thread: vec![].into(),
             tid_to_run: UnsafeCell::new(HashSet::new()),
-            base, symgr,
+            base,
+            symgr,
             step_tid: Cell::new(0),
             cx32: Cell::new(null_mut()),
             context: Cell::new(null_mut()),
             uspy_tid: Cell::new(0),
         };
-        result.check_all_module(&result.process); result
+        result.check_all_module(&result.process);
+        result
     }
 
     pub fn get_mapped_file_name(&self, module: usize) -> Option<String> {
@@ -850,7 +1004,9 @@ impl CommonAdaptor {
 
     pub fn get_hwbp_index(&self) -> Option<usize> {
         for (i, p) in self.dbg_reg.iter().enumerate() {
-            if p.get() == 0 { return Some(i); }
+            if p.get() == 0 {
+                return Some(i);
+            }
         }
         None
     }
@@ -867,7 +1023,11 @@ impl CommonAdaptor {
             SuspendThread(*handle);
             let r = GetThreadContext(*handle, &mut context);
             ResumeThread(*handle);
-            if r > 0 { Some(context_to_regs(&context)) } else { None }
+            if r > 0 {
+                Some(context_to_regs(&context))
+            } else {
+                None
+            }
         }
     }
 
@@ -887,16 +1047,16 @@ impl CommonAdaptor {
     }
 
     pub fn is_process_exited(&self, timeout: u32) -> bool {
-        use winapi::um::synchapi::WaitForSingleObject;
         use winapi::shared::winerror::WAIT_TIMEOUT;
-        unsafe {
-            WAIT_TIMEOUT != WaitForSingleObject(*self.process.handle, timeout)
-        }
+        use winapi::um::synchapi::WaitForSingleObject;
+        unsafe { WAIT_TIMEOUT != WaitForSingleObject(*self.process.handle, timeout) }
     }
 
     pub fn wait_process_exit(&self) {
         while !self.is_process_exited(10) {
-            if !self.base.is_opened() { break; }
+            if !self.base.is_opened() {
+                break;
+            }
         }
     }
 
@@ -905,7 +1065,13 @@ impl CommonAdaptor {
         self.bp_map.read().get(&id).is_some()
     }
 
-    fn handle_reply<C: DbgContext>(&self, this: &dyn UDbgAdaptor, reply: UserReply, exception: &ExceptionRecord, context: &mut C) {
+    fn handle_reply<C: DbgContext>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        reply: UserReply,
+        exception: &ExceptionRecord,
+        context: &mut C,
+    ) {
         let tid = self.base.event_tid.get();
         match reply {
             UserReply::StepIn => {
@@ -918,7 +1084,13 @@ impl CommonAdaptor {
                     context.set_step(false);
                     self.check_result(
                         "add bp",
-                        self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true).thread(self.base.event_tid.get()))
+                        self.add_int3_bp(
+                            this,
+                            &BpOpt::int3(address)
+                                .temp(true)
+                                .enable(true)
+                                .thread(self.base.event_tid.get()),
+                        ),
                     );
                 } else {
                     context.set_step(true);
@@ -927,9 +1099,12 @@ impl CommonAdaptor {
                 }
             }
             UserReply::Goto(address) => {
-                self.check_result("add bp", self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true)));
+                self.check_result(
+                    "add bp",
+                    self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true)),
+                );
             }
-            _ => { }
+            _ => {}
         };
     }
 
@@ -945,7 +1120,10 @@ impl CommonAdaptor {
     }
 
     pub fn user_handle_exception(&self, first: bool, tb: &mut TraceBuf) -> HandleResult {
-        let reply = (tb.callback)(UEvent::Exception {first, code: tb.record.code});
+        let reply = (tb.callback)(UEvent::Exception {
+            first,
+            code: tb.record.code,
+        });
         if reply == UserReply::Run(true) {
             HandleResult::Continue
         } else {
@@ -953,7 +1131,14 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_int3_breakpoint<C: DbgContext>(&self, this: &dyn UDbgAdaptor, eh: &mut dyn EventHandler, first: bool, tb: &mut TraceBuf, context: &mut C) -> HandleResult {
+    pub fn handle_int3_breakpoint<C: DbgContext>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        eh: &mut dyn EventHandler,
+        first: bool,
+        tb: &mut TraceBuf,
+        context: &mut C,
+    ) -> HandleResult {
         let address = tb.record.address;
         // info!("Breakpoint On 0x{:x}", address);
         let id = address as BpID;
@@ -964,7 +1149,13 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_step<C: DbgContext>(&self, this: &dyn UDbgAdaptor, eh: &mut dyn EventHandler, tb: &mut TraceBuf, context: &mut C) -> HandleResult {
+    pub fn handle_step<C: DbgContext>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        eh: &mut dyn EventHandler,
+        tb: &mut TraceBuf,
+        context: &mut C,
+    ) -> HandleResult {
         let address = tb.record.address;
         let dr6 = context.dr6();
         let id: BpID = if dr6 & 0x01 > 0 {
@@ -975,7 +1166,9 @@ impl CommonAdaptor {
             -3
         } else if dr6 & 0x08 > 0 {
             -4
-        } else { address as BpID };
+        } else {
+            address as BpID
+        };
 
         if let Some(bp) = self.get_bp(id) {
             // 可执行硬件断点检查预期地址
@@ -988,7 +1181,7 @@ impl CommonAdaptor {
             // 当前位置存在断点
             if let Some(i) = bp.hard_index() {
                 if !bp.temp.get() {
-                    context.set_rf();   // 临时禁用硬件断点
+                    context.set_rf(); // 临时禁用硬件断点
                 }
                 self.handle_bp_has_data(this, eh, bp, tb, context)
             } else {
@@ -1007,7 +1200,14 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_bp_has_data<C: DbgContext>(&self, this: &dyn UDbgAdaptor, eh: &mut dyn EventHandler, bp: Arc<Breakpoint>, tb: &mut TraceBuf, context: &mut C) -> HandleResult {
+    pub fn handle_bp_has_data<C: DbgContext>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        eh: &mut dyn EventHandler,
+        bp: Arc<Breakpoint>,
+        tb: &mut TraceBuf,
+        context: &mut C,
+    ) -> HandleResult {
         bp.hit_count.set(bp.hit_count.get() + 1);
         if bp.temp.get() {
             self.remove_breakpoint(this, &bp);
@@ -1015,10 +1215,8 @@ impl CommonAdaptor {
 
         // correct the pc register
         let pc = match bp.bp_type {
-            InnerBpType::Table {origin, ..} => {
-                C::REG::from_usize(origin)
-            }
-            InnerBpType::Soft(_) | InnerBpType::Hard {..} => {
+            InnerBpType::Table { origin, .. } => C::REG::from_usize(origin),
+            InnerBpType::Soft(_) | InnerBpType::Hard { .. } => {
                 C::REG::from_usize(tb.record.address as usize)
             }
         };
@@ -1029,7 +1227,12 @@ impl CommonAdaptor {
         let tid = self.base.event_tid.get();
         let hitted = bp.hit_tid.map(|t| t == tid).unwrap_or(true);
         if hitted {
-            self.handle_reply(this, (tb.callback)(UEvent::Breakpoint(bp.clone())), tb.record, context);
+            self.handle_reply(
+                this,
+                (tb.callback)(UEvent::Breakpoint(bp.clone())),
+                tb.record,
+                context,
+            );
         }
 
         let id = bp.get_id();
@@ -1048,14 +1251,19 @@ impl CommonAdaptor {
                 eh.cont(HandleResult::Handled);
                 loop {
                     match eh.fetch(tb) {
-                        Some(_) => if self.base.event_tid.get() == tid {
-                            // TODO: maybe other exception?
-                            assert!(matches!(tb.record.code, EXCEPTION_SINGLE_STEP | EXCEPTION_WX86_SINGLE_STEP));
-                            break;
-                        } else if let Some(s) = eh.handle(tb) {
-                            eh.cont(s);
-                        } else {
-                            return HandleResult::Handled;
+                        Some(_) => {
+                            if self.base.event_tid.get() == tid {
+                                // TODO: maybe other exception?
+                                assert!(matches!(
+                                    tb.record.code,
+                                    EXCEPTION_SINGLE_STEP | EXCEPTION_WX86_SINGLE_STEP
+                                ));
+                                break;
+                            } else if let Some(s) = eh.handle(tb) {
+                                eh.cont(s);
+                            } else {
+                                return HandleResult::Handled;
+                            }
                         }
                         None => return HandleResult::Handled,
                     }
@@ -1075,29 +1283,44 @@ impl CommonAdaptor {
         HandleResult::Continue
     }
 
-    pub fn handle_possible_table_bp<C: DbgContext>(&self, this: &dyn UDbgAdaptor, eh: &mut dyn EventHandler, tb: &mut TraceBuf, context: &mut C) -> HandleResult {
+    pub fn handle_possible_table_bp<C: DbgContext>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        eh: &mut dyn EventHandler,
+        tb: &mut TraceBuf,
+        context: &mut C,
+    ) -> HandleResult {
         let pc = if C::IS_32 {
             context.ip().to_usize() as i32 as isize
-        } else { context.ip().to_usize() as isize };
+        } else {
+            context.ip().to_usize() as isize
+        };
         // info!("exception address: {:x}", pc);
-        if pc > 0 { return HandleResult::NotHandled; }
+        if pc > 0 {
+            return HandleResult::NotHandled;
+        }
 
         // self.get_bp(pc as BpID).map(|bp| self.handle_bp_has_data(tid, &bp, record, context)).unwrap_or(C::NOT_HANDLED)
         if let Some(bp) = self.get_bp(pc as BpID) {
             self.handle_bp_has_data(this, eh, bp, tb, context)
-        } else { HandleResult::NotHandled }
+        } else {
+            HandleResult::NotHandled
+        }
     }
 
     pub fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<WinThread>> {
         open_win_thread(&self.process, tid)
     }
 
-    pub fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=tid_t>+'a>> {
+    pub fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
         Ok(Box::new(self.process.enum_thread().map(|e| e.tid())))
     }
 
     pub fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
-        Ok(Box::new(MemoryIter { dbg: self, address: 0 }))
+        Ok(Box::new(MemoryIter {
+            dbg: self,
+            address: 0,
+        }))
     }
 
     pub fn find_table_bp_index(&self) -> Option<isize> {
@@ -1120,17 +1343,24 @@ impl CommonAdaptor {
                 hit_count: Cell::new(0),
                 bp_type: InnerBpType::Soft(raw_byte),
 
-                target: to_weak(this), common: self,
+                target: unsafe { to_weak(this) },
+                common: self,
             });
-            if opt.enable { self.enable_breadpoint(this, &bp, true)?; }
+            if opt.enable {
+                self.enable_breadpoint(this, &bp, true)?;
+            }
             self.bp_map.write().insert(bp.get_id(), bp.clone());
             Ok(bp)
-        } else { Err(UDbgError::InvalidAddress) }
+        } else {
+            Err(UDbgError::InvalidAddress)
+        }
     }
 
     pub fn add_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
         self.base.check_opened()?;
-        if self.bp_exists(opt.address as BpID) { return Err(UDbgError::BpExists); }
+        if self.bp_exists(opt.address as BpID) {
+            return Err(UDbgError::BpExists);
+        }
 
         let bp = if let Some(rw) = opt.rw {
             // hardware breakpoint
@@ -1142,17 +1372,21 @@ impl CommonAdaptor {
                     hit_count: Cell::new(0),
                     hit_tid: opt.tid,
                     bp_type: InnerBpType::Hard(HwbpInfo {
-                        rw: rw.into(), index: index as u8,
+                        rw: rw.into(),
+                        index: index as u8,
                         len: opt.len.unwrap_or(HwbpLen::L1).into(),
                     }),
 
-                    target: to_weak(this), common: self,
+                    target: unsafe { to_weak(this) },
+                    common: self,
                 });
                 self.occupy_hwbp_index(index, opt.address);
                 // 硬件断点额外记录
                 self.bp_map.write().insert(-(index as BpID + 1), bp.clone());
                 Ok(bp)
-            } else { Err(UDbgError::HWBPSlotMiss) }
+            } else {
+                Err(UDbgError::HWBPSlotMiss)
+            }
         } else if opt.table {
             // table breakpoint
             let origin = this.read_ptr(opt.address).ok_or("read origin failed")?;
@@ -1163,13 +1397,16 @@ impl CommonAdaptor {
                 temp: Cell::new(opt.temp),
                 hit_count: Cell::new(0),
                 hit_tid: opt.tid,
-                bp_type: InnerBpType::Table {index, origin},
+                bp_type: InnerBpType::Table { index, origin },
 
-                target: to_weak(this), common: self,
+                target: unsafe { to_weak(this) },
+                common: self,
             });
             self.bp_map.write().insert(index, bp.clone());
             Ok(bp)
-        } else { self.add_int3_bp(this, opt) }?;
+        } else {
+            self.add_int3_bp(this, opt)
+        }?;
         let bpid = bp.get_id();
         self.bp_map.write().insert(bpid, bp.clone());
 
@@ -1182,21 +1419,26 @@ impl CommonAdaptor {
     pub fn remove_breakpoint(&self, this: &dyn UDbgAdaptor, bp: &Breakpoint) {
         let mut hard_id = 0;
         let mut table_index = None;
-        self.check_result("disable bp falied", self.enable_breadpoint(this, &bp, false));
+        self.check_result(
+            "disable bp falied",
+            self.enable_breadpoint(this, &bp, false),
+        );
         if self.bp_map.write().remove(&bp.get_id()).is_some() {
             match bp.bp_type {
                 InnerBpType::Hard(info) => {
                     self.occupy_hwbp_index(info.index as usize, 0);
                     hard_id = -(info.index as BpID + 1);
                 }
-                InnerBpType::Table{index, ..} => {
+                InnerBpType::Table { index, .. } => {
                     table_index = Some(index);
                 }
                 _ => {}
             }
         }
         // delete hardware breakpoint
-        if hard_id < 0 { self.bp_map.write().remove(&hard_id); }
+        if hard_id < 0 {
+            self.bp_map.write().remove(&hard_id);
+        }
         // delete table breakpoint
         table_index.map(|i| self.bp_map.write().remove(&i));
     }
@@ -1211,7 +1453,12 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn enable_hwbp_for_thread(&self, handle: HANDLE, info: HwbpInfo, enable: bool) -> UDbgResult<bool> {
+    pub fn enable_hwbp_for_thread(
+        &self,
+        handle: HANDLE,
+        info: HwbpInfo,
+        enable: bool,
+    ) -> UDbgResult<bool> {
         let mut result = Ok(enable);
         let mut cx = Align16::<CONTEXT>::new();
         let mut wow64cx = Align16::<WOW64_CONTEXT>::new();
@@ -1223,15 +1470,26 @@ impl CommonAdaptor {
             let tid = GetThreadId(handle);
             let count = SuspendThread(handle) as i32;
             if count < 0 {
-                udbg_ui().error(format!("SuspendThread: {}:{:p} {}", tid, handle, get_last_error()));
+                udbg_ui().error(format!(
+                    "SuspendThread: {}:{:p} {}",
+                    tid,
+                    handle,
+                    GetLastError()
+                ));
             }
             for _ in 0..1 {
                 let r = GetThreadContext(handle, context);
-                if r == 0 { result = Err(UDbgError::GetContext(get_last_error())); break; }
+                if r == 0 {
+                    result = Err(UDbgError::GetContext(GetLastError()));
+                    break;
+                }
                 self.enable_hwbp_for_context(context, info, enable);
                 let r = SetThreadContext(handle, context);
-                if r == 0 { result = Err(UDbgError::SetContext(get_last_error())); break; }
-                #[cfg(target_arch="x86_64")]
+                if r == 0 {
+                    result = Err(UDbgError::SetContext(GetLastError()));
+                    break;
+                }
+                #[cfg(target_arch = "x86_64")]
                 if Wow64GetThreadContext(handle, cx32) > 0 {
                     self.enable_hwbp_for_context(cx32, info, enable);
                     Wow64SetThreadContext(handle, cx32);
@@ -1244,13 +1502,20 @@ impl CommonAdaptor {
 
     pub fn enable_all_hwbp_for_thread(&self, handle: HANDLE, enable: bool) {
         for i in 0..4 {
-            self.get_bp(-i).map(|bp| if let InnerBpType::Hard(info) = bp.bp_type {
-                 self.enable_hwbp_for_thread(handle, info, enable);
+            self.get_bp(-i).map(|bp| {
+                if let InnerBpType::Hard(info) = bp.bp_type {
+                    self.enable_hwbp_for_thread(handle, info, enable);
+                }
             });
         }
     }
 
-    pub fn enable_breadpoint(&self, dbg: &dyn UDbgAdaptor, bp: &Breakpoint, enable: bool) -> UDbgResult<bool> {
+    pub fn enable_breadpoint(
+        &self,
+        dbg: &dyn UDbgAdaptor,
+        bp: &Breakpoint,
+        enable: bool,
+    ) -> UDbgResult<bool> {
         match bp.bp_type {
             InnerBpType::Soft(raw_byte) => {
                 let written = if enable {
@@ -1262,9 +1527,11 @@ impl CommonAdaptor {
                 if written.unwrap_or_default() > 0 {
                     bp.enabled.set(enable);
                     Ok(enable)
-                } else { Err(UDbgError::MemoryError) }
+                } else {
+                    Err(UDbgError::MemoryError)
+                }
             }
-            InnerBpType::Table {index, origin} => {
+            InnerBpType::Table { index, origin } => {
                 let r = if enable {
                     dbg.write_ptr(bp.address, index as usize)
                 } else {
@@ -1273,15 +1540,21 @@ impl CommonAdaptor {
                 if r.is_some() {
                     bp.enabled.set(enable);
                     Ok(enable)
-                } else { Err(UDbgError::MemoryError) }
+                } else {
+                    Err(UDbgError::MemoryError)
+                }
             }
             InnerBpType::Hard(info) => {
                 let mut result = Ok(enable);
                 // Set Context for each thread
                 for tid in self.enum_thread()? {
                     // Ignore threads
-                    if self.protected_thread.read().contains(&tid) { continue; }
-                    if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) { continue; }
+                    if self.protected_thread.read().contains(&tid) {
+                        continue;
+                    }
+                    if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) {
+                        continue;
+                    }
                     // Set Debug Register
                     let th = match dbg.open_thread(tid) {
                         Ok(r) => r,
@@ -1292,37 +1565,62 @@ impl CommonAdaptor {
                     };
                     result = self.enable_hwbp_for_thread(*th.handle, info, enable);
                     if let Err(e) = &result {
-                        udbg_ui().error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
+                        udbg_ui()
+                            .error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
                         // break;
                     }
                 }
                 // Set Context for current thread
-                for _ in 0..1 { 
-                    if bp.hit_tid.is_some() && bp.hit_tid != Some(self.base.event_tid.get()) { break; }
+                for _ in 0..1 {
+                    if bp.hit_tid.is_some() && bp.hit_tid != Some(self.base.event_tid.get()) {
+                        break;
+                    }
                     if !self.context.get().is_null() {
-                        self.enable_hwbp_for_context(unsafe { self.context.get().as_mut().unwrap() }, info, enable);
+                        self.enable_hwbp_for_context(
+                            unsafe { self.context.get().as_mut().unwrap() },
+                            info,
+                            enable,
+                        );
                     }
                     let cx32 = self.cx32.get();
                     if !cx32.is_null() {
-                        self.enable_hwbp_for_context(unsafe { self.cx32.get().as_mut().unwrap() }, info, enable);
+                        self.enable_hwbp_for_context(
+                            unsafe { self.cx32.get().as_mut().unwrap() },
+                            info,
+                            enable,
+                        );
                     }
                 }
                 // TODO: wow64
-                if result.is_ok() { bp.enabled.set(enable); }
+                if result.is_ok() {
+                    bp.enabled.set(enable);
+                }
                 result
             }
         }
     }
 
-    pub fn enable_bp(&self, dbg: &dyn UDbgAdaptor, id: BpID, enable: bool) -> Result<bool, UDbgError> {
+    pub fn enable_bp(
+        &self,
+        dbg: &dyn UDbgAdaptor,
+        id: BpID,
+        enable: bool,
+    ) -> Result<bool, UDbgError> {
         if let Some(bp) = self.bp_map.read().get(&id) {
             self.enable_breadpoint(dbg, bp, enable)
-        } else { Err(UDbgError::NotFound) }
+        } else {
+            Err(UDbgError::NotFound)
+        }
     }
 
     #[inline]
     pub fn get_bp_list(&self) -> Vec<BpID> {
-        self.bp_map.read().keys().filter(|&id| *id > 0).cloned().collect()
+        self.bp_map
+            .read()
+            .keys()
+            .filter(|&id| *id > 0)
+            .cloned()
+            .collect()
     }
 
     pub fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
@@ -1333,7 +1631,8 @@ impl CommonAdaptor {
         if sym.symbol.len() > 0 && sym.offset > max_offset {
             sym.symbol = "".into();
             sym.offset = addr - sym.mod_base;
-        } sym
+        }
+        sym
     }
 
     pub fn get_symbol(&self, addr: usize, max_offset: usize) -> Option<SymbolInfo> {
@@ -1351,15 +1650,29 @@ impl CommonAdaptor {
         //     self.symgr.check_load_module(dbg, base, m.size(), m.path().as_ref(), null_mut());
         // }
         use winapi::um::psapi::LIST_MODULES_ALL;
-        for m in self.process.get_module_list(LIST_MODULES_ALL).unwrap_or_default() {
+        for m in self
+            .process
+            .get_module_list(LIST_MODULES_ALL)
+            .unwrap_or_default()
+        {
             rest_loaded.remove(&m);
-            if self.symgr.base.read().exists(m) { continue; }
+            if self.symgr.base.read().exists(m) {
+                continue;
+            }
             // get_module_path() 在 wow64 进程里拿到的是64位dll的路径，不准确
             // let path = self.process.get_module_path(m).unwrap_or_default();
-            let path = self.process.get_mapped_file_name(m)
-                    .unwrap_or_else(|| self.process.get_module_path(m).unwrap_or_default());
+            let path = self
+                .process
+                .get_mapped_file_name(m)
+                .unwrap_or_else(|| self.process.get_module_path(m).unwrap_or_default());
             self.process.get_module_info(m).map(|m| {
-                self.symgr.check_load_module(dbg, m.lpBaseOfDll as usize, m.SizeOfImage as usize, path.as_ref(), null_mut());
+                self.symgr.check_load_module(
+                    dbg,
+                    m.lpBaseOfDll as usize,
+                    m.SizeOfImage as usize,
+                    path.as_ref(),
+                    null_mut(),
+                );
             });
         }
         // 移除已经卸载了的模块
@@ -1367,7 +1680,6 @@ impl CommonAdaptor {
             // println!("remove: {:x}", m);
             self.symgr.remove(m);
         }
-
     }
 
     pub fn output_debug_string(&self, dbg: &dyn UDbgAdaptor, address: usize, count: usize) {
@@ -1408,40 +1720,53 @@ pub trait NtHeader {
 
 impl NtHeader for IMAGE_NT_HEADERS {
     #[inline]
-    fn as_32(&self) -> &IMAGE_NT_HEADERS32 { unsafe { transmute(self) } }
+    fn as_32(&self) -> &IMAGE_NT_HEADERS32 {
+        unsafe { transmute(self) }
+    }
     #[inline]
-    fn as_64(&self) -> &IMAGE_NT_HEADERS64  { unsafe { transmute(self) } }
+    fn as_64(&self) -> &IMAGE_NT_HEADERS64 {
+        unsafe { transmute(self) }
+    }
     #[inline]
-    fn is_32(&self) -> bool { self.FileHeader.Machine == IMAGE_FILE_MACHINE_I386 }
+    fn is_32(&self) -> bool {
+        self.FileHeader.Machine == IMAGE_FILE_MACHINE_I386
+    }
 }
 
-pub fn get_memory_map(p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory> {
+pub fn collect_memory_info(p: &Process, this: &dyn UDbgAdaptor) -> Vec<MemoryPageInfo> {
     const PAGE_SIZE: usize = 0x1000;
     const MAX_HEAPS: usize = 1000;
 
     let peb = p.peb().unwrap_or_default();
-    let mut result = this.enum_memory().unwrap().map(|m| {
-        let mut usage = String::new();
-        let mut flags = match m.type_ {
-            MEM_PRIVATE => MF_PRIVATE,
-            MEM_IMAGE => MF_IMAGE,
-            MEM_MAPPED => MF_MAP, _ => 0,
-        };
-        if m.base == 0x7FFE0000 {
-            usage.push_str("KUSER_SHARED_DATA");
-        } else if m.base == peb {
-            usage.push_str("PEB");
-            flags |= MF_PEB;
-        }
+    let mut result = this
+        .enum_memory()
+        .unwrap()
+        .map(|m| {
+            let mut usage = String::new();
+            let mut flags = match m.type_ {
+                MEM_PRIVATE => MF_PRIVATE,
+                MEM_IMAGE => MF_IMAGE,
+                MEM_MAPPED => MF_MAP,
+                _ => 0,
+            };
+            if m.base == 0x7FFE0000 {
+                usage.push_str("KUSER_SHARED_DATA");
+            } else if m.base == peb {
+                usage.push_str("PEB");
+                flags |= MF_PEB;
+            }
 
-        UiMemory {
-            alloc_base: m.alloc_base,
-            base: m.base, size: m.size,
-            flags, usage: usage.into(),
-            type_: m.type_().into(),
-            protect: m.protect().into(),
-        }
-    }).collect::<Vec<_>>();
+            MemoryPageInfo {
+                alloc_base: m.alloc_base,
+                base: m.base,
+                size: m.size,
+                flags,
+                usage: usage.into(),
+                type_: m.type_().into(),
+                protect: m.protect().into(),
+            }
+        })
+        .collect::<Vec<_>>();
 
     // Mark the thread's stack
     for tid in this.enum_thread().unwrap() {
@@ -1450,24 +1775,30 @@ pub fn get_memory_map(p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory> {
                 this.read_value::<NT_TIB>(teb + FIELD_OFFSET!(TEB, NtTib))
                     .map(|tib| tib.StackLimit as usize)
             });
-            stack.map(|stack| RangeValue::binary_search_mut(&mut result, stack).map(|m| {
-                m.usage = format!("Stack ~{}", tid).into();
-                m.flags |= MF_STACK;
-            }));
+            stack.map(|stack| {
+                RangeValue::binary_search_mut(&mut result, stack).map(|m| {
+                    m.usage = format!("Stack ~{}", tid).into();
+                    m.flags |= MF_STACK;
+                })
+            });
         }
     }
 
     // Mark the process heaps
     let heaps_num = if peb > 0 {
-        this.read_value::<ULONG>(peb + FIELD_OFFSET!(PEB, NumberOfHeaps)).unwrap_or(0)
-    } else { 0 } as usize;
+        this.read_value::<ULONG>(peb + FIELD_OFFSET!(PEB, NumberOfHeaps))
+            .unwrap_or(0)
+    } else {
+        0
+    } as usize;
 
     if heaps_num > 0 && heaps_num < MAX_HEAPS {
         let mut buf = vec![0usize; heaps_num];
-        this.read_value::<usize>(peb + FIELD_OFFSET!(PEB, ProcessHeaps)).map(|p_heaps| {
-            let len = this.read_to_array(p_heaps, &mut buf);
-            buf.resize(len, 0);
-        });
+        this.read_value::<usize>(peb + FIELD_OFFSET!(PEB, ProcessHeaps))
+            .map(|p_heaps| {
+                let len = this.read_to_array(p_heaps, &mut buf);
+                buf.resize(len, 0);
+            });
         for i in 0..buf.len() {
             RangeValue::binary_search_mut(&mut result, buf[i]).map(|m| {
                 m.usage = format!("Heap #{}", i).into();
@@ -1477,23 +1808,30 @@ pub fn get_memory_map(p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory> {
     }
 
     // Mark the Executable modules
-    // use std::ffi::CStr;
     let mut i = 0;
     while i < result.len() {
         let mut module = 0usize;
         let mut module_size = 0usize;
         let sections: Option<Vec<IMAGE_SECTION_HEADER>> = {
-            let m = &mut result[i]; i += 1;
+            let m = &mut result[i];
+            i += 1;
             p.get_mapped_file_name(m.base).and_then(|p| {
                 module = m.base;
                 m.usage = p.into();
-                if m.flags & MF_IMAGE == 0 { return None; }
+                if m.flags & MF_IMAGE == 0 {
+                    return None;
+                }
 
                 this.read_nt_header(m.base).map(|(nt, nt_offset)| {
-                    module_size = if nt.is_32() { nt.as_32().OptionalHeader.SizeOfImage } else { nt.as_64().OptionalHeader.SizeOfImage } as usize;
-                    let p_section_header = module + nt_offset +
-                                           FIELD_OFFSET!(IMAGE_NT_HEADERS, OptionalHeader) +
-                                           nt.FileHeader.SizeOfOptionalHeader as usize;
+                    module_size = if nt.is_32() {
+                        nt.as_32().OptionalHeader.SizeOfImage
+                    } else {
+                        nt.as_64().OptionalHeader.SizeOfImage
+                    } as usize;
+                    let p_section_header = module
+                        + nt_offset
+                        + FIELD_OFFSET!(IMAGE_NT_HEADERS, OptionalHeader)
+                        + nt.FileHeader.SizeOfOptionalHeader as usize;
                     let mut buf = vec![
                         unsafe { core::mem::zeroed::<IMAGE_SECTION_HEADER>() };
                         nt.FileHeader.NumberOfSections as usize
@@ -1505,16 +1843,19 @@ pub fn get_memory_map(p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory> {
         };
         if let Some(sections) = sections {
             while i < result.len() && result[i].base - module < module_size {
-                let m = &mut result[i]; i += 1;
-                sections.iter().find(|sec| m.base == sec.VirtualAddress as usize + module)
-                               .map(|sec| {
-                    let name = &sec.Name;
-                    let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
-                    let name = &name[..len];
-                    let sec_name = unsafe { std::str::from_utf8_unchecked(name) };
-                    m.usage = sec_name.into();
-                    m.flags |= MF_SECTION;
-                });
+                let m = &mut result[i];
+                i += 1;
+                sections
+                    .iter()
+                    .find(|sec| m.base == sec.VirtualAddress as usize + module)
+                    .map(|sec| {
+                        let name = &sec.Name;
+                        let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
+                        let name = &name[..len];
+                        let sec_name = unsafe { std::str::from_utf8_unchecked(name) };
+                        m.usage = sec_name.into();
+                        m.flags |= MF_SECTION;
+                    });
             }
         }
     }
@@ -1522,36 +1863,59 @@ pub fn get_memory_map(p: &Process, this: &dyn UDbgAdaptor) -> Vec<UiMemory> {
 }
 
 pub fn query_object_name_timeout(handle: HANDLE) -> String {
-    call_with_timeout(
-        Duration::from_millis(10),
-        || query_object_name(handle).ok().map(|r| {
-            // r.as_mut_slice().and_then(to_dos_path).map(|p| p.to_utf8()).unwrap_or_else(|| r.to_string())
-            r.to_string()
-        }).unwrap_or_default()
-    ).unwrap_or_default()
+    call_with_timeout(Duration::from_millis(10), || {
+        query_object_name(handle)
+            .ok()
+            .map(|r| {
+                // r.as_mut_slice().and_then(to_dos_path).map(|p| p.to_utf8()).unwrap_or_else(|| r.to_string())
+                r.to_string()
+            })
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
 }
 
-pub fn enum_process_handle<'a>(pid: pid_t, p: HANDLE) -> Result<Box<dyn Iterator<Item = UiHandle> + 'a>, UDbgError> {
+pub fn enum_process_handle<'a>(
+    pid: pid_t,
+    p: HANDLE,
+) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
     let mut type_cache = HashMap::<u32, String>::new();
     Ok(Box::new(system_handle_information().filter_map(move |h| {
-        if h.pid() != pid { return None; }
+        if h.pid() != pid {
+            return None;
+        }
         let mut handle = 0 as HANDLE;
         unsafe {
-            let r = DuplicateHandle(p, h.HandleValue as HANDLE, GetCurrentProcess(), &mut handle, 0, FALSE, DUPLICATE_SAME_ACCESS);
-            if 0 == r || handle.is_null() { return None; }
+            let r = DuplicateHandle(
+                p,
+                h.HandleValue as HANDLE,
+                GetCurrentProcess(),
+                &mut handle,
+                0,
+                FALSE,
+                DUPLICATE_SAME_ACCESS,
+            );
+            if 0 == r || handle.is_null() {
+                return None;
+            }
 
             let handle = Handle::from_raw_handle(handle);
-            let et = type_cache.entry(h.ObjectTypeIndex as u32).or_insert_with(||
-                query_object_type(*handle).map(|t| t.TypeName.to_string()).unwrap_or_default()
-            );
+            let et = type_cache
+                .entry(h.ObjectTypeIndex as u32)
+                .or_insert_with(|| {
+                    query_object_type(*handle)
+                        .map(|t| t.TypeName.to_string())
+                        .unwrap_or_default()
+                });
             let type_name = et.clone();
             let name = if type_name == "Process" {
                 Process { handle }.image_path().unwrap_or_default()
             } else {
                 query_object_name_timeout(*handle)
             };
-            Some(UiHandle {
-                name, type_name,
+            Some(HandleInfo {
+                name,
+                type_name,
                 ty: h.ObjectTypeIndex as u32,
                 handle: h.HandleValue as usize,
             })
@@ -1570,7 +1934,9 @@ impl<'a> Iterator for MemoryIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(p) = self.dbg.virtual_query(self.address) {
             self.address += p.size;
-            if p.is_commit() { return Some(p); }
+            if p.is_commit() {
+                return Some(p);
+            }
         }
         return None;
     }
@@ -1582,26 +1948,49 @@ pub struct StandardAdaptor {
     pub debug: CommonAdaptor,
     pub record: UnsafeCell<ExceptionRecord>,
     pub threads: UnsafeCell<HashMap<u32, DbgThread>>,
-    pub attached: Cell<bool>,     // create by attach
+    pub attached: Cell<bool>, // create by attach
     pub detaching: Cell<bool>,
 }
 
 unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
 
-const PROC_THREAD_ATTRIBUTE_NUMBER: usize =    0x0000FFFF;
-const PROC_THREAD_ATTRIBUTE_THREAD: usize =    0x00010000;
-const PROC_THREAD_ATTRIBUTE_INPUT: usize =     0x00020000;
-const PROC_THREAD_ATTRIBUTE_ADDITIVE: usize =  0x00040000;
+const PROC_THREAD_ATTRIBUTE_NUMBER: usize = 0x0000FFFF;
+const PROC_THREAD_ATTRIBUTE_THREAD: usize = 0x00010000;
+const PROC_THREAD_ATTRIBUTE_INPUT: usize = 0x00020000;
+const PROC_THREAD_ATTRIBUTE_ADDITIVE: usize = 0x00040000;
 
-const fn ProcThreadAttributeValue(Number: usize, Thread: usize, Input: usize, Additive: usize) -> usize {
-    ((Number) & PROC_THREAD_ATTRIBUTE_NUMBER) |
-     (if Thread != 0 { PROC_THREAD_ATTRIBUTE_THREAD } else { 0 }) |
-     (if Input != 0 { PROC_THREAD_ATTRIBUTE_INPUT } else { 0 }) |
-     (if Additive != 0 { PROC_THREAD_ATTRIBUTE_ADDITIVE } else { 0 })
+const fn ProcThreadAttributeValue(
+    Number: usize,
+    Thread: usize,
+    Input: usize,
+    Additive: usize,
+) -> usize {
+    ((Number) & PROC_THREAD_ATTRIBUTE_NUMBER)
+        | (if Thread != 0 {
+            PROC_THREAD_ATTRIBUTE_THREAD
+        } else {
+            0
+        })
+        | (if Input != 0 {
+            PROC_THREAD_ATTRIBUTE_INPUT
+        } else {
+            0
+        })
+        | (if Additive != 0 {
+            PROC_THREAD_ATTRIBUTE_ADDITIVE
+        } else {
+            0
+        })
 }
 
-pub fn create_debug_process(path: &str, cwd: Option<&str>, args: &[&str], pi: &mut PROCESS_INFORMATION, ppid: Option<pid_t>) -> UDbgResult<Process> {
+pub fn create_debug_process(
+    path: &str,
+    cwd: Option<&str>,
+    args: &[&str],
+    pi: &mut PROCESS_INFORMATION,
+    ppid: Option<pid_t>,
+) -> UDbgResult<Process> {
     unsafe {
         let mut cmdline = path.trim().to_string();
         if cmdline.find(char::is_whitespace).is_some() {
@@ -1615,13 +2004,20 @@ pub fn create_debug_process(path: &str, cwd: Option<&str>, args: &[&str], pi: &m
         let cwd = cwd.as_ref().map(|r| r.as_ptr()).unwrap_or(null());
 
         const DEFAULT_OPTION: u32 = DEBUG_ONLY_THIS_PROCESS | CREATE_NEW_CONSOLE;
-        let mut create_process = |opt: u32, si: LPSTARTUPINFOW| CreateProcessW(
-            null_mut(),
-            cmdline.to_wide().as_mut_ptr(),
-            null_mut(), null_mut(), FALSE,
-            DEFAULT_OPTION | opt,
-            null_mut(), cwd, si, pi
-        );
+        let mut create_process = |opt: u32, si: LPSTARTUPINFOW| {
+            CreateProcessW(
+                null_mut(),
+                cmdline.to_wide().as_mut_ptr(),
+                null_mut(),
+                null_mut(),
+                FALSE,
+                DEFAULT_OPTION | opt,
+                null_mut(),
+                cwd,
+                si,
+                pi,
+            )
+        };
         let r = if let Some(ppid) = ppid {
             let mut si: STARTUPINFOEXW = core::mem::zeroed();
             si.StartupInfo.cb = size_of_val(&si) as u32;
@@ -1634,23 +2030,33 @@ pub fn create_debug_process(path: &str, cwd: Option<&str>, args: &[&str], pi: &m
 
             InitializeProcThreadAttributeList(pa.as_mut_ptr(), 1, 0, &mut psize);
             let ProcThreadAttributeParentProcess = 0;
-            let PROC_THREAD_ATTRIBUTE_PARENT_PROCESS = ProcThreadAttributeValue(ProcThreadAttributeParentProcess, 0, 1, 0);
+            let PROC_THREAD_ATTRIBUTE_PARENT_PROCESS =
+                ProcThreadAttributeValue(ProcThreadAttributeParentProcess, 0, 1, 0);
             if UpdateProcThreadAttribute(
-                pa.as_mut_ptr(), 0,
+                pa.as_mut_ptr(),
+                0,
                 PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-                transmute(&mut handle), size_of_val(&handle),
-                null_mut(), null_mut()
-            ) == 0 { return Err("set ppid falied".into()); }
+                transmute(&mut handle),
+                size_of_val(&handle),
+                null_mut(),
+                null_mut(),
+            ) == 0
+            {
+                return Err("set ppid falied".into());
+            }
             si.lpAttributeList = pa.as_mut_ptr();
 
             let r = create_process(EXTENDED_STARTUPINFO_PRESENT, transmute(&mut si));
-            DeleteProcThreadAttributeList(pa.as_mut_ptr()); r
+            DeleteProcThreadAttributeList(pa.as_mut_ptr());
+            r
         } else {
             let mut si: STARTUPINFOW = core::mem::zeroed();
             si.cb = size_of_val(&si) as u32;
             create_process(0, &mut si)
         };
-        if r == 0 { return Err(UDbgError::Text(get_last_error_string())); }
+        if r == 0 {
+            return Err(UDbgError::system());
+        }
         Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).check_errstr("get pid")?)
     }
 }
@@ -1693,19 +2099,29 @@ impl StandardAdaptor {
             }
         });
         // Win7上ntdll.dll得到的是相对路径
-        let exists = path.as_ref().map(|p| Path::new(p).exists()).unwrap_or_default();
+        let exists = path
+            .as_ref()
+            .map(|p| Path::new(p).exists())
+            .unwrap_or_default();
         if !exists {
             path = self.process.get_mapped_file_name(base).or_else(|| unsafe {
                 let mut buf = [0u16; 500];
                 if GetFinalPathNameByHandleW(file, buf.as_mut_ptr(), buf.len() as u32, 2) > 0 {
-                    to_dos_path(&mut buf).map(String::from_wide).or_else(|| Some(String::from_wide(&buf)))
-                } else { error!("GetFinalPathNameByHandleW"); None }
+                    to_dos_path(&mut buf)
+                        .map(String::from_wide)
+                        .or_else(|| Some(String::from_wide(&buf)))
+                } else {
+                    error!("GetFinalPathNameByHandleW");
+                    None
+                }
             });
         }
         if let Some(path) = path {
             self.symgr.check_load_module(self, base, 0, &path, file);
             // self.base().module_load(&path, base);
-        } else { error!("get path of module: 0x{:x} failed", base); }
+        } else {
+            error!("get path of module: 0x{:x} failed", base);
+        }
     }
 
     #[inline]
@@ -1722,7 +2138,11 @@ impl StandardAdaptor {
             let wow64 = self.symgr.is_wow64.get();
             let handle = unsafe { Handle::clone_from_raw(t.handle) }?;
             Ok(Box::new(WinThread {
-                base: ThreadData {tid: t.tid, wow64, handle},
+                base: ThreadData {
+                    tid: t.tid,
+                    wow64,
+                    handle,
+                },
                 process: &self.process,
                 teb: AtomicCell::new(t.local_base),
                 infos: Arc::new(HashMap::new()),
@@ -1749,7 +2169,10 @@ impl StandardAdaptor {
             set_thread_context(tid, c)
         };
         if !suc {
-            error!("fatal: SetThreadContext {} {}", get_last_error(), get_last_error_string());
+            error!(
+                "fatal: SetThreadContext {}",
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
@@ -1758,31 +2181,30 @@ impl StandardAdaptor {
 pub fn wait_for_debug_event(timeout: u32) -> Option<DEBUG_EVENT> {
     unsafe {
         let mut dv: DEBUG_EVENT = core::mem::zeroed();
-        if WaitForDebugEvent(&mut dv, timeout) == 0 { None }
-        else { Some(dv) }
+        if WaitForDebugEvent(&mut dv, timeout) == 0 {
+            None
+        } else {
+            Some(dv)
+        }
     }
 }
 
 #[inline(always)]
 pub fn continue_debug_event(pid: u32, tid: u32, status: u32) -> bool {
-    unsafe {
-        ContinueDebugEvent(pid, tid, status) != 0
-    }
+    unsafe { ContinueDebugEvent(pid, tid, status) != 0 }
 }
 
 impl AdaptorSpec for StandardAdaptor {
     fn handle(&self) -> HANDLE {
         *self.debug.process.handle
     }
-    
+
     fn exception_context(&self) -> UDbgResult<PCONTEXT> {
         Ok(self.context.get())
     }
 
     fn exception_record(&self) -> UDbgResult<PEXCEPTION_RECORD> {
-        unsafe {
-            Ok(core::mem::transmute(self.record.get()))
-        }
+        unsafe { Ok(core::mem::transmute(self.record.get())) }
     }
 }
 
@@ -1807,7 +2229,9 @@ impl TargetControl for StandardAdaptor {
         unsafe {
             if DebugBreakProcess(*self.process.handle) > 0 {
                 Ok(())
-            } else { Err(UDbgError::system()) }
+            } else {
+                Err(UDbgError::system())
+            }
         }
     }
 
@@ -1817,7 +2241,9 @@ impl TargetControl for StandardAdaptor {
 }
 
 impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase { &self.base }
+    fn base(&self) -> &UDbgBase {
+        &self.base
+    }
 
     fn get_thread_context(&self, tid: u32) -> Option<Registers> {
         self.debug.get_registers(tid)
@@ -1831,29 +2257,21 @@ impl UDbgAdaptor for StandardAdaptor {
         Some(&self.symgr)
     }
 
-    fn enum_module<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=Arc<dyn UDbgModule+'a>>+'a>> {
+    fn enum_module<'a>(
+        &'a self,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
         if self.base.is_opened() {
             self.check_all_module(self);
         }
         Ok(self.symgr.enum_module())
     }
 
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item=tid_t>+'a>> {
+    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
         if self.base.is_opened() {
             return self.debug.enum_thread();
         }
         Ok(Box::new(self.threads().iter().map(|(_, t)| t.tid)))
     }
-
-    fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
-        Ok(self.debug.add_bp(self, &opt)?)
-    }
-
-    fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
-        Some(self.bp_map.read().get(&id)?.clone())
-    }
-
-    fn get_bp_list(&self) -> Vec<BpID> { self.debug.get_bp_list() }
 
     fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
         let p = self.cx32.get();
@@ -1864,10 +2282,6 @@ impl UDbgAdaptor for StandardAdaptor {
         }
     }
 
-    fn get_memory_map(&self) -> Vec<UiMemory> {
-        get_memory_map(&self.process, self as &dyn UDbgAdaptor)
-    }
-
     fn open_thread(&self, tid: tid_t) -> Result<Box<dyn UDbgThread>, UDbgError> {
         StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
@@ -1876,43 +2290,46 @@ impl UDbgAdaptor for StandardAdaptor {
         open_all_thread(&self.process, self.base.pid.get(), Some(self))
     }
 
-    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = UiHandle> + 'a>, UDbgError> {
+    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
         enum_process_handle(self.base.pid.get(), *self.process.handle)
     }
 
-    fn event_loop(&self, callback: &mut UDbgCallback) -> UDbgResult<()> {unsafe {
-        let wow64 = self.symgr.is_wow64.get();
-        udbg_ui().info(format!("wow64: {}", wow64));
+    fn event_loop(&self, callback: &mut UDbgCallback) -> UDbgResult<()> {
+        unsafe {
+            let wow64 = self.symgr.is_wow64.get();
+            udbg_ui().info(format!("wow64: {}", wow64));
 
-        if self.base.is_opened() {
-            if wow64 {
-                self.base.update_arch(ARCH_X86);
+            if self.base.is_opened() {
+                if wow64 {
+                    self.base.update_arch(ARCH_X86);
+                }
+                self.wait_process_exit();
+                return Ok(());
             }
-            self.wait_process_exit();
-            return Ok(());
+
+            let mut cx = Align16::<CONTEXT>::new();
+            let mut cx32 = core::mem::zeroed();
+            let mut eh = Win32Handler {
+                event: core::mem::zeroed(),
+                wow64,
+                this: self,
+                first_bp_hitted: false,
+                first_bp32_hitted: self.attached.get(),
+            };
+            let mut buf = TraceBuf {
+                callback,
+                cx: cx.as_mut(),
+                cx32: &mut cx32,
+                record: self.record(),
+            };
+
+            while let Some(s) = eh.fetch(&mut buf).and_then(|_| eh.handle(&mut buf)) {
+                eh.cont(s);
+            }
+
+            Ok(())
         }
-
-        let mut cx = Align16::<CONTEXT>::new();
-        let mut cx32 = core::mem::zeroed();
-        let mut eh = Win32Handler {
-            event: core::mem::zeroed(),
-            wow64, this: self,
-            first_bp_hitted: false,
-            first_bp32_hitted: self.attached.get(),
-        };
-        let mut buf = TraceBuf {
-            callback,
-            cx: cx.as_mut(),
-            cx32: &mut cx32,
-            record: self.record(),
-        };
-
-        while let Some(s) = eh.fetch(&mut buf).and_then(|_| eh.handle(&mut buf)) {
-            eh.cont(s);
-        }
-
-        Ok(())
-    }}
+    }
 }
 
 pub struct TraceBuf<'a> {
@@ -1945,7 +2362,11 @@ impl Win32Handler<'_> {
             self.base.event_pc.set(*AbstractRegs::ip(cx) as usize);
             self.debug.context.set(cx);
         } else {
-            warn!("get_thread_context {} failed {}", self.event.dwThreadId, get_last_error());
+            warn!(
+                "get_thread_context {} failed {}",
+                self.event.dwThreadId,
+                std::io::Error::last_os_error()
+            );
         }
     }
 }
@@ -1994,7 +2415,12 @@ impl<'a> EventHandler for Win32Handler<'a> {
                         udbg_ui().error(format!("CREATE_PROCESS_DEBUG_EVENT {}", tid));
                     }
                     self.threads().insert(tid, DbgThread::from(info));
-                    self.try_load_module(info.lpImageName as usize, info.lpBaseOfImage as usize, info.hFile, info.fUnicode > 0);
+                    self.try_load_module(
+                        info.lpImageName as usize,
+                        info.lpBaseOfImage as usize,
+                        info.hFile,
+                        info.fUnicode > 0,
+                    );
                     self.update_context(buf);
                     (buf.callback)(ProcessCreate);
                     (buf.callback)(ThreadCreate(tid));
@@ -2017,7 +2443,7 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     self.update_context(buf);
                     let code = self.event.u.ExitProcess().dwExitCode;
                     (buf.callback)(ProcessExit(code));
-                    return None;  // TODO: check if all process exited
+                    return None; // TODO: check if all process exited
                 }
                 CREATE_THREAD_DEBUG_EVENT => {
                     let info = self.event.u.CreateThread();
@@ -2041,7 +2467,12 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     self.update_context(buf);
                     // https://docs.microsoft.com/zh-cn/windows/win32/api/minwinbase/ns-minwinbase-load_dll_debug_info
                     let info = self.event.u.LoadDll();
-                    self.try_load_module(info.lpImageName as usize, info.lpBaseOfDll as usize, info.hFile, info.fUnicode > 0);
+                    self.try_load_module(
+                        info.lpImageName as usize,
+                        info.lpBaseOfDll as usize,
+                        info.hFile,
+                        info.fUnicode > 0,
+                    );
                     if let Some(m) = self.symgr.find_module(info.lpBaseOfDll as usize) {
                         (buf.callback)(ModuleLoad(m));
                     }
@@ -2060,9 +2491,17 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     if self.show_debug_string.get() {
                         let s = self.event.u.DebugString();
                         if s.fUnicode > 0 {
-                            self.output_debug_string_wide(this, s.lpDebugStringData as usize, s.nDebugStringLength as usize);
+                            self.output_debug_string_wide(
+                                this,
+                                s.lpDebugStringData as usize,
+                                s.nDebugStringLength as usize,
+                            );
                         } else {
-                            self.output_debug_string(this, s.lpDebugStringData as usize, s.nDebugStringLength as usize);
+                            self.output_debug_string(
+                                this,
+                                s.lpDebugStringData as usize,
+                                s.nDebugStringLength as usize,
+                            );
                         }
                     } else {
                         cotinue_status = HandleResult::NotHandled;
@@ -2071,7 +2510,10 @@ impl<'a> EventHandler for Win32Handler<'a> {
                 RIP_EVENT => {
                     // https://docs.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-rip_info
                     let info = self.event.u.RipInfo();
-                    udbg_ui().error(format!("RIP_EVENT: Error: {:x} Type: {}", info.dwError, info.dwType));
+                    udbg_ui().error(format!(
+                        "RIP_EVENT: Error: {:x} Type: {}",
+                        info.dwError, info.dwType
+                    ));
                 }
                 EXCEPTION_DEBUG_EVENT => {
                     self.update_context(buf);
@@ -2081,15 +2523,18 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     let cx32 = buf.cx32.as_mut().unwrap();
 
                     let record = self.record();
-                    let wow64 = self.wow64 && match record.code as i32 {
-                        STATUS_WX86_BREAKPOINT | STATUS_WX86_SINGLE_STEP |
-                        STATUS_WX86_UNSIMULATE | STATUS_WX86_INTERNAL_ERROR |
-                        STATUS_WX86_FLOAT_STACK_CHECK => true,
-                        #[cfg(any(target_arch="x86_64", target_arch="x86"))]
-                        _ => cx.SegCs == 0x23,
-                        #[cfg(any(target_arch="aarch64"))]
-                        _ => false,
-                    };
+                    let wow64 = self.wow64
+                        && match record.code as i32 {
+                            STATUS_WX86_BREAKPOINT
+                            | STATUS_WX86_SINGLE_STEP
+                            | STATUS_WX86_UNSIMULATE
+                            | STATUS_WX86_INTERNAL_ERROR
+                            | STATUS_WX86_FLOAT_STACK_CHECK => true,
+                            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                            _ => cx.SegCs == 0x23,
+                            #[cfg(any(target_arch = "aarch64"))]
+                            _ => false,
+                        };
                     // println!("record.code: {:x} wow64: {}", record.code, wow64);
                     if wow64 {
                         self.get_context(tid, cx32);
@@ -2102,21 +2547,33 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     cotinue_status = match record.code {
                         EXCEPTION_WX86_BREAKPOINT => {
                             if self.first_bp32_hitted {
-                                self.debug.handle_int3_breakpoint(this, self, first, buf, cx32)
+                                self.debug
+                                    .handle_int3_breakpoint(this, self, first, buf, cx32)
                             } else {
                                 self.first_bp32_hitted = true;
-                                self.debug.handle_reply(this, (buf.callback)(InitBp), buf.record, cx32);
+                                self.debug.handle_reply(
+                                    this,
+                                    (buf.callback)(InitBp),
+                                    buf.record,
+                                    cx32,
+                                );
                                 HandleResult::NotHandled
                             }
                         }
                         EXCEPTION_BREAKPOINT => {
                             if self.first_bp_hitted {
-                                self.debug.handle_int3_breakpoint(this, self, first, buf, cx)
+                                self.debug
+                                    .handle_int3_breakpoint(this, self, first, buf, cx)
                             } else {
                                 self.first_bp_hitted = true;
                                 // 创建32位进程时忽略 附加32位进程时不忽略
                                 if !self.symgr.is_wow64.get() || self.attached.get() {
-                                    self.debug.handle_reply(this, (buf.callback)(InitBp), buf.record, cx);
+                                    self.debug.handle_reply(
+                                        this,
+                                        (buf.callback)(InitBp),
+                                        buf.record,
+                                        cx,
+                                    );
                                 }
                                 HandleResult::Continue
                             }
@@ -2181,27 +2638,33 @@ impl<'a> EventHandler for Win32Handler<'a> {
         continue_debug_event(self.event.dwProcessId, self.event.dwThreadId, status as u32);
 
         if self.detaching.get() {
-            udbg_ui().info(
-                &format!("detach: {}", unsafe { DebugActiveProcessStop(self.event.dwProcessId) })
-            );
+            udbg_ui().info(&format!("detach: {}", unsafe {
+                DebugActiveProcessStop(self.event.dwProcessId)
+            }));
             // return None;
         }
     }
 }
 
 pub fn open_win_thread(process: *const Process, tid: tid_t) -> UDbgResult<Box<WinThread>> {
-    WinThread::new(tid).map(|mut t| unsafe {
-        t.process = process;
-        t.base.wow64 = process.as_ref().map(|p| p.is_wow64()).unwrap_or_default();
-        Box::new(t)
-    }).ok_or(UDbgError::system())
+    WinThread::new(tid)
+        .map(|mut t| unsafe {
+            t.process = process;
+            t.base.wow64 = process.as_ref().map(|p| p.is_wow64()).unwrap_or_default();
+            Box::new(t)
+        })
+        .ok_or(UDbgError::system())
 }
 
-pub fn open_all_thread(p: *const Process, pid: pid_t, map: Option<&StandardAdaptor>) -> Vec<Box<dyn UDbgThread>> {
+pub fn open_all_thread(
+    p: *const Process,
+    pid: pid_t,
+    map: Option<&StandardAdaptor>,
+) -> Vec<Box<dyn UDbgThread>> {
     let mut info: HashMap<u32, SYSTEM_THREAD_INFORMATION> = HashMap::new();
-    let threads = enum_thread().filter_map(|t|
-        if t.pid() == pid { Some(t.tid()) } else { None }
-    ).collect::<HashSet<_>>();
+    let threads = enum_thread()
+        .filter_map(|t| if t.pid() == pid { Some(t.tid()) } else { None })
+        .collect::<HashSet<_>>();
 
     match system_process_information() {
         Ok(infos) => {
@@ -2255,9 +2718,18 @@ impl UDbgEngine for DefaultEngine {
         }
     }
 
-    fn create(&self, base: UDbgBase, path: &str, cwd: Option<&str>, args: &[&str]) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn create(
+        &self,
+        base: UDbgBase,
+        path: &str,
+        cwd: Option<&str>,
+        args: &[&str],
+    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
         let ppid = udbg_ui().get_config("ppid");
-        Ok(StandardAdaptor::new(base, create_debug_process(path, cwd, args, &mut pi, ppid)?))
+        Ok(StandardAdaptor::new(
+            base,
+            create_debug_process(path, cwd, args, &mut pi, ppid)?,
+        ))
     }
 }
