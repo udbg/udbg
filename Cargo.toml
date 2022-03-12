@@ -30,7 +30,7 @@ crossbeam = '0.8'
 parking_lot = '0.11'
 serde-value = '0.7'
 derive_more = '0.99'
-goblin = {version = '0.2.0'}
+goblin = {version = '0.5'}
 memmap = {version = '0.7.0'}
 encoding = {version = '0.2.3'}
 cpp_demangle = {version = '0.3'}

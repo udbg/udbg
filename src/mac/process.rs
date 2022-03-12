@@ -288,7 +288,9 @@ impl UDbgThread for MacThread {
     fn name(&self) -> Arc<str> {
         self.handle.extended_info().map(|info| unsafe {
             CStr::from_bytes_with_nul_unchecked(
-                core::mem::transmute(info.pth_name.strslice())
+                // core::mem::transmute(info.pth_name.strslice())
+                // TODO:
+                core::mem::transmute(&info.pth_name[..])
             ).to_string_lossy()
         }).unwrap_or_default().into()
     }
