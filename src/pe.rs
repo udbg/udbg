@@ -12,18 +12,15 @@ impl<'a> PeHelper<'a> {
             .map(|d| unsafe { CStr::from_ptr(d.filename.as_ptr() as *const c_char) })
     }
 
+    #[rustfmt::skip]
     pub fn get_pdb_signature(&self) -> Option<String> {
         self.debug_data
             .and_then(|d| d.codeview_pdb70_debug_info)
             .map(|d| unsafe {
-                let g = std::mem::transmute::<_, &guid::GUID>(&d.signature);
+                let (d1, d2, d3, d4): (u32, u16, u16, [u8; 8]) = std::mem::transmute(d.signature);
                 format!(
                     "{:08X}{:04X}{:04X}{}{:X}",
-                    g.data1(),
-                    g.data2(),
-                    g.data3(),
-                    hex::encode_upper(&g.data4()),
-                    d.age
+                    d1, d2, d3, hex::encode_upper(&d4), d.age
                 )
             })
     }

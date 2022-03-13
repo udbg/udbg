@@ -17,7 +17,7 @@ hex = '0.4'
 log = '0.4'
 spin = '0.9'
 ctor = '0.1'
-regex = '1.4'
+regex = '1.5'
 pdb = '0.7'
 extend = '1.1'
 bitflags = '1.2'
@@ -31,7 +31,6 @@ derive_more = '0.99'
 goblin = {version = '0.5'}
 memmap = {version = '0.7.0'}
 cpp_demangle = {version = '0.3'}
-guid = {version = '0.2', package = 'guid-create'}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
 cstrptr = {git = 'https://github.com/metaworm/cstrptr-rs', default-features = false, features = ['alloc']}
@@ -57,6 +56,5 @@ mach = '0.3'
 libproc = '0.10'
 
 [dev-dependencies]
-regex = '1.5'
 structopt = '0.3.8'
 flexi_logger = '0.22'

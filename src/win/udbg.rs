@@ -465,7 +465,7 @@ unsafe fn foo() {
 }
 
 impl GetProp for WinThread {
-    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+    fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
         if let Some(reg) = key.strip_prefix("@") {
             Ok(serde_value::to_value(self.get_reg(reg)?).unwrap())
         } else {
@@ -652,6 +652,23 @@ pub struct WinModule {
 }
 
 impl WinModule {}
+
+impl GetProp for WinModule {
+    fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
+        Ok(SerdeVal::String(match key {
+            "pdb_sig" => self.syms.pdb_sig.to_string(),
+            "pdb_name" => self.syms.pdb_name.to_string(),
+            "pdb_path" => self
+                .syms
+                .pdb
+                .read()
+                .as_ref()
+                .map(|s| s.path().to_string())
+                .unwrap_or_default(),
+            _ => return Ok(SerdeVal::Unit),
+        }))
+    }
+}
 
 impl UDbgModule for WinModule {
     fn data(&self) -> &ModuleData {
@@ -911,6 +928,20 @@ where
             0 => None,
             s => Some(s),
         }
+    }
+}
+
+impl<T> GetProp for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
+    default fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
+        Ok(match key {
+            "peb" => SerdeVal::U64(self.process.peb().ok_or(UDbgError::NotFound)? as _),
+            "wow64" => SerdeVal::Bool(self.symgr.is_wow64.get()),
+            "handle" => SerdeVal::U64(*self.process.handle as usize as _),
+            _ => return Err(UDbgError::NotFound),
+        })
     }
 }
 
@@ -1696,15 +1727,6 @@ impl CommonAdaptor {
                 udbg_ui().debug(&s);
             }
         }
-    }
-
-    pub fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
-        Ok(match key {
-            "peb" => SerdeVal::U64(self.process.peb().ok_or(UDbgError::NotFound)? as _),
-            "wow64" => SerdeVal::Bool(self.symgr.is_wow64.get()),
-            "handle" => SerdeVal::U64(*self.process.handle as usize as _),
-            _ => return Err(UDbgError::NotFound),
-        })
     }
 }
 

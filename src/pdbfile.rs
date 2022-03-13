@@ -37,10 +37,10 @@ impl PdbFile {
                 .debug_data
                 .and_then(|d| d.codeview_pdb70_debug_info)
                 .map(|d| unsafe {
-                    let g1 = core::mem::transmute::<_, guid::GUID>(d.signature);
+                    let (g1, g2, g3, g4): (u32, u16, u16, [u8; 8]) =
+                        core::mem::transmute(d.signature);
                     let (d1, d2, d3, d4) = pi.guid.as_fields();
-                    // println!("{:x?} {:x?} {} {}", d.signature, pi.guid.as_bytes(), pi.age, d.age);
-                    g1.data1() == d1 && g1.data2() == d2 && g1.data3() == d3 && g1.data4().eq(d4)
+                    g1 == d1 && g2 == d2 && g3 == d3 && &g4 == d4
                 })
                 .unwrap_or(true)
             {

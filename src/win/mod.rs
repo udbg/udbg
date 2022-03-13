@@ -469,11 +469,6 @@ pub struct Process {
     pub handle: Handle,
 }
 
-pub enum DumpType {
-    Mini,
-    Full,
-}
-
 pub struct MemoryIter<'p> {
     pub process: &'p Process,
     pub address: usize,

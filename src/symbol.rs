@@ -8,7 +8,7 @@ use spin::RwLock as SpinRW;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{consts::*, error::*};
+use crate::{consts::*, error::*, prelude::GetProp};
 
 #[cfg(windows)]
 use unicase::UniCase;
@@ -302,7 +302,7 @@ pub enum SymbolStatus {
     Loaded,
 }
 
-pub trait UDbgModule {
+pub trait UDbgModule: GetProp {
     fn data(&self) -> &ModuleData;
     fn is_32(&self) -> bool {
         IS_ARCH_X64 || IS_ARCH_ARM64

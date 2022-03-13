@@ -269,12 +269,6 @@ pub trait GetProp {
     }
 }
 
-impl<T> GetProp for T {
-    default fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
-        Ok(serde_value::Value::Unit)
-    }
-}
-
 pub trait TargetControl {
     fn detach(&self) -> UDbgResult<()>;
     fn breakk(&self) -> UDbgResult<()> {
