@@ -191,15 +191,21 @@ impl<T: ReadMemory + ?Sized> ReadMemoryUtil for T {}
 impl<T: WriteMemory + ?Sized> WriteMemUtil for T {}
 
 pub trait TargetMemory: ReadMemory + WriteMemory {
-    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>>;
+    /// enumerate the memory page in target memory space
+    fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + '_>>;
+
+    /// query the memory page of address in target memory space
     fn virtual_query(&self, address: usize) -> Option<MemoryPage>;
+
     // size: usize, type: RWX, commit/reverse
     fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> {
         Err(UDbgError::NotSupport)
     }
-    fn virtual_free(&self, address: usize) {}
+    fn virtual_free(&self, address: usize) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
 
-    // memory infomation
+    /// collect all memory infomation
     fn collect_memory_info(&self) -> Vec<MemoryPageInfo>;
 }
 

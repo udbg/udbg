@@ -1,7 +1,6 @@
 use super::*;
 use core::time::Duration;
-use std::cell::Cell;
-use std::cell::UnsafeCell;
+use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Error as IoErr, Result as IoRes};
@@ -896,7 +895,7 @@ impl UDbgSymMgr for SymbolManager<WinModule> {
 }
 
 pub struct CommonAdaptor {
-    pub base: UDbgBase,
+    pub base: TargetBase,
     tid_to_run: UnsafeCell<HashSet<u32>>, // 标记为继续运行的线程ID
     dbg_reg: [Cell<usize>; 4],
     pub symgr: SymbolManager<WinModule>,
@@ -957,12 +956,6 @@ where
         self.deref().virtual_query(address)
     }
 
-    // size: usize, type: RWX, commit/reverse
-    default fn virtual_alloc(&self, address: usize, size: usize, ty: &str) -> UDbgResult<usize> {
-        Err(UDbgError::NotSupport)
-    }
-    default fn virtual_free(&self, address: usize) {}
-
     default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
         collect_memory_info(&self.process, self)
     }
@@ -986,7 +979,7 @@ where
 }
 
 impl CommonAdaptor {
-    pub fn new(mut base: UDbgBase, p: Process) -> CommonAdaptor {
+    pub fn new(mut base: TargetBase, p: Process) -> CommonAdaptor {
         let ui = udbg_ui();
         let symbol_cache = ui
             .get_config::<String>("symbol_cache")
@@ -1967,7 +1960,7 @@ pub struct StandardAdaptor {
     #[deref]
     pub debug: CommonAdaptor,
     pub record: UnsafeCell<ExceptionRecord>,
-    pub threads: UnsafeCell<HashMap<u32, DbgThread>>,
+    pub threads: RefCell<HashMap<u32, DbgThread>>,
     pub attached: Cell<bool>, // create by attach
     pub detaching: Cell<bool>,
 }
@@ -2082,17 +2075,13 @@ pub fn create_debug_process(
 }
 
 impl StandardAdaptor {
-    pub fn open(base: UDbgBase, pid: pid_t) -> Result<Arc<StandardAdaptor>, UDbgError> {
+    pub fn open(pid: pid_t) -> Result<Arc<StandardAdaptor>, UDbgError> {
         let p = Process::open(pid, None).check_errstr("open process")?;
-        Ok(Self::new(base, p))
+        Ok(Self::new(p))
     }
 
-    #[inline]
-    pub fn threads(&self) -> &mut HashMap<u32, DbgThread> {
-        unsafe { transmute(self.threads.get()) }
-    }
-
-    fn new(mut base: UDbgBase, p: Process) -> Arc<Self> {
+    fn new(p: Process) -> Arc<Self> {
+        let mut base = TargetBase::default();
         base.pid.set(p.pid());
         base.image_path = p.image_path().unwrap_or_default();
 
@@ -2154,7 +2143,7 @@ impl StandardAdaptor {
     }
 
     fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<WinThread>> {
-        if let Some(t) = self.threads().get(&tid) {
+        if let Some(t) = self.threads.borrow().get(&tid) {
             let wow64 = self.symgr.is_wow64.get();
             let handle = unsafe { Handle::clone_from_raw(t.handle) }?;
             Ok(Box::new(WinThread {
@@ -2173,7 +2162,7 @@ impl StandardAdaptor {
     }
 
     pub fn get_context<C: DbgContext>(&self, tid: tid_t, context: &mut C) -> bool {
-        if let Some(t) = self.threads().get(&tid) {
+        if let Some(t) = self.threads.borrow().get(&tid) {
             context.get_context(t.handle)
         } else {
             warn!("thread {} not found in debugger", tid);
@@ -2182,7 +2171,7 @@ impl StandardAdaptor {
     }
 
     pub fn set_context<C: DbgContext>(&self, tid: tid_t, c: &C) {
-        let suc = if let Some(t) = self.threads().get(&tid) {
+        let suc = if let Some(t) = self.threads.borrow().get(&tid) {
             c.set_context(t.handle)
         } else {
             warn!("thread {} not found in debugger", tid);
@@ -2261,7 +2250,7 @@ impl TargetControl for StandardAdaptor {
 }
 
 impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase {
+    fn base(&self) -> &TargetBase {
         &self.base
     }
 
@@ -2430,7 +2419,7 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     if info.hThread.is_null() {
                         udbg_ui().error(format!("CREATE_PROCESS_DEBUG_EVENT {}", tid));
                     }
-                    self.threads().insert(tid, DbgThread::from(info));
+                    self.threads.borrow_mut().insert(tid, DbgThread::from(info));
                     self.try_load_module(
                         info.lpImageName as usize,
                         info.lpBaseOfImage as usize,
@@ -2440,20 +2429,6 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     self.update_context(buf);
                     (buf.callback)(ProcessCreate);
                     (buf.callback)(ThreadCreate(tid));
-                    // 获取PEB32的逻辑，实践得知 &PEB32 = (char*)&PEB + 0x1000
-                    // let th = info.hThread;
-                    // let mut cx32: WOW64_CONTEXT = zeroed();
-                    // cx32.ContextFlags = CONTEXT_SEGMENTS;
-                    // Wow64GetThreadContext(th, &mut cx32);
-                    // let mut ldt: WOW64_LDT_ENTRY = zeroed();
-                    // let r = Wow64GetThreadSelectorEntry(th, cx32.SegFs, &mut ldt);
-                    // let base = ldt.BaseLow as u32 | ((ldt.HighWord.Bits_mut().BaseMid() as u32) << 16) | ((ldt.HighWord.Bits_mut().BaseHi() as u32) << 24);
-                    // // info!("Wow64GetThreadSelectorEntry: {}, fs: 0x{:x} base: 0x{:x}", r, cx32.SegFs, base);
-                    // use ntapi::ntwow64::TEB32;
-                    // let t32 = self.read_value::<TEB32>(base as usize).map(|t32| {
-                    //     let peb32 = t32.ProcessEnvironmentBlock;
-                    //     info!("PEB32: 0x{:x}", peb32);
-                    // });
                 }
                 EXIT_PROCESS_DEBUG_EVENT => {
                     self.update_context(buf);
@@ -2469,13 +2444,13 @@ impl<'a> EventHandler for Win32Handler<'a> {
                     if !check_dont_set_hwbp() {
                         self.enable_all_hwbp_for_thread(info.hThread, true);
                     }
-                    self.threads().insert(tid, DbgThread::from(info));
+                    self.threads.borrow_mut().insert(tid, DbgThread::from(info));
                     self.update_context(buf);
                     (buf.callback)(ThreadCreate(tid));
                 }
                 EXIT_THREAD_DEBUG_EVENT => {
                     self.update_context(buf);
-                    self.threads().remove(&tid);
+                    self.threads.borrow_mut().remove(&tid);
                     self.debug.context.set(null_mut());
                     (buf.callback)(ThreadExit(self.event.u.ExitThread().dwExitCode));
                 }
@@ -2722,14 +2697,14 @@ pub fn enum_udbg_thread<'a>(
 pub struct DefaultEngine;
 
 impl UDbgEngine for DefaultEngine {
-    fn open(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Ok(StandardAdaptor::open(base, pid)?)
+    fn open(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        Ok(StandardAdaptor::open(pid)?)
     }
 
-    fn attach(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         unsafe {
-            DebugActiveProcess(pid).check_err("DebugActiveProcess")?;
-            let result = StandardAdaptor::open(base, pid)?;
+            DebugActiveProcess(pid).check_last()?;
+            let result = StandardAdaptor::open(pid)?;
             result.attached.set(true);
             Ok(result)
         }
@@ -2737,16 +2712,14 @@ impl UDbgEngine for DefaultEngine {
 
     fn create(
         &self,
-        base: UDbgBase,
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
         let ppid = udbg_ui().get_config("ppid");
-        Ok(StandardAdaptor::new(
-            base,
-            create_debug_process(path, cwd, args, &mut pi, ppid)?,
-        ))
+        Ok(StandardAdaptor::new(create_debug_process(
+            path, cwd, args, &mut pi, ppid,
+        )?))
     }
 }

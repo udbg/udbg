@@ -1,3 +1,7 @@
+//!
+//! Traits && types for debugger target
+//!
+
 use core::ops::Deref;
 use std::cell::Cell;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
@@ -45,14 +49,20 @@ impl PauseContext {
     }
 }
 
+/// Common data for debugger target
 #[derive(Clone, Serialize)]
-pub struct UDbgBase {
+pub struct TargetBase {
+    /// process id of target
     pub pid: Cell<pid_t>,
+    /// thread id of target triggers the debug event
     pub event_tid: Cell<tid_t>,
     pub event_pc: Cell<usize>,
+    /// executable image path of target
     pub image_path: String,
     pub image_base: usize,
+    /// architecture of target, one value of the [std::env::consts::ARCH]
     pub arch: &'static str,
+    /// if the target is a [WOW64](https://docs.microsoft.com/en-us/windows/win32/winprog64/running-32-bit-applications) process
     #[cfg(windows)]
     pub wow64: Cell<bool>,
     #[serde(skip)]
@@ -63,7 +73,7 @@ pub struct UDbgBase {
     pub status: Cell<UDbgStatus>,
 }
 
-impl Default for UDbgBase {
+impl Default for TargetBase {
     fn default() -> Self {
         Self {
             image_path: "".into(),
@@ -81,7 +91,7 @@ impl Default for UDbgBase {
     }
 }
 
-impl UDbgBase {
+impl TargetBase {
     #[inline]
     pub fn is_ptr32(&self) -> bool {
         self.ptrsize() == 4
@@ -214,22 +224,24 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
 }
 
+/// Debug Engine
 pub trait UDbgEngine {
     fn enum_process(&self) -> Box<dyn Iterator<Item = crate::util::PsInfo>> {
         crate::util::enum_psinfo()
     }
 
-    fn open(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
-
-    fn open_self(&self, base: UDbgBase) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        self.open(base, std::process::id() as _)
+    fn open(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        Err(UDbgError::NotSupport)
     }
 
-    fn attach(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
+    fn open_self(&self) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        self.open(std::process::id() as _)
+    }
+
+    fn attach(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
 
     fn create(
         &self,
-        base: UDbgBase,
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
@@ -269,24 +281,30 @@ pub trait GetProp {
     }
 }
 
+/// Common interface for controlling the target running
 pub trait TargetControl {
+    /// detach from debugging target
     fn detach(&self) -> UDbgResult<()>;
+    /// interrupt the target running
     fn breakk(&self) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
+    /// kill target
     fn kill(&self) -> UDbgResult<()>;
+    /// suspend target
     fn suspend(&self) -> UDbgResult<()> {
-        Ok(())
+        Err(UDbgError::NotSupport)
     }
+    /// resume target
     fn resume(&self) -> UDbgResult<()> {
-        Ok(())
+        Err(UDbgError::NotSupport)
     }
 }
 
 pub trait UDbgAdaptor:
     Send + Sync + GetProp + TargetMemory + TargetControl + BpManager + AdaptorSpec + 'static
 {
-    fn base(&self) -> &UDbgBase;
+    fn base(&self) -> &TargetBase;
 
     // thread infomation
     fn get_thread_context(&self, tid: u32) -> Option<Registers> {
