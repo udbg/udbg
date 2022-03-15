@@ -1,6 +1,8 @@
 mod ffi;
 mod window;
 
+#[cfg(feature = "dbgeng")]
+pub mod dbgeng;
 #[cfg(feature = "dbglog")]
 pub mod dbglog;
 pub mod ntdll;

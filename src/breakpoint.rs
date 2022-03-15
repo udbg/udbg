@@ -317,7 +317,7 @@ impl UDbgBreakpoint for Breakpoint {
     }
 }
 
-pub trait BpManager {
+pub trait BreakpointManager {
     fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Err(UDbgError::NotSupport)
     }

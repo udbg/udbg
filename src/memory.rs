@@ -3,9 +3,10 @@
 //! This module contains some commonly used utilities, such as read/write string, read array, read structed value, etc.
 //!
 
+pub use crate::os::MemoryPage;
 use crate::util::AsByteArray;
 
-use super::{error::*, os::MemoryPage};
+use super::error::*;
 use alloc::{string::*, sync::Arc, vec::Vec};
 use core::{
     mem::{size_of, transmute, zeroed},

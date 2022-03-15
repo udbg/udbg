@@ -1,3 +1,7 @@
+//!
+//! Traits and types for CPU registers
+//!
+
 #[cfg(target_pointer_width = "64")]
 pub type reg_t = u64;
 #[cfg(target_pointer_width = "32")]

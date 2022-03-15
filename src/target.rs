@@ -252,10 +252,6 @@ pub type UDbgCallback<'a> = dyn FnMut(UEvent) -> UserReply + 'a;
 
 #[cfg(windows)]
 pub trait AdaptorSpec {
-    fn handle(&self) -> winapi::um::winnt::HANDLE {
-        core::ptr::null_mut()
-    }
-
     fn exception_context(&self) -> UDbgResult<PCONTEXT> {
         Err(UDbgError::NotSupport)
     }
@@ -275,6 +271,7 @@ pub trait AdaptorSpec {
 #[cfg(not(windows))]
 pub trait AdaptorSpec {}
 
+/// Trait for getting property dynamically
 pub trait GetProp {
     fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
         Err(UDbgError::NotSupport)
@@ -301,14 +298,14 @@ pub trait TargetControl {
     }
 }
 
-pub trait UDbgAdaptor:
-    Send + Sync + GetProp + TargetMemory + TargetControl + BpManager + AdaptorSpec + 'static
-{
+/// Represent a debugable target, could be a process, core dump, etc.
+pub trait Target: GetProp + TargetMemory + TargetControl + BreakpointManager {
     fn base(&self) -> &TargetBase;
 
-    // thread infomation
-    fn get_thread_context(&self, tid: u32) -> Option<Registers> {
-        None
+    /// the process handle, if target is a process
+    #[cfg(windows)]
+    fn handle(&self) -> winapi::um::winnt::HANDLE {
+        core::ptr::null_mut()
     }
 
     fn enum_thread(
@@ -320,13 +317,11 @@ pub trait UDbgAdaptor:
         Err(UDbgError::NotSupport)
     }
 
-    // symbol infomation
+    // optional symbol manager
     fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
         None
     }
-    fn enum_module<'a>(
-        &'a self,
-    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
+    fn enum_module(&self) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + '_>> + '_>> {
         Ok(self
             .symbol_manager()
             .ok_or(UDbgError::NotSupport)?
@@ -385,16 +380,20 @@ pub trait UDbgAdaptor:
         })
     }
 
-    fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
+    fn enum_handle(&self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + '_>> {
         Err(UDbgError::NotSupport)
     }
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
+}
+
+pub trait UDbgAdaptor: Send + Sync + Target + 'static {
+    fn get_registers(&self) -> UDbgResult<&mut dyn UDbgRegs> {
         Err(UDbgError::NotSupport)
     }
 
     fn except_param(&self, i: usize) -> Option<usize> {
         None
     }
+
     fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
@@ -462,7 +461,7 @@ pub trait AdaptorUtil: UDbgAdaptor {
     }
 
     fn get_symbol_(&self, addr: usize, o: Option<usize>) -> Option<SymbolInfo> {
-        UDbgAdaptor::get_symbol(self, addr, o.unwrap_or(0x100))
+        Target::get_symbol(self, addr, o.unwrap_or(0x100))
     }
 
     fn get_symbol_string(&self, addr: usize) -> Option<String> {

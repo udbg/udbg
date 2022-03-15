@@ -1,3 +1,7 @@
+//!
+//! Utilities for type which has range, such as module, memory page, etc.
+//!
+
 use core::cmp::Ordering;
 use core::ops::Range;
 use std::sync::Arc;

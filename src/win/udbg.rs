@@ -961,7 +961,7 @@ where
     }
 }
 
-impl<T> BpManager for T
+impl<T> BreakpointManager for T
 where
     T: Deref<Target = CommonAdaptor> + UDbgAdaptor,
 {
@@ -2204,10 +2204,6 @@ pub fn continue_debug_event(pid: u32, tid: u32, status: u32) -> bool {
 }
 
 impl AdaptorSpec for StandardAdaptor {
-    fn handle(&self) -> HANDLE {
-        *self.debug.process.handle
-    }
-
     fn exception_context(&self) -> UDbgResult<PCONTEXT> {
         Ok(self.context.get())
     }
@@ -2249,17 +2245,13 @@ impl TargetControl for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {
+impl Target for StandardAdaptor {
     fn base(&self) -> &TargetBase {
         &self.base
     }
 
-    fn get_thread_context(&self, tid: u32) -> Option<Registers> {
-        self.debug.get_registers(tid)
-    }
-
-    fn except_param(&self, i: usize) -> Option<usize> {
-        self.record().params.get(i).map(|v| *v as usize)
+    fn handle(&self) -> HANDLE {
+        *self.debug.process.handle
     }
 
     fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
@@ -2275,15 +2267,6 @@ impl UDbgAdaptor for StandardAdaptor {
         Ok(self.symgr.enum_module())
     }
 
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
-        let p = self.cx32.get();
-        if p.is_null() {
-            Ok(self.context().ok_or(UDbgError::TargetIsBusy)?)
-        } else {
-            Ok(unsafe { &mut *p })
-        }
-    }
-
     fn open_thread(&self, tid: tid_t) -> Result<Box<dyn UDbgThread>, UDbgError> {
         StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
@@ -2297,6 +2280,21 @@ impl UDbgAdaptor for StandardAdaptor {
 
     fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
         enum_process_handle(self.base.pid.get(), *self.process.handle)
+    }
+}
+
+impl UDbgAdaptor for StandardAdaptor {
+    fn except_param(&self, i: usize) -> Option<usize> {
+        self.record().params.get(i).map(|v| *v as usize)
+    }
+
+    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
+        let p = self.cx32.get();
+        if p.is_null() {
+            Ok(self.context().ok_or(UDbgError::TargetIsBusy)?)
+        } else {
+            Ok(unsafe { &mut *p })
+        }
     }
 
     fn event_loop(&self, callback: &mut UDbgCallback) -> UDbgResult<()> {
