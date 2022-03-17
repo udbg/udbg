@@ -41,6 +41,10 @@ pub trait UDbgShell: AsRef<ShellData> {
         }
     }
 
+    fn log_text(&self, msg: &str) {
+        print!("{msg}");
+    }
+
     // #[cfg(windows)]
     // fn new_symgr(&self) -> Arc<dyn UDbgSymMgr>;
     // fn get_util(&self) -> &'static dyn UDbgUtil;

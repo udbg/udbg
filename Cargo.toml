@@ -40,6 +40,22 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
+windows = {version = '0.33', features = [
+    "alloc", "implement",
+    "Data_Xml_Dom",
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_System_Threading",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+    "Management_Deployment",
+    "Foundation",
+    "Foundation_Collections",
+    "ApplicationModel",
+    "Win32_System_WinRT",
+    "Win32_System_Diagnostics_Debug",
+]}
 ntapi = '0.3'
 unicase = '2.6'
 msvc-demangler = {git = 'https://github.com/mstange/msvc-demangler-rust'}

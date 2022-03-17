@@ -1,10 +1,9 @@
 mod ffi;
 mod window;
 
-#[cfg(feature = "dbgeng")]
-pub mod dbgeng;
 #[cfg(feature = "dbglog")]
 pub mod dbglog;
+pub mod eng;
 pub mod ntdll;
 pub mod string;
 pub mod symbol;

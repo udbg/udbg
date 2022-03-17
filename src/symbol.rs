@@ -307,13 +307,17 @@ pub trait UDbgModule: GetProp {
     fn is_32(&self) -> bool {
         IS_ARCH_X64 || IS_ARCH_ARM64
     }
+
     fn symbol_status(&self) -> SymbolStatus;
+
     fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
+
     fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
         None
     }
+
     #[cfg(windows)]
     fn runtime_function(&self) -> Option<&[RUNTIME_FUNCTION]> {
         None
@@ -340,18 +344,26 @@ pub trait UDbgModule: GetProp {
             .ok()?;
         funcs.get(i)
     }
+
+    /// get symbol info by name
     fn get_symbol(&self, name: &str) -> Option<Symbol> {
         None
     }
+
     fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
         None
     }
+
     fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol>>> {
+
+    /// enumerate symbols by optional wildcard
+    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol> + '_>> {
         Err(UDbgError::NotSupport)
     }
+
+    /// get all exported symbols
     fn get_exports(&self) -> Option<Vec<Symbol>> {
         None
     }

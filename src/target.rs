@@ -403,8 +403,6 @@ pub trait UDbgAdaptor: Send + Sync + Target + 'static {
     }
 }
 
-pub trait UDbgDebug: UDbgAdaptor {}
-
 pub trait AdaptorUtil: UDbgAdaptor {
     fn read_ptr(&self, a: usize) -> Option<usize> {
         if self.base().is_ptr32() {
