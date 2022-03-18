@@ -10,6 +10,7 @@ use anyhow::Context;
 use parking_lot::RwLock;
 use winapi::um::{
     libloaderapi::{GetProcAddress, LoadLibraryA},
+    processthreadsapi::GetThreadId,
     winbase::{CREATE_NEW_CONSOLE, DEBUG_PROCESS},
     winnt::{CONTEXT, HANDLE},
 };
@@ -93,8 +94,7 @@ impl IDebugEventCallbacksWide_Impl for EventCallbacks {
         dataoffset: u64,
         startoffset: u64,
     ) -> windows::core::Result<()> {
-        // TODO:
-        self.call(UEvent::ThreadCreate(0))
+        self.call(UEvent::ThreadCreate(unsafe { GetThreadId(handle as _) }))
     }
 
     fn ExitThread(&self, exitcode: u32) -> windows::core::Result<()> {
@@ -115,6 +115,9 @@ impl IDebugEventCallbacksWide_Impl for EventCallbacks {
         threaddataoffset: u64,
         startoffset: u64,
     ) -> windows::core::Result<()> {
+        let modulename = String::from_wide_ptr(modulename.0);
+        let imagename = String::from_wide_ptr(imagename.0);
+        println!("[load] image {modulename} {imagename}");
         self.call(UEvent::ProcessCreate)
     }
 
@@ -525,7 +528,7 @@ impl TargetControl for DebugTarget {
     }
 }
 
-impl UDbgSymMgr for DebugTarget {
+impl TargetSymbol for DebugTarget {
     fn enum_module(&self) -> Box<dyn Iterator<Item = Arc<dyn UDbgModule + '_>> + '_> {
         unsafe {
             let mut loaded = 0;
@@ -539,7 +542,6 @@ impl UDbgSymMgr for DebugTarget {
                 0,
                 buf.as_mut_ptr(),
             );
-            // let this = self.symbols.clone();
             let iter = buf
                 .into_iter()
                 .filter(|p| p.Flags & DEBUG_MODULE_UNLOADED == 0)
@@ -810,7 +812,7 @@ impl Target for DebugTarget {
         }
     }
 
-    fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
+    fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
         Some(self)
     }
 

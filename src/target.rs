@@ -318,7 +318,7 @@ pub trait Target: GetProp + TargetMemory + TargetControl + BreakpointManager {
     }
 
     // optional symbol manager
-    fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
+    fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
         None
     }
     fn enum_module(&self) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + '_>> + '_>> {

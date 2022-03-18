@@ -302,6 +302,7 @@ pub enum SymbolStatus {
     Loaded,
 }
 
+/// Represents a module in target, which has symbols
 pub trait UDbgModule: GetProp {
     fn data(&self) -> &ModuleData;
     fn is_32(&self) -> bool {
@@ -350,10 +351,12 @@ pub trait UDbgModule: GetProp {
         None
     }
 
+    /// get the symbol file of this module
     fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
         None
     }
 
+    /// specific a symbol file for this module
     fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
@@ -369,23 +372,28 @@ pub trait UDbgModule: GetProp {
     }
 }
 
-/// 表示一个目标(进程)的模块符号管理器
-pub trait UDbgSymMgr {
-    /// 查找address所处的模块，address可以是模块基址，也可以是模块范围内的任意地址
+/// Represents a symbol manager for debug target
+pub trait TargetSymbol {
+    /// find a symbol module by a address in the module range
     fn find_module(&self, address: usize) -> Option<Arc<dyn UDbgModule>>;
-    /// 根据模块名查找模块
+
+    /// get module by the module name
     fn get_module(&self, name: &str) -> Option<Arc<dyn UDbgModule>>;
-    /// 枚举模块
+
+    /// enumerate all modules in target
     fn enum_module<'a>(&'a self) -> Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>;
-    /// 枚举符号
+
+    /// enumerate symbols in target with optional wildcard
     fn enum_symbol<'a>(
         &'a self,
         pat: Option<&str>,
     ) -> UDbgResult<Box<dyn Iterator<Item = Symbol> + 'a>> {
         Err(UDbgError::NotSupport)
     }
-    /// 移除模块及其符号，通过基址定位模块
+
+    /// remove a module
     fn remove(&self, address: usize);
+
     #[cfg(windows)]
     fn check_load_module(
         &self,
@@ -399,9 +407,9 @@ pub trait UDbgSymMgr {
     }
 }
 
-/// 一个目标的模块符号管理器，几个主要功能：
-/// * 通过地址、名称来定位模块
-/// * 获取指定地址的符号信息（模块、偏移等）
+/// A builtin symbol manager, which can
+/// * get a module by a address or name
+/// * get symbol info of specific address, includes module name, offset, etc.
 #[derive(Default)]
 pub struct ModuleManager<T: UDbgModule> {
     pub list: Vec<Arc<T>>,
@@ -560,7 +568,7 @@ impl<T: UDbgModule> SymbolManager<T> {
     }
 }
 
-impl<T: UDbgModule + 'static> UDbgSymMgr for SymbolManager<T> {
+impl<T: UDbgModule + 'static> TargetSymbol for SymbolManager<T> {
     default fn find_module(&self, address: usize) -> Option<Arc<dyn UDbgModule>> {
         Some(Self::find_module(self, address)?)
     }

@@ -726,7 +726,7 @@ fn system_root() -> &'static str {
     }
 }
 
-impl UDbgSymMgr for SymbolManager<WinModule> {
+impl TargetSymbol for SymbolManager<WinModule> {
     fn check_load_module(
         &self,
         read: &dyn ReadMemory,
@@ -2254,7 +2254,7 @@ impl Target for StandardAdaptor {
         *self.debug.process.handle
     }
 
-    fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
+    fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
         Some(&self.symgr)
     }
 
