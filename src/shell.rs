@@ -1,3 +1,5 @@
+//! High-level types for user interface
+
 use super::os::pid_t;
 use super::prelude::*;
 
@@ -5,6 +7,7 @@ use log::*;
 use serde::de::DeserializeOwned;
 use std::{path::PathBuf, sync::Arc};
 
+/// Process information
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
 pub struct ProcessInfo {
@@ -15,7 +18,7 @@ pub struct ProcessInfo {
     pub cmdline: String,
 }
 
-/// Thread information for UI
+/// Thread information
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
 pub struct ThreadInfo {
@@ -27,7 +30,7 @@ pub struct ThreadInfo {
     pub priority: Arc<str>,
 }
 
-/// Handle/FD information for UI
+/// Handle/FD information
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
 pub struct HandleInfo {
@@ -35,6 +38,27 @@ pub struct HandleInfo {
     pub handle: usize,
     pub type_name: String,
     pub name: String,
+}
+
+bitflags! {
+    pub struct UDbgFlags: u32 {
+        const NONE = 0b00000000;
+        const UNDEC_TYPE = 1 << 0;
+        const UNDEC_RETN = 1 << 1;
+        const UNDEC_NAME_ONLY = 1 << 2;
+
+        const DISASM_RAW = 1 << 8;
+        const DISASM_SYMBOL = 1 << 9;
+        // const DISASM_SYMBOL = 1 << 3;
+
+        const SHOW_OUTPUT = 1 << 16;
+    }
+}
+
+impl Default for UDbgFlags {
+    fn default() -> Self {
+        Self::SHOW_OUTPUT | Self::UNDEC_NAME_ONLY
+    }
 }
 
 pub struct ShellData {

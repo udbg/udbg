@@ -1,3 +1,5 @@
+//! Extra string convert utilities
+
 #[cfg(windows)]
 pub use crate::os::windows::string::*;
 

@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use crate::{error::*, os::tid_t, regs::*, target::UDbgAdaptor};
+use crate::{error::*, os::tid_t, register::*, target::UDbgAdaptor};
 use cfg_if::*;
 
 pub type BpID = isize;

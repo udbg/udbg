@@ -1,7 +1,7 @@
 use core::marker::PhantomData;
 use core::{mem, ptr};
 
-use crate::strutil::*;
+use crate::string::*;
 use ntapi::ntrtl::RtlInitUnicodeString;
 use std::ffi::OsString;
 use std::os::windows::prelude::*;

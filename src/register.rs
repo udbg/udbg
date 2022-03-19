@@ -1229,7 +1229,7 @@ pub enum RegType {
     Arm64(Arm64Regs),
 }
 
-pub trait UDbgRegs: crate::util::AsByteArray {
+pub trait UDbgRegs: crate::memory::AsByteArray {
     fn get_reg(&self, id: u32) -> Option<CpuReg>;
     fn set_reg(&mut self, id: u32, val: CpuReg);
 

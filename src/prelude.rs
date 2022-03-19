@@ -5,10 +5,10 @@ pub use crate::{
     event::*,
     memory::*,
     os::Process,
-    regs::{reg_t, UDbgRegs},
+    register::{reg_t, UDbgRegs},
     shell::*,
-    strutil::*,
+    string::*,
     symbol::*,
     target::*,
-    util::UFlags,
+    util::Utils,
 };

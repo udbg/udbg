@@ -1023,3 +1023,21 @@ impl ProcessInfo {
         }))
     }
 }
+
+impl Symbol {
+    pub fn undecorate(sym: &str, flags: UDbgFlags) -> Option<String> {
+        use msvc_demangler::*;
+
+        let mut sym_flags = DemangleFlags::COMPLETE;
+        if flags.contains(UDbgFlags::UNDEC_NAME_ONLY) {
+            sym_flags = DemangleFlags::NAME_ONLY;
+        } else {
+            // if flags & UFLAG_UNDEC_TYPE == 0 { sym_flags |= DemangleFlags::NO_ARGUMENTS; }
+            if !flags.contains(UDbgFlags::UNDEC_RETN) {
+                sym_flags |= DemangleFlags::NO_FUNCTION_RETURNS;
+            }
+        }
+
+        demangle(sym, sym_flags).ok()
+    }
+}

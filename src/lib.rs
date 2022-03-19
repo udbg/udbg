@@ -36,12 +36,11 @@ pub mod pdbfile;
 pub mod pe;
 pub mod prelude;
 pub mod range;
-pub mod regs;
+pub mod register;
 pub mod shell;
-pub mod strutil;
+pub mod string;
 pub mod symbol;
 pub mod target;
-pub mod util;
 
 pub mod consts {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
@@ -70,4 +69,37 @@ pub mod consts {
     pub const IS_ARCH_X86: bool = cfg!(target_arch = "x86");
     pub const IS_ARCH_X64: bool = cfg!(target_arch = "x86_64");
     pub const IS_X86: bool = IS_ARCH_X86 || IS_ARCH_X64;
+}
+
+pub mod util {
+    use memmap::Mmap;
+
+    use alloc::sync::{Arc, Weak};
+    use std::io::{BufRead, BufReader, Result as IoResult};
+    use std::path::Path;
+
+    /// Fragmented utilities code
+    pub struct Utils;
+
+    impl Utils {
+        pub fn mapfile(path: &str) -> Option<Mmap> {
+            std::fs::File::open(path)
+                .and_then(|f| unsafe { Mmap::map(&f) })
+                .ok()
+        }
+
+        pub fn file_lines<P: AsRef<Path>>(path: P) -> IoResult<impl Iterator<Item = String>> {
+            Ok(BufReader::new(std::fs::File::open(path)?)
+                .lines()
+                .map(|line| line.unwrap_or_default()))
+        }
+
+        /// Convert a reference to Weak<T>, please ensure the reference is from Arc<T>
+        pub unsafe fn to_weak<T: ?Sized>(t: &T) -> Weak<T> {
+            let t = Arc::from_raw(t);
+            let result = Arc::downgrade(&t);
+            Arc::into_raw(t);
+            result
+        }
+    }
 }

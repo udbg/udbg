@@ -10,7 +10,7 @@ use std::sync::Arc;
 use crate::{
     os::{pid_t, tid_t},
     prelude::*,
-    regs::*,
+    register::*,
 };
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -66,7 +66,7 @@ pub struct TargetBase {
     #[cfg(windows)]
     pub wow64: Cell<bool>,
     #[serde(skip)]
-    pub flags: Cell<UFlags>,
+    pub flags: Cell<UDbgFlags>,
     #[serde(skip)]
     pub context: PauseContext,
     #[serde(skip)]
@@ -128,7 +128,7 @@ impl TargetBase {
 
     #[inline(always)]
     pub fn undec_sym(&self, sym: &str) -> Option<String> {
-        crate::util::undecorate_symbol(sym, self.flags.get())
+        Symbol::undecorate(sym, self.flags.get())
     }
 }
 
@@ -145,7 +145,7 @@ pub struct ThreadData {
 #[cfg(windows)]
 pub type ThreadContext = winapi::um::winnt::CONTEXT;
 #[cfg(windows)]
-pub type ThreadContext32 = super::regs::CONTEXT32;
+pub type ThreadContext32 = super::register::CONTEXT32;
 
 pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     fn name(&self) -> Arc<str> {

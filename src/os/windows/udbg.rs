@@ -28,7 +28,7 @@ use parking_lot::RwLock;
 use serde_value::Value as SerdeVal;
 
 use super::ntdll::*;
-use crate::{pdbfile::*, pe::PeHelper, range::*, regs::*, shell::udbg_ui, util::to_weak};
+use crate::{pdbfile::*, pe::PeHelper, range::*, register::*, shell::udbg_ui};
 
 pub trait DbgReg {}
 
@@ -637,7 +637,7 @@ pub fn get_selector_entry_wow64(th: HANDLE, s: u32) -> u32 {
 #[inline]
 fn map_or_open(file: HANDLE, path: &str) -> Option<memmap::Mmap> {
     if file.is_null() {
-        crate::util::mapfile(path)
+        Utils::mapfile(path)
     } else {
         unsafe {
             let f = File::from_raw_handle(file);
@@ -1371,7 +1371,7 @@ impl CommonAdaptor {
                 hit_count: Cell::new(0),
                 bp_type: InnerBpType::Soft(raw_byte),
 
-                target: unsafe { to_weak(this) },
+                target: unsafe { Utils::to_weak(this) },
                 common: self,
             });
             if opt.enable {
@@ -1405,7 +1405,7 @@ impl CommonAdaptor {
                         len: opt.len.unwrap_or(HwbpLen::L1).into(),
                     }),
 
-                    target: unsafe { to_weak(this) },
+                    target: unsafe { Utils::to_weak(this) },
                     common: self,
                 });
                 self.occupy_hwbp_index(index, opt.address);
@@ -1427,7 +1427,7 @@ impl CommonAdaptor {
                 hit_tid: opt.tid,
                 bp_type: InnerBpType::Table { index, origin },
 
-                target: unsafe { to_weak(this) },
+                target: unsafe { Utils::to_weak(this) },
                 common: self,
             });
             self.bp_map.write().insert(index, bp.clone());
@@ -1710,7 +1710,7 @@ impl CommonAdaptor {
     }
 
     pub fn output_debug_string(&self, dbg: &dyn UDbgAdaptor, address: usize, count: usize) {
-        if self.base.flags.get().contains(UFlags::SHOW_OUTPUT) {
+        if self.base.flags.get().contains(UDbgFlags::SHOW_OUTPUT) {
             if let Some(s) = dbg.read_utf8_or_ansi(address, count) {
                 udbg_ui().debug(&s);
             }
@@ -1718,7 +1718,7 @@ impl CommonAdaptor {
     }
 
     pub fn output_debug_string_wide(&self, dbg: &dyn UDbgAdaptor, address: usize, count: usize) {
-        if self.base.flags.get().contains(UFlags::SHOW_OUTPUT) {
+        if self.base.flags.get().contains(UDbgFlags::SHOW_OUTPUT) {
             if let Some(s) = dbg.read_wstring(address, count) {
                 udbg_ui().debug(&s);
             }

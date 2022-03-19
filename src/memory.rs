@@ -4,7 +4,6 @@
 //!
 
 pub use crate::os::MemoryPage;
-use crate::util::AsByteArray;
 
 use super::error::*;
 use alloc::{string::*, sync::Arc, vec::Vec};
@@ -183,7 +182,7 @@ pub trait WriteMemUtil: WriteMemory {
 
     #[cfg(windows)]
     fn write_wstring(&self, address: usize, data: &str) -> Option<usize> {
-        use crate::strutil::ToUnicode;
+        use crate::string::ToUnicode;
         self.write_array(address, data.to_unicode_with_null().as_slice())
     }
 }
@@ -236,5 +235,37 @@ impl crate::range::RangeValue for MemoryPageInfo {
     #[inline]
     fn as_range(&self) -> core::ops::Range<usize> {
         self.base..self.base + self.size
+    }
+}
+
+/// Convert any type to &[u8], from its memory content
+pub trait AsByteArray {
+    fn as_byte_array(&self) -> &[u8];
+}
+
+impl<T: Sized> AsByteArray for T {
+    fn as_byte_array(&self) -> &[u8] {
+        unsafe { from_raw_parts(self as *const T as *const u8, size_of::<T>()) }
+    }
+}
+
+impl<T: Sized> AsByteArray for [T] {
+    fn as_byte_array(&self) -> &[u8] {
+        unsafe {
+            from_raw_parts(
+                self.as_ptr() as *const T as *const u8,
+                size_of::<T>() * self.len(),
+            )
+        }
+    }
+}
+
+pub trait AsByteArrayMut {
+    fn as_mut_byte_array(&mut self) -> &mut [u8];
+}
+
+impl<T: Sized> AsByteArrayMut for T {
+    fn as_mut_byte_array(&mut self) -> &mut [u8] {
+        unsafe { from_raw_parts_mut(self as *mut T as *mut u8, size_of::<T>()) }
     }
 }
