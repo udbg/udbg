@@ -3,6 +3,8 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::mem::size_of;
 use core::slice::{from_raw_parts, from_raw_parts_mut};
+use std::io::{BufRead, BufReader, Result as IoResult};
+use std::path::Path;
 
 use memmap::Mmap;
 
@@ -10,6 +12,12 @@ pub fn mapfile(path: &str) -> Option<Mmap> {
     std::fs::File::open(path)
         .and_then(|f| unsafe { Mmap::map(&f) })
         .ok()
+}
+
+pub fn file_lines<P: AsRef<Path>>(path: P) -> IoResult<impl Iterator<Item = String>> {
+    BufReader::new(std::fs::File::open(path)?)
+        .lines()
+        .map(|line| line.unwrap_or_default())
 }
 
 pub trait AsByteArray {

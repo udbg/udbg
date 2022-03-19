@@ -1,11 +1,14 @@
-use super::*;
-use core::mem::zeroed;
+use crate::prelude::{ReadMemory, WriteMemory};
+use crate::util::file_lines;
 
-use std::io;
+use super::*;
+
+use std::io::Result as IoResult;
 use std::os::unix::prelude::AsRawFd;
+use std::sync::Arc;
 
 pub fn process_name(pid: pid_t) -> Option<String> {
-    read_lines(format!("/proc/{}/comm", pid)).ok()?.next()
+    file_lines(format!("/proc/{}/comm", pid)).ok()?.next()
 }
 
 pub fn process_cmdline(pid: pid_t) -> Vec<String> {
@@ -166,14 +169,31 @@ impl Process {
         })
     }
 
-    fn lines(&self, subpath: &str) -> io::Result<LineReader<File>> {
-        read_lines(format!("/proc/{}/{}", self.pid, subpath))
-    }
+    pub fn enum_memory(&self) -> IoResult<impl Iterator<Item = MemoryPage>> {
+        let mut iter = file_lines(format!("/proc/{}/maps", self.pid))?;
+        Ok(core::iter::from_fn(move || {
+            let line = iter.next()?;
+            let mut line = LineParser::new(line.as_ref());
+            let base = line.till('-').unwrap();
+            let base = usize::from_str_radix(base, 16).unwrap();
+            line.skip_count(1);
+            let end = usize::from_str_radix(line.next().unwrap(), 16).unwrap();
+            let size = end - base;
+            let prot = line.next().unwrap();
+            for i in 0..3 {
+                line.next();
+            }
+            let usage: Arc<str> = line.rest().trim().into();
 
-    pub fn enum_memory(&self) -> Result<MemoryIter, String> {
-        Ok(MemoryIter(
-            self.lines("maps").map_err(|e| format!("{}", e))?,
-        ))
+            let mut result = MemoryPage {
+                base,
+                size,
+                usage,
+                prot: [0; 4],
+            };
+            result.prot.copy_from_slice(prot.as_bytes());
+            Some(result)
+        }))
     }
 
     #[inline]
@@ -181,9 +201,9 @@ impl Process {
         process_tasks(self.pid)
     }
 
-    pub fn enum_module(&self) -> Result<ModuleIter, String> {
+    pub fn enum_module(&self) -> IoResult<impl Iterator<Item = Module>> {
         Ok(ModuleIter {
-            f: read_lines(format!("/proc/{}/maps", self.pid)).map_err(|e| format!("{}", e))?,
+            f: file_lines(format!("/proc/{}/maps", self.pid))?,
             p: self,
             base: 0,
             size: 0,
@@ -194,28 +214,6 @@ impl Process {
 
     pub fn find_module_by_name(&self, name: &str) -> Option<Module> {
         self.enum_module().ok()?.find(|m| m.name.as_ref() == name)
-    }
-
-    pub fn get_regs(&self, tid: pid_t) -> Option<user_regs_struct> {
-        unsafe {
-            let mut regs: user_regs_struct = zeroed();
-            if ptrace_getregs(tid, &mut regs) {
-                Some(regs)
-            } else {
-                None
-            }
-        }
-    }
-
-    pub fn siginfo(&self, tid: pid_t) -> Option<siginfo_t> {
-        unsafe {
-            let info: libc::siginfo_t = zeroed();
-            if ptrace(PTRACE_GETSIGINFO, tid, 0, &info) >= 0 {
-                Some(info)
-            } else {
-                None
-            }
-        }
     }
 }
 
@@ -231,45 +229,47 @@ impl WriteMemory for Process {
     }
 }
 
-pub struct MemoryIter(LineReader<File>);
+struct LineParser<'a> {
+    s: &'a str,
+}
 
-impl Iterator for MemoryIter {
-    type Item = MemoryPage;
-    fn next(&mut self) -> Option<Self::Item> {
-        let line = self.0.next()?;
-        let mut line = LineParser::new(line.as_ref());
-        let base = line.till('-').unwrap();
-        let base = usize::from_str_radix(base, 16).unwrap();
-        line.skip_count(1);
-        let end = usize::from_str_radix(line.next().unwrap(), 16).unwrap();
-        let size = end - base;
-        let prot = line.next().unwrap();
-        for i in 0..3 {
-            line.next();
-        }
-        let usage: Arc<str> = line.rest().trim().into();
+impl<'a> LineParser<'a> {
+    pub fn new(s: &'a str) -> Self {
+        Self { s }
+    }
 
-        let mut result = MemoryPage {
-            base,
-            size,
-            usage,
-            prot: [0; 4],
-        };
-        result.prot.copy_from_slice(prot.as_bytes());
-        Some(result)
+    pub fn next(&mut self) -> Option<&'a str> {
+        let s = self.s.trim_start();
+        let pos = s.find(|c: char| c.is_whitespace()).unwrap_or(s.len());
+        self.s = &s[pos..];
+        Some(&s[..pos])
+    }
+
+    pub fn till(&mut self, c: char) -> Option<&'a str> {
+        let s = self.s.trim_start();
+        let pos = s.find(c)?;
+        self.s = &self.s[pos..];
+        Some(&s[..pos])
+    }
+
+    pub fn rest(self) -> &'a str {
+        self.s
+    }
+
+    pub fn skip_count(&mut self, c: usize) {
+        self.s = &self.s[c..];
     }
 }
 
-#[derive(Deref)]
 pub struct Module {
-    #[deref]
-    pub comm: CommonModule,
+    pub base: usize,
+    pub size: usize,
     pub name: Arc<str>,
     pub path: Arc<str>,
 }
 
-pub struct ModuleIter<'a> {
-    f: LineReader<File>,
+pub struct ModuleIter<'a, I> {
+    f: I,
     p: &'a Process,
     cached: bool,
     base: usize,
@@ -279,7 +279,7 @@ pub struct ModuleIter<'a> {
 
 pub const ELF_SIG: [u8; 4] = [127, b'E', b'L', b'F'];
 
-impl ModuleIter<'_> {
+impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
     fn next_line(&mut self) -> bool {
         let line = match self.f.next() {
             Some(r) => r,
@@ -328,7 +328,8 @@ impl ModuleIter<'_> {
                     size += self.size;
                 }
                 return Some(Module {
-                    comm: CommonModule { base, size },
+                    base,
+                    size,
                     name,
                     path,
                 });
@@ -339,7 +340,7 @@ impl ModuleIter<'_> {
     }
 }
 
-impl<'a> Iterator for ModuleIter<'a> {
+impl<'a, I: Iterator<Item = String>> Iterator for ModuleIter<'a, I> {
     type Item = Module;
 
     fn next(&mut self) -> Option<Self::Item> {

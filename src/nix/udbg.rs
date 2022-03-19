@@ -1,8 +1,15 @@
 use super::{util::*, *};
-use crate::{elf::*, util, AdaptorSpec};
-use crate::{range::*, regs::*, sym::*, udbg::*};
+use crate::util::to_weak;
+use crate::{breakpoint::*, elf::*, error::*, shell::*, target::*, tid_t, util};
+use crate::{event::*, memory::*, symbol::*};
+use crate::{range::RangeValue, regs::*};
 
+use anyhow::Context;
+use goblin::elf::sym::Sym;
+use nix::sys::wait::waitpid;
 use parking_lot::RwLock;
+use procfs::process::{Stat as ThreadStat, Task};
+use serde_value::Value;
 use std::cell::Cell;
 use std::collections::{HashMap, HashSet};
 use std::mem::{size_of, transmute, zeroed};
@@ -10,11 +17,10 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use goblin::elf::sym::Sym;
-
-use nix::sys::signal::Signal;
-use nix::sys::wait::*;
-use nix::unistd::Pid;
+use nix::{
+    sys::{ptrace, signal::Signal, wait::*},
+    unistd::Pid,
+};
 
 cfg_if! {
     if #[cfg(target_os = "android")] {
@@ -97,7 +103,7 @@ impl SymbolsData {
 
     fn load(&mut self, path: &str) -> Result<(), String> {
         let map = util::mapfile(path.as_ref()).ok_or("map failed")?;
-        let e = elf::parse(&map).ok_or("parse failed")?;
+        let e = ElfHelper::parse(&map).ok_or("parse failed")?;
         let mut push_symbol = |s: ElfSym| {
             if s.name.starts_with("$x.") {
                 return;
@@ -134,7 +140,7 @@ impl TimeCheck {
 }
 
 pub struct CommonAdaptor {
-    base: UDbgBase,
+    base: TargetBase,
     ps: Process,
     symgr: SymbolManager<NixModule>,
     pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
@@ -149,7 +155,7 @@ pub struct CommonAdaptor {
 }
 
 impl CommonAdaptor {
-    fn new(mut base: UDbgBase, ps: Process) -> Self {
+    fn new(mut base: TargetBase, ps: Process) -> Self {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
         let mut trace_opts: c_int = PTRACE_O_EXITKILL | PTRACE_O_TRACECLONE | PTRACE_O_TRACEEXEC;
@@ -245,7 +251,7 @@ impl CommonAdaptor {
                 continue;
             }
 
-            let arch = match elf::machine_to_arch(buf.e_machine) {
+            let arch = match ElfHelper::arch_name(buf.e_machine) {
                 Some(a) => a,
                 None => {
                     error!("error e_machine: {} {}", buf.e_machine, m.path);
@@ -328,13 +334,14 @@ impl CommonAdaptor {
     }
 
     fn update_regs(&self, tid: pid_t) {
-        if let Some(regs) = self.ps.get_regs(tid) {
-            unsafe {
+        match ptrace::getregs(tid) {
+            Ok(regs) => unsafe {
                 *mutable(&self.regs) = regs;
+            },
+            Err(err) => {
+                error!("get_regs failed: {err:?}");
             }
-        } else {
-            error!("get_regs failed: {}", get_last_error_string());
-        }
+        };
     }
 
     fn set_regs(&self) -> UDbgResult<()> {
@@ -484,11 +491,11 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn attach_and_stop(&self, tid: tid_t) -> bool {
-        ptrace_attach(tid) // will cause Stopped(Signal::SIGSTOP)
-                           // ptrace_seize(tid, self.trace_opts) &&
-                           // ptrace_interrupt(tid)   // will cause PTRACE_EVENT_STOP
-    }
+    // pub fn attach_and_stop(&self, tid: tid_t) -> bool {
+    //     ptrace_attach(tid) // will cause Stopped(Signal::SIGSTOP)
+    //                        // ptrace_seize(tid, self.trace_opts) &&
+    //                        // ptrace_interrupt(tid)   // will cause PTRACE_EVENT_STOP
+    // }
 
     fn enum_module<'a>(
         &'a self,
@@ -502,7 +509,7 @@ impl CommonAdaptor {
         Ok(Box::new(self.mem_pages.read().clone().into_iter()))
     }
 
-    fn get_memory_map(&self) -> Vec<UiMemory> {
+    fn get_memory_map(&self) -> Vec<MemoryPageInfo> {
         self.enum_memory()
             .unwrap()
             .map(|m| {
@@ -513,7 +520,7 @@ impl CommonAdaptor {
                 if m.usage.as_ref() == "[stack]" {
                     flags |= MF_STACK;
                 }
-                UiMemory {
+                MemoryPageInfo {
                     base: m.base,
                     size: m.size,
                     flags,
@@ -525,7 +532,7 @@ impl CommonAdaptor {
             .collect::<Vec<_>>()
     }
 
-    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = UiHandle> + 'a>, UDbgError> {
+    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
         use std::os::unix::fs::FileTypeExt;
 
         Ok(Box::new(
@@ -556,7 +563,7 @@ impl CommonAdaptor {
                                 ""
                             }
                         });
-                    UiHandle {
+                    HandleInfo {
                         ty: 0,
                         handle: id,
                         type_name: ts.to_string(),
@@ -737,16 +744,17 @@ pub fn ptrace_getevtmsg<T: Copy>(tid: tid_t, result: &mut T) -> bool {
 }
 
 pub fn ptrace_step_and_wait(tid: pid_t) -> bool {
-    ptrace_step(tid);
-    match ptrace::waitpid(tid, 0) {
-        Some(t) => {
-            if t.0 == tid {
+    ptrace::step(tid.into(), None);
+    match waitpid(tid, None) {
+        Ok(t) => {
+            let pid = t.pid().map(|p| p.as_raw());
+            if pid == Some(tid) {
                 return true;
             }
-            error!("step unexpect tid: {}", t.0);
+            udbg_ui().error(format!("step unexpect tid: {pid:?}"));
             false
         }
-        None => false,
+        Err(_) => false,
     }
 }
 
@@ -757,7 +765,7 @@ unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
 
 impl StandardAdaptor {
-    pub fn create(base: UDbgBase, path: &str, args: &[&str]) -> UDbgResult<Arc<Self>> {
+    pub fn create(base: TargetBase, path: &str, args: &[&str]) -> UDbgResult<Arc<Self>> {
         use std::ffi::CString;
         unsafe {
             match libc::fork() {
@@ -774,14 +782,11 @@ impl StandardAdaptor {
                     execvp(path.as_ptr() as *const c_char, argv.as_ptr());
                     unreachable!();
                 }
-                -1 => {
-                    error!("fork failed: {}", get_last_error_string());
-                    Err(UDbgError::system())
-                }
+                -1 => Err(UDbgError::system()),
                 pid => {
                     let ps = Process::from_pid(pid).ok_or_else(|| UDbgError::system())?;
                     let this = Self(CommonAdaptor::new(base, ps));
-                    ptrace_setopt(pid, this.0.trace_opts);
+                    ptrace::setoptions(pid.into(), this.0.trace_opts);
                     this.threads.write().insert(pid);
                     Ok(Arc::new(this))
                 }
@@ -789,7 +794,7 @@ impl StandardAdaptor {
         }
     }
 
-    pub fn open(base: UDbgBase, pid: pid_t) -> Result<Arc<Self>, UDbgError> {
+    pub fn open(base: TargetBase, pid: pid_t) -> Result<Arc<Self>, UDbgError> {
         let ps = Process::from_pid(pid).ok_or(UDbgError::system())?;
         Ok(Arc::new(Self(CommonAdaptor::new(base, ps))))
     }
@@ -812,29 +817,45 @@ impl StandardAdaptor {
     }
 }
 
-impl AdaptorSpec for StandardAdaptor {}
-
-// #[intertrait::cast_to]
 impl ReadMemory for StandardAdaptor {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         self.ps.read(addr, data)
     }
 }
 
-// #[intertrait::cast_to]
 impl WriteMemory for StandardAdaptor {
     fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
         self.ps.write(addr, data)
     }
 }
 
-impl GetProp for StandardAdaptor {}
-
-impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase {
-        &self.base
+impl TargetMemory for StandardAdaptor {
+    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
+        self.0.enum_memory()
     }
 
+    fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
+        self.update_memory_page_check_time();
+        RangeValue::binary_search(&self.mem_pages.read().as_slice(), address).map(|r| r.clone())
+    }
+
+    fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+        self.0.get_memory_map()
+    }
+}
+
+impl GetProp for StandardAdaptor {
+    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        // match key {
+        //     "moduleTimeout" => { self.tc_module.duration.set(Duration::from_secs_f64(s.args(3))); }
+        //     "memoryTimeout" => { self.tc_memory.duration.set(Duration::from_secs_f64(s.args(3))); }
+        //     _ => {}
+        // }
+        Ok(Value::Unit)
+    }
+}
+
+impl TargetControl for StandardAdaptor {
     fn detach(&self) -> UDbgResult<()> {
         if self.base.is_opened() {
             self.base.status.set(UDbgStatus::Ended);
@@ -872,50 +893,12 @@ impl UDbgAdaptor for StandardAdaptor {
             code => Err(UDbgError::system()),
         }
     }
+}
 
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
-        Ok(Box::new(self.ps.enum_thread()))
-    }
+// impl TargetSymbol for StandardAdaptor {
+// }
 
-    fn enum_module<'a>(
-        &'a self,
-    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
-        self.0.enum_module()
-    }
-
-    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
-        self.0.enum_memory()
-    }
-
-    fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
-        self.update_memory_page_check_time();
-        RangeValue::binary_search(&self.mem_pages.read().as_slice(), address).map(|r| r.clone())
-    }
-
-    // fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
-    //     Some(&self.symgr)
-    // }
-
-    fn find_module(&self, module: usize) -> Option<Arc<dyn UDbgModule>> {
-        let mut result = self.symgr.find_module(module);
-        self.tc_module.check(|| {
-            self.update_module();
-            result = self.symgr.find_module(module);
-        });
-        Some(result?)
-    }
-
-    fn get_module(&self, module: &str) -> Option<Arc<dyn UDbgModule>> {
-        Some(self.symgr.get_module(module).or_else(|| {
-            self.0.update_module();
-            self.symgr.get_module(module)
-        })?)
-    }
-
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
-        Ok(unsafe { mutable(&self.regs) as &mut dyn UDbgRegs })
-    }
-
+impl BreakpointManager for StandardAdaptor {
     fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         self.base.check_opened()?;
         if self.bp_exists(opt.address as BpID) {
@@ -961,33 +944,87 @@ impl UDbgAdaptor for StandardAdaptor {
     fn get_bp_list(&self) -> Vec<BpID> {
         self.bp_map.read().keys().cloned().collect()
     }
+}
 
-    fn get_memory_map(&self) -> Vec<UiMemory> {
-        self.0.get_memory_map()
+impl Target for StandardAdaptor {
+    fn base(&self) -> &TargetBase {
+        &self.base
     }
 
-    fn open_thread(&self, tid: tid_t) -> Result<Box<dyn UDbgThread>, UDbgError> {
+    fn enum_module<'a>(
+        &'a self,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
+        self.0.enum_module()
+    }
+
+    fn find_module(&self, module: usize) -> Option<Arc<dyn UDbgModule>> {
+        let mut result = self.symgr.find_module(module);
+        self.tc_module.check(|| {
+            self.update_module();
+            result = self.symgr.find_module(module);
+        });
+        Some(result?)
+    }
+
+    fn get_module(&self, module: &str) -> Option<Arc<dyn UDbgModule>> {
+        Some(self.symgr.get_module(module).or_else(|| {
+            self.0.update_module();
+            self.symgr.get_module(module)
+        })?)
+    }
+
+    fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
+        let task = Task::new(self.ps.pid, tid).context("task")?;
         Ok(Box::new(NixThread {
             base: ThreadData { tid, wow64: false },
-            stat: ThreadStat::from(self.ps.pid, tid).ok_or(UDbgError::system())?,
+            stat: task.stat().context("stat")?,
         }))
     }
 
-    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = UiHandle> + 'a>, UDbgError> {
+    fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
         self.0.enum_handle()
     }
 
-    // TODO: lua
-    // fn lua_call(&self, s: &State) -> UDbgResult<i32> {
-    //     match s.args::<&str>(2) {
-    //         "moduleTimeout" => { self.tc_module.duration.set(Duration::from_secs_f64(s.args(3))); }
-    //         "memoryTimeout" => { self.tc_memory.duration.set(Duration::from_secs_f64(s.args(3))); }
-    //         _ => {}
-    //     }
-    //     Ok(0)
-    // }
+    fn enum_thread(
+        &self,
+        detail: bool,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
+        Ok(Box::new(self.ps.enum_thread()))
+    }
+}
 
-    fn event_loop<'a>(&self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
+impl UDbgAdaptor for StandardAdaptor {
+    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
+        Ok(unsafe { mutable(&self.regs) as &mut dyn UDbgRegs })
+    }
+}
+
+pub struct DefaultEngine;
+
+impl UDbgEngine for DefaultEngine {
+    fn open(&mut self, base: TargetBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        Ok(StandardAdaptor::open(base, pid)?)
+    }
+
+    fn attach(&mut self, base: TargetBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        let this = StandardAdaptor::open(base, pid)?;
+        for tid in this.ps.enum_thread() {
+            ptrace::attach(tid).context("attach")?;
+        }
+        Ok(this)
+    }
+
+    fn create(
+        &mut self,
+        base: TargetBase,
+        path: &str,
+        cwd: Option<&str>,
+        args: &[&str],
+    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        Ok(StandardAdaptor::create(base, path, args)?)
+    }
+
+    fn event_loop<'a>(&mut self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
         use UEvent::*;
 
         self.update_module();
@@ -1028,12 +1065,8 @@ impl UDbgAdaptor for StandardAdaptor {
 
                 let insert_thread = |tid| {
                     if self.threads.write().insert(tid) {
-                        if !ptrace_setopt(tid, self.trace_opts) {
-                            ui.error(&format!(
-                                "ptrace_setopt {} {}",
-                                tid,
-                                get_last_error_string()
-                            ));
+                        if let Err(err) = ptrace::setoptions(tid.into(), self.trace_opts) {
+                            ui.error(&format!("ptrace_setopt {tid} {err:?}",));
                         }
                         return true;
                     }
@@ -1108,7 +1141,7 @@ impl UDbgAdaptor for StandardAdaptor {
                                 let mut new_tid: tid_t = 0;
                                 ptrace_getevtmsg(tid, &mut new_tid);
                                 callback(ThreadCreate(new_tid));
-                                self.attach_and_stop(new_tid);
+                                ptrace::attach(new_tid.into());
                             }
                             PTRACE_EVENT_FORK => {}
                             _ => {}
@@ -1211,13 +1244,13 @@ impl UDbgAdaptor for StandardAdaptor {
                 //                 }
                 //             }
                 //         }
-                ptrace_cont(tid, cont_sig as _);
+                ptrace::cont(tid, cont_sig as _);
                 if self.detaching.get() {
                     for bp in self.get_breakpoints() {
                         bp.remove();
                     }
                     for &tid in self.threads.read().iter() {
-                        if !ptrace_detach(tid) {
+                        if !ptrace::detach(tid.into(), None) {
                             error!("ptrace_detach({tid}) failed");
                         }
                     }
@@ -1226,33 +1259,5 @@ impl UDbgAdaptor for StandardAdaptor {
             }
         }
         Ok(())
-    }
-}
-
-pub struct DefaultEngine;
-
-impl UDbgEngine for DefaultEngine {
-    fn open(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Ok(StandardAdaptor::open(base, pid)?)
-    }
-
-    fn attach(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        let this = StandardAdaptor::open(base, pid)?;
-        for tid in this.ps.enum_thread() {
-            if !this.attach_and_stop(tid) {
-                return Err(UDbgError::system());
-            }
-        }
-        Ok(this)
-    }
-
-    fn create(
-        &self,
-        base: UDbgBase,
-        path: &str,
-        cwd: Option<&str>,
-        args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Ok(StandardAdaptor::create(base, path, args)?)
     }
 }

@@ -5,19 +5,18 @@ use std::convert::TryFrom;
 use std::fs::{read_dir, read_link, File};
 use std::path::{Path, PathBuf};
 
-use crate::{regs::*, text::*, *};
+use crate::prelude::reg_t;
+use crate::regs::AbstractRegs;
 use libc::*;
 use nix::sys::signal::Signal;
 
+pub mod comm;
 pub mod process;
-pub mod ptrace;
-pub mod thread;
 pub mod udbg;
 pub mod util;
 
+pub use self::comm::*;
 pub use self::process::*;
-pub use self::ptrace::*;
-pub use self::thread::*;
 
 #[cfg(target_arch = "arm")]
 #[derive(Copy, Clone)]
@@ -124,7 +123,7 @@ impl Iterator for PidIter {
 }
 
 pub fn enum_pid() -> PidIter {
-    PidIter(Some(std::fs::read_dir("/proc").unwrap()))
+    PidIter(std::fs::read_dir("/proc").ok())
 }
 
 #[cfg(target_arch = "x86_64")]

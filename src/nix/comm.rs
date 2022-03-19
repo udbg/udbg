@@ -1,4 +1,5 @@
-use crate::{sym::*, UDbgResult};
+use super::process::Process;
+use crate::prelude::*;
 use core::{cell::Cell, fmt};
 use std::sync::Arc;
 
@@ -98,6 +99,12 @@ impl NixModule {
     // }
 }
 
+impl GetProp for NixModule {
+    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        Ok(serde_value::Value::Unit)
+    }
+}
+
 impl UDbgModule for NixModule {
     fn data(&self) -> &ModuleData {
         &self.data
@@ -135,21 +142,19 @@ impl UDbgModule for NixModule {
     // }
 }
 
-use super::process::Process;
-
-impl<T: AsRef<Process>> crate::ReadMemory for T {
+impl<T: AsRef<Process>> ReadMemory for T {
     default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         self.as_ref().read_memory(addr, data)
     }
 }
 
-impl<T: AsRef<Process>> crate::WriteMemory for T {
+impl<T: AsRef<Process>> WriteMemory for T {
     default fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize> {
         self.as_ref().write_memory(address, data)
     }
 }
 
-impl<T: AsRef<Process>> crate::TargetMemory for T {
+impl<T: AsRef<Process>> TargetMemory for T {
     default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
         Ok(Box::new(self.as_ref().enum_memory()))
     }
@@ -165,7 +170,7 @@ impl<T: AsRef<Process>> crate::TargetMemory for T {
     default fn virtual_free(&self, address: usize) {}
 }
 
-impl<T: AsRef<Process>> crate::TargetControl for T {
+impl<T: AsRef<Process>> TargetControl for T {
     fn detach(&self) -> UDbgResult<()> {
         todo!()
     }

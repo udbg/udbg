@@ -1040,7 +1040,7 @@ mod plat {
     }
 }
 
-#[cfg(any(target_arch = "linux", target_arch = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android"))]
 mod plat {
     use super::*;
     #[cfg(target_arch = "aarch64")]
