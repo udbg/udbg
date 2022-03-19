@@ -14,26 +14,21 @@ fn main() -> anyhow::Result<()> {
         .use_utc()
         .start()?;
 
-    let dbg = DefaultEngine
-        .create(
-            Default::default(),
-            r"C:\Windows\System32\notepad.exe",
-            None,
-            &[],
-        )
-        .unwrap();
-    // dbg.event_loop(&mut |event| {
-    //     println!("[event]~{} {event}", dbg.base().event_tid.get());
-    //     match event {
-    //         UEvent::Exception{..} => UserReply::Run(false),
-    //         _ => UserReply::Run(true),
-    //     }
-    // })?;
-    dbg.loop_event(|dbg, state| async move {
-        while let Some(event) = state.cont(UserReply::Run(false)).await {
-            println!("[event]~{} {event}", dbg.base().event_tid.get());
+    let mut engine = DefaultEngine::new();
+    // let engine = &DebugEngine::create()?;
+    engine.create(r"notepad.exe", None, &[]).unwrap();
+    engine.event_loop(&mut |target, event| {
+        println!("[event]~{} {event}", target.base().event_tid.get());
+        match event {
+            UEvent::Exception { .. } => UserReply::Run(false),
+            _ => UserReply::Run(true),
         }
-    });
+    })?;
+    // dbg.loop_event(|dbg, state| async move {
+    //     while let Some(event) = state.cont(UserReply::Run(false)).await {
+    //         println!("[event]~{} {event}", dbg.base().event_tid.get());
+    //     }
+    // });
 
     Ok(())
 }

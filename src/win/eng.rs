@@ -22,7 +22,7 @@ type DebugCreateFn = extern "system" fn(
 ) -> ::windows::core::HRESULT;
 
 #[implement(IDebugEventCallbacksWide)]
-pub struct EventCallbacks(&'static mut UDbgCallback<'static>, DebugEngine);
+pub struct EventCallbacks(&'static mut UDbgCallback<'static>, *mut DebugEngine);
 
 fn reply2status(reply: UserReply) -> HRESULT {
     HRESULT(match reply {
@@ -38,7 +38,14 @@ fn reply2status(reply: UserReply) -> HRESULT {
 impl EventCallbacks {
     #[inline(always)]
     fn call(&self, event: UEvent) -> Result<()> {
-        reply2status(unsafe { mutable(self).0(event) }).ok()
+        // TODO:
+        let target = Arc::new(DebugTarget::from(self.engine() as &DebugEngine));
+        reply2status(unsafe { mutable(self).0(target, event) }).ok()
+    }
+
+    #[inline(always)]
+    fn engine(&self) -> &mut DebugEngine {
+        unsafe { self.1.as_mut().unwrap() }
     }
 }
 
@@ -68,7 +75,7 @@ impl IDebugEventCallbacksWide_Impl for EventCallbacks {
             .map(|bp| {
                 self.call(UEvent::Breakpoint(Arc::new(IDbgBpWrapper(
                     bp,
-                    self.1.ctrl.clone(),
+                    self.engine().ctrl.clone(),
                 ))))
             })
             .unwrap_or(HRESULT(DEBUG_STATUS_BREAK as _).ok())
@@ -254,43 +261,20 @@ impl UDbgAdaptor for DebugTarget {
             Ok(&mut this.context)
         }
     }
-
-    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
-        unsafe {
-            self.ctrl.ExecuteWide(0, cmd, 0).context("")?;
-            Ok(())
-        }
-    }
-
-    fn event_loop(&self, callback: &mut UDbgCallback) -> UDbgResult<()> {
-        unsafe {
-            let event: IDebugEventCallbacksWide =
-                EventCallbacks(core::mem::transmute(callback), self._engine.clone()).into();
-            self.client.SetEventCallbacksWide(event);
-
-            loop {
-                match self.ctrl.WaitForEvent(0, winapi::um::winbase::INFINITE) {
-                    Ok(_) => {}
-                    Err(err) => break,
-                }
-            }
-        }
-        Ok(())
-    }
 }
 
 impl UDbgEngine for DebugEngine {
-    fn attach(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         unsafe {
             self.client
                 .AttachProcess(0, pid, DEBUG_ATTACH_DEFAULT)
                 .context("AttachProcess")?;
-            Ok(Arc::new(DebugTarget::from(self)))
+            Ok(Arc::new(DebugTarget::from(self as &Self)))
         }
     }
 
     fn create(
-        &self,
+        &mut self,
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
@@ -327,8 +311,31 @@ impl UDbgEngine for DebugEngine {
                 )
             }
             .context("")?;
-            Ok(Arc::new(DebugTarget::from(self)))
+            Ok(Arc::new(DebugTarget::from(self as &Self)))
         }
+    }
+
+    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
+        unsafe {
+            self.ctrl.ExecuteWide(0, cmd, 0).context("")?;
+            Ok(())
+        }
+    }
+
+    fn event_loop(&mut self, callback: &mut UDbgCallback) -> UDbgResult<()> {
+        unsafe {
+            let event: IDebugEventCallbacksWide =
+                EventCallbacks(core::mem::transmute(callback), self).into();
+            self.client.SetEventCallbacksWide(event);
+
+            loop {
+                match self.ctrl.WaitForEvent(0, winapi::um::winbase::INFINITE) {
+                    Ok(_) => {}
+                    Err(err) => break,
+                }
+            }
+        }
+        Ok(())
     }
 }
 

@@ -19,7 +19,6 @@ use core::mem::{size_of, size_of_val, transmute, zeroed};
 use core::ops::Deref;
 use core::ptr::{null, null_mut};
 use core::slice::{from_raw_parts, from_raw_parts_mut};
-use winapi::um::winbase::QueryFullProcessImageNameW;
 
 use ntapi::ntpsapi::PROCESS_BASIC_INFORMATION;
 use winapi::shared::minwindef::*;
@@ -30,6 +29,7 @@ use winapi::um::memoryapi::*;
 use winapi::um::processthreadsapi::*;
 use winapi::um::psapi::*;
 use winapi::um::tlhelp32::*;
+use winapi::um::winbase::*;
 use winapi::um::winnt::*;
 use winapi::um::winuser::*;
 
@@ -398,6 +398,7 @@ impl UnicodeUtil for UNICODE_STRING {
     }
 }
 
+#[derive(Clone, Copy)]
 #[repr(C)]
 pub struct ExceptionRecord {
     pub code: u32,
@@ -891,3 +892,110 @@ pub trait ReadMemUtilWin: ReadMemoryUtil {
 }
 
 impl<T: ReadMemoryUtil + ?Sized> ReadMemUtilWin for T {}
+
+const PROC_THREAD_ATTRIBUTE_NUMBER: usize = 0x0000FFFF;
+const PROC_THREAD_ATTRIBUTE_THREAD: usize = 0x00010000;
+const PROC_THREAD_ATTRIBUTE_INPUT: usize = 0x00020000;
+const PROC_THREAD_ATTRIBUTE_ADDITIVE: usize = 0x00040000;
+
+const fn ProcThreadAttributeValue(
+    Number: usize,
+    Thread: usize,
+    Input: usize,
+    Additive: usize,
+) -> usize {
+    ((Number) & PROC_THREAD_ATTRIBUTE_NUMBER)
+        | (if Thread != 0 {
+            PROC_THREAD_ATTRIBUTE_THREAD
+        } else {
+            0
+        })
+        | (if Input != 0 {
+            PROC_THREAD_ATTRIBUTE_INPUT
+        } else {
+            0
+        })
+        | (if Additive != 0 {
+            PROC_THREAD_ATTRIBUTE_ADDITIVE
+        } else {
+            0
+        })
+}
+
+pub fn create_debug_process(
+    path: &str,
+    cwd: Option<&str>,
+    args: &[&str],
+    pi: &mut PROCESS_INFORMATION,
+    ppid: Option<pid_t>,
+) -> UDbgResult<Process> {
+    unsafe {
+        let mut cmdline = path.trim().to_string();
+        if cmdline.find(char::is_whitespace).is_some() {
+            cmdline = format!("\"{}\"", cmdline);
+        }
+        if !args.is_empty() {
+            cmdline += " ";
+            cmdline += &args.join(" ");
+        }
+        let cwd = cwd.map(|v| v.to_wide());
+        let cwd = cwd.as_ref().map(|r| r.as_ptr()).unwrap_or(null());
+
+        const DEFAULT_OPTION: u32 = /*DEBUG_ONLY_THIS_PROCESS*/
+            DEBUG_PROCESS | CREATE_NEW_CONSOLE;
+        let mut create_process = |opt: u32, si: LPSTARTUPINFOW| {
+            CreateProcessW(
+                null_mut(),
+                cmdline.to_wide().as_mut_ptr(),
+                null_mut(),
+                null_mut(),
+                FALSE,
+                DEFAULT_OPTION | opt,
+                null_mut(),
+                cwd,
+                si,
+                pi,
+            )
+        };
+        let r = if let Some(ppid) = ppid {
+            let mut si: STARTUPINFOEXW = core::mem::zeroed();
+            si.StartupInfo.cb = size_of_val(&si) as u32;
+
+            let mut psize = 0;
+            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut psize);
+            let mut pa = BufferType::<PROC_THREAD_ATTRIBUTE_LIST>::with_size(psize);
+            let mut handle = OpenProcess(PROCESS_CREATE_PROCESS, 0, ppid);
+            handle.as_ref().ok_or("ppid open failed")?;
+
+            InitializeProcThreadAttributeList(pa.as_mut_ptr(), 1, 0, &mut psize);
+            let ProcThreadAttributeParentProcess = 0;
+            let PROC_THREAD_ATTRIBUTE_PARENT_PROCESS =
+                ProcThreadAttributeValue(ProcThreadAttributeParentProcess, 0, 1, 0);
+            if UpdateProcThreadAttribute(
+                pa.as_mut_ptr(),
+                0,
+                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
+                transmute(&mut handle),
+                size_of_val(&handle),
+                null_mut(),
+                null_mut(),
+            ) == 0
+            {
+                return Err("set ppid falied".into());
+            }
+            si.lpAttributeList = pa.as_mut_ptr();
+
+            let r = create_process(EXTENDED_STARTUPINFO_PRESENT, transmute(&mut si));
+            DeleteProcThreadAttributeList(pa.as_mut_ptr());
+            r
+        } else {
+            let mut si: STARTUPINFOW = core::mem::zeroed();
+            si.cb = size_of_val(&si) as u32;
+            create_process(0, &mut si)
+        };
+        if r == 0 {
+            return Err(UDbgError::system());
+        }
+        Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).check_errstr("get pid")?)
+    }
+}

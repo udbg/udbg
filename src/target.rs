@@ -7,9 +7,6 @@ use std::cell::Cell;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::sync::Arc;
 
-#[cfg(windows)]
-use winapi::um::winnt::{EXCEPTION_POINTERS, PCONTEXT, PEXCEPTION_RECORD};
-
 pub use crate::os::udbg::*;
 use crate::{prelude::*, regs::*};
 
@@ -230,46 +227,49 @@ pub trait UDbgEngine {
         crate::util::enum_psinfo()
     }
 
-    fn open(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    /// open a process, only open, not attach
+    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         Err(UDbgError::NotSupport)
     }
 
-    fn open_self(&self) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open_self(&mut self) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         self.open(std::process::id() as _)
     }
 
-    fn attach(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
+    /// attach to a active process
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
 
+    /// create and debug a process
     fn create(
-        &self,
+        &mut self,
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
-}
 
-pub type UDbgCallback<'a> = dyn FnMut(UEvent) -> UserReply + 'a;
-
-#[cfg(windows)]
-pub trait AdaptorSpec {
-    fn exception_context(&self) -> UDbgResult<PCONTEXT> {
+    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
 
-    fn exception_record(&self) -> UDbgResult<PEXCEPTION_RECORD> {
+    fn event_loop<'a>(&mut self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
 
-    fn exception_pointers(&self) -> UDbgResult<EXCEPTION_POINTERS> {
-        Ok(EXCEPTION_POINTERS {
-            ExceptionRecord: self.exception_record()?,
-            ContextRecord: self.exception_context()?,
-        })
-    }
+    // fn loop_event<
+    //     U: std::future::Future<Output = ()> + 'static,
+    //     F: FnOnce(Arc<Self>, UEventState) -> U,
+    // >(
+    //     self: Arc<Self>,
+    //     callback: F,
+    // ) {
+    //     let state = UEventState::new();
+    //     let mut fetcher = ReplyFetcher::new(Box::pin(callback(self.clone(), state.clone())), state);
+    //     self.event_loop(&mut |event| fetcher.fetch(event).unwrap_or(UserReply::Run(false)));
+    //     fetcher.fetch(None);
+    // }
 }
 
-#[cfg(not(windows))]
-pub trait AdaptorSpec {}
+pub type UDbgCallback<'a> = dyn FnMut(Arc<dyn UDbgAdaptor>, UEvent) -> UserReply + 'a;
 
 /// Trait for getting property dynamically
 pub trait GetProp {
@@ -392,14 +392,6 @@ pub trait UDbgAdaptor: Send + Sync + Target + 'static {
 
     fn except_param(&self, i: usize) -> Option<usize> {
         None
-    }
-
-    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
-    }
-
-    fn event_loop<'a>(&self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
     }
 }
 
@@ -559,19 +551,6 @@ pub trait AdaptorUtil: UDbgAdaptor {
     #[inline]
     fn pid(&self) -> pid_t {
         self.base().pid.get()
-    }
-
-    fn loop_event<
-        U: std::future::Future<Output = ()> + 'static,
-        F: FnOnce(Arc<Self>, UEventState) -> U,
-    >(
-        self: Arc<Self>,
-        callback: F,
-    ) {
-        let state = UEventState::new();
-        let mut fetcher = ReplyFetcher::new(Box::pin(callback(self.clone(), state.clone())), state);
-        self.event_loop(&mut |event| fetcher.fetch(event).unwrap_or(UserReply::Run(false)));
-        fetcher.fetch(None);
     }
 }
 impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorUtil for T {}

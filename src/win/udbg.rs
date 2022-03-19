@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell, UnsafeCell};
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::{Error as IoErr, Result as IoRes};
-use std::mem::{size_of_val, transmute};
+use std::mem::transmute;
 use std::ops::Deref;
 use std::os::windows::io::FromRawHandle;
 use std::ptr::{null, null_mut};
@@ -16,7 +16,6 @@ use winapi::um::errhandlingapi::GetLastError;
 use winapi::um::handleapi::*;
 use winapi::um::minwinbase::*;
 use winapi::um::processthreadsapi::*;
-use winapi::um::winbase::*;
 
 use winapi::shared::ntstatus::*;
 const EXCEPTION_WX86_BREAKPOINT: u32 = STATUS_WX86_BREAKPOINT as u32;
@@ -434,6 +433,16 @@ impl WinThread {
             teb: AtomicCell::new(0),
             detail: None,
         })
+    }
+
+    pub fn open(process: *const Process, tid: tid_t) -> UDbgResult<Box<WinThread>> {
+        Self::new(tid)
+            .map(|mut t| unsafe {
+                t.process = process;
+                t.base.wow64 = process.as_ref().map(|p| p.is_wow64()).unwrap_or_default();
+                Box::new(t)
+            })
+            .ok_or(UDbgError::system())
     }
 
     fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
@@ -896,7 +905,6 @@ impl TargetSymbol for SymbolManager<WinModule> {
 
 pub struct CommonAdaptor {
     pub base: TargetBase,
-    tid_to_run: UnsafeCell<HashSet<u32>>, // 标记为继续运行的线程ID
     dbg_reg: [Cell<usize>; 4],
     pub symgr: SymbolManager<WinModule>,
     pub protected_thread: RwLock<Vec<u32>>,
@@ -1005,7 +1013,6 @@ impl CommonAdaptor {
             bp_map: RwLock::new(HashMap::new()),
             show_debug_string: sds.into(),
             protected_thread: vec![].into(),
-            tid_to_run: UnsafeCell::new(HashSet::new()),
             base,
             symgr,
             step_tid: Cell::new(0),
@@ -1019,11 +1026,6 @@ impl CommonAdaptor {
 
     pub fn get_mapped_file_name(&self, module: usize) -> Option<String> {
         self.process.get_mapped_file_name(module)
-    }
-
-    #[inline(always)]
-    pub fn tid_to_run(&self) -> &mut HashSet<u32> {
-        unsafe { &mut *self.tid_to_run.get() }
     }
 
     pub fn get_hwbp_index(&self) -> Option<usize> {
@@ -1144,7 +1146,7 @@ impl CommonAdaptor {
     }
 
     pub fn user_handle_exception(&self, first: bool, tb: &mut TraceBuf) -> HandleResult {
-        let reply = (tb.callback)(UEvent::Exception {
+        let reply = tb.call(UEvent::Exception {
             first,
             code: tb.record.code,
         });
@@ -1195,17 +1197,18 @@ impl CommonAdaptor {
         };
 
         if let Some(bp) = self.get_bp(id) {
-            // 可执行硬件断点检查预期地址
+            // check the address for HWBP
             if let InnerBpType::Hard(info) = bp.bp_type {
                 if info.rw == HwbpType::Execute as u8 && bp.address as u64 != address {
                     return HandleResult::NotHandled;
                 }
             }
 
-            // 当前位置存在断点
+            // if exists breakpoint at IP
             if let Some(i) = bp.hard_index() {
                 if !bp.temp.get() {
-                    context.set_rf(); // 临时禁用硬件断点
+                    // disable the HWBP temporarily
+                    context.set_rf();
                 }
                 self.handle_bp_has_data(this, eh, bp, tb, context)
             } else {
@@ -1217,7 +1220,7 @@ impl CommonAdaptor {
             let tid = self.base.event_tid.get();
             if self.step_tid.get() == tid {
                 self.step_tid.set(0);
-                self.handle_reply(this, (tb.callback)(UEvent::Step), tb.record, context);
+                self.handle_reply(this, tb.call(UEvent::Step), &tb.record, context);
                 return HandleResult::Continue;
             }
             HandleResult::NotHandled
@@ -1253,8 +1256,8 @@ impl CommonAdaptor {
         if hitted {
             self.handle_reply(
                 this,
-                (tb.callback)(UEvent::Breakpoint(bp.clone())),
-                tb.record,
+                tb.call(UEvent::Breakpoint(bp.clone())),
+                &tb.record,
                 context,
             );
         }
@@ -1272,11 +1275,13 @@ impl CommonAdaptor {
                 if !user_step {
                     context.set_step(true);
                 }
-                eh.cont(HandleResult::Handled);
+                eh.cont(HandleResult::Handled, tb);
                 loop {
                     match eh.fetch(tb) {
                         Some(_) => {
-                            if self.base.event_tid.get() == tid {
+                            if core::ptr::eq(self, &tb.target._common)
+                                && self.base.event_tid.get() == tid
+                            {
                                 // TODO: maybe other exception?
                                 assert!(matches!(
                                     tb.record.code,
@@ -1284,7 +1289,7 @@ impl CommonAdaptor {
                                 ));
                                 break;
                             } else if let Some(s) = eh.handle(tb) {
-                                eh.cont(s);
+                                eh.cont(s, tb);
                             } else {
                                 return HandleResult::Handled;
                             }
@@ -1333,7 +1338,7 @@ impl CommonAdaptor {
     }
 
     pub fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<WinThread>> {
-        open_win_thread(&self.process, tid)
+        WinThread::open(&self.process, tid)
     }
 
     pub fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
@@ -1958,7 +1963,7 @@ impl<'a> Iterator for MemoryIter<'a> {
 #[derive(Deref)]
 pub struct StandardAdaptor {
     #[deref]
-    pub debug: CommonAdaptor,
+    pub _common: CommonAdaptor,
     pub record: UnsafeCell<ExceptionRecord>,
     pub threads: RefCell<HashMap<u32, DbgThread>>,
     pub attached: Cell<bool>, // create by attach
@@ -1967,112 +1972,6 @@ pub struct StandardAdaptor {
 
 unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
-
-const PROC_THREAD_ATTRIBUTE_NUMBER: usize = 0x0000FFFF;
-const PROC_THREAD_ATTRIBUTE_THREAD: usize = 0x00010000;
-const PROC_THREAD_ATTRIBUTE_INPUT: usize = 0x00020000;
-const PROC_THREAD_ATTRIBUTE_ADDITIVE: usize = 0x00040000;
-
-const fn ProcThreadAttributeValue(
-    Number: usize,
-    Thread: usize,
-    Input: usize,
-    Additive: usize,
-) -> usize {
-    ((Number) & PROC_THREAD_ATTRIBUTE_NUMBER)
-        | (if Thread != 0 {
-            PROC_THREAD_ATTRIBUTE_THREAD
-        } else {
-            0
-        })
-        | (if Input != 0 {
-            PROC_THREAD_ATTRIBUTE_INPUT
-        } else {
-            0
-        })
-        | (if Additive != 0 {
-            PROC_THREAD_ATTRIBUTE_ADDITIVE
-        } else {
-            0
-        })
-}
-
-pub fn create_debug_process(
-    path: &str,
-    cwd: Option<&str>,
-    args: &[&str],
-    pi: &mut PROCESS_INFORMATION,
-    ppid: Option<pid_t>,
-) -> UDbgResult<Process> {
-    unsafe {
-        let mut cmdline = path.trim().to_string();
-        if cmdline.find(char::is_whitespace).is_some() {
-            cmdline = format!("\"{}\"", cmdline);
-        }
-        if !args.is_empty() {
-            cmdline += " ";
-            cmdline += &args.join(" ");
-        }
-        let cwd = cwd.map(|v| v.to_wide());
-        let cwd = cwd.as_ref().map(|r| r.as_ptr()).unwrap_or(null());
-
-        const DEFAULT_OPTION: u32 = DEBUG_ONLY_THIS_PROCESS | CREATE_NEW_CONSOLE;
-        let mut create_process = |opt: u32, si: LPSTARTUPINFOW| {
-            CreateProcessW(
-                null_mut(),
-                cmdline.to_wide().as_mut_ptr(),
-                null_mut(),
-                null_mut(),
-                FALSE,
-                DEFAULT_OPTION | opt,
-                null_mut(),
-                cwd,
-                si,
-                pi,
-            )
-        };
-        let r = if let Some(ppid) = ppid {
-            let mut si: STARTUPINFOEXW = core::mem::zeroed();
-            si.StartupInfo.cb = size_of_val(&si) as u32;
-
-            let mut psize = 0;
-            InitializeProcThreadAttributeList(null_mut(), 1, 0, &mut psize);
-            let mut pa = BufferType::<PROC_THREAD_ATTRIBUTE_LIST>::with_size(psize);
-            let mut handle = OpenProcess(PROCESS_CREATE_PROCESS, 0, ppid);
-            handle.as_ref().ok_or("ppid open failed")?;
-
-            InitializeProcThreadAttributeList(pa.as_mut_ptr(), 1, 0, &mut psize);
-            let ProcThreadAttributeParentProcess = 0;
-            let PROC_THREAD_ATTRIBUTE_PARENT_PROCESS =
-                ProcThreadAttributeValue(ProcThreadAttributeParentProcess, 0, 1, 0);
-            if UpdateProcThreadAttribute(
-                pa.as_mut_ptr(),
-                0,
-                PROC_THREAD_ATTRIBUTE_PARENT_PROCESS,
-                transmute(&mut handle),
-                size_of_val(&handle),
-                null_mut(),
-                null_mut(),
-            ) == 0
-            {
-                return Err("set ppid falied".into());
-            }
-            si.lpAttributeList = pa.as_mut_ptr();
-
-            let r = create_process(EXTENDED_STARTUPINFO_PRESENT, transmute(&mut si));
-            DeleteProcThreadAttributeList(pa.as_mut_ptr());
-            r
-        } else {
-            let mut si: STARTUPINFOW = core::mem::zeroed();
-            si.cb = size_of_val(&si) as u32;
-            create_process(0, &mut si)
-        };
-        if r == 0 {
-            return Err(UDbgError::system());
-        }
-        Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).check_errstr("get pid")?)
-    }
-}
 
 impl StandardAdaptor {
     pub fn open(pid: pid_t) -> Result<Arc<StandardAdaptor>, UDbgError> {
@@ -2086,7 +1985,7 @@ impl StandardAdaptor {
         base.image_path = p.image_path().unwrap_or_default();
 
         Arc::new(Self {
-            debug: CommonAdaptor::new(base, p),
+            _common: CommonAdaptor::new(base, p),
             record: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             threads: HashMap::new().into(),
             attached: false.into(),
@@ -2157,7 +2056,7 @@ impl StandardAdaptor {
                 detail: None,
             }))
         } else {
-            self.debug.open_thread(tid)
+            self.open_thread(tid)
         }
     }
 
@@ -2203,16 +2102,6 @@ pub fn continue_debug_event(pid: u32, tid: u32, status: u32) -> bool {
     unsafe { ContinueDebugEvent(pid, tid, status) != 0 }
 }
 
-impl AdaptorSpec for StandardAdaptor {
-    fn exception_context(&self) -> UDbgResult<PCONTEXT> {
-        Ok(self.context.get())
-    }
-
-    fn exception_record(&self) -> UDbgResult<PEXCEPTION_RECORD> {
-        unsafe { Ok(core::mem::transmute(self.record.get())) }
-    }
-}
-
 impl TargetControl for StandardAdaptor {
     fn detach(&self) -> Result<(), UDbgError> {
         if self.base.is_opened() {
@@ -2241,7 +2130,7 @@ impl TargetControl for StandardAdaptor {
     }
 
     fn kill(&self) -> Result<(), UDbgError> {
-        self.debug.terminate_process()
+        self.terminate_process()
     }
 }
 
@@ -2251,7 +2140,7 @@ impl Target for StandardAdaptor {
     }
 
     fn handle(&self) -> HANDLE {
-        *self.debug.process.handle
+        *self.process.handle
     }
 
     fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
@@ -2296,353 +2185,30 @@ impl UDbgAdaptor for StandardAdaptor {
             Ok(unsafe { &mut *p })
         }
     }
-
-    fn event_loop(&self, callback: &mut UDbgCallback) -> UDbgResult<()> {
-        unsafe {
-            let wow64 = self.symgr.is_wow64.get();
-            udbg_ui().info(format!("wow64: {}", wow64));
-
-            if self.base.is_opened() {
-                if wow64 {
-                    self.base.update_arch(ARCH_X86);
-                }
-                self.wait_process_exit();
-                return Ok(());
-            }
-
-            let mut cx = Align16::<CONTEXT>::new();
-            let mut cx32 = core::mem::zeroed();
-            let mut eh = Win32Handler {
-                event: core::mem::zeroed(),
-                wow64,
-                this: self,
-                first_bp_hitted: false,
-                first_bp32_hitted: self.attached.get(),
-            };
-            let mut buf = TraceBuf {
-                callback,
-                cx: cx.as_mut(),
-                cx32: &mut cx32,
-                record: self.record(),
-            };
-
-            while let Some(s) = eh.fetch(&mut buf).and_then(|_| eh.handle(&mut buf)) {
-                eh.cont(s);
-            }
-
-            Ok(())
-        }
-    }
 }
 
 pub struct TraceBuf<'a> {
     pub callback: &'a mut UDbgCallback<'a>,
-    pub record: &'a ExceptionRecord,
+    pub target: Arc<StandardAdaptor>,
+    pub record: ExceptionRecord,
     pub cx: *mut CONTEXT,
     pub cx32: *mut CONTEXT32,
 }
 
-pub trait EventHandler /*: AsMut<TraceBuf<'a>>*/ {
+impl TraceBuf<'_> {
+    #[inline]
+    pub fn call(&mut self, event: UEvent) -> UserReply {
+        (self.callback)(self.target.clone(), event)
+    }
+}
+
+pub trait EventHandler {
+    /// fetch a debug event
     fn fetch(&mut self, buf: &mut TraceBuf) -> Option<()>;
+    /// handle the debug event
     fn handle(&mut self, buf: &mut TraceBuf) -> Option<HandleResult>;
-    fn cont(&mut self, _: HandleResult); // continue debug event
-}
-
-#[derive(Deref)]
-pub struct Win32Handler<'a> {
-    #[deref]
-    this: &'a StandardAdaptor,
-    event: DEBUG_EVENT,
-    wow64: bool,
-    first_bp_hitted: bool,
-    first_bp32_hitted: bool,
-}
-
-impl Win32Handler<'_> {
-    fn update_context(&mut self, buf: &mut TraceBuf) {
-        let cx = unsafe { buf.cx.as_mut().unwrap() };
-        if self.get_context(self.event.dwThreadId, cx) {
-            self.base.event_pc.set(*AbstractRegs::ip(cx) as usize);
-            self.debug.context.set(cx);
-        } else {
-            warn!(
-                "get_thread_context {} failed {}",
-                self.event.dwThreadId,
-                std::io::Error::last_os_error()
-            );
-        }
-    }
-}
-
-impl<'a> EventHandler for Win32Handler<'a> {
-    fn fetch(&mut self, _: &mut TraceBuf) -> Option<()> {
-        let base = &self.this.base;
-        base.status.set(UDbgStatus::Running);
-        self.event = wait_for_debug_event(INFINITE)?;
-        // let pid = self.event.dwProcessId;
-        base.status.set(UDbgStatus::Paused);
-        base.event_tid.set(self.event.dwThreadId);
-        if self.event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT {
-            unsafe {
-                let record = self.this.record();
-                record.copy(&self.event.u.Exception().ExceptionRecord);
-                base.event_pc.set(record.address as usize);
-            }
-        }
-        Some(())
-    }
-
-    fn handle(&mut self, buf: &mut TraceBuf) -> Option<HandleResult> {
-        let this = self.this;
-        let base = &this.base;
-
-        let mut cotinue_status = HandleResult::Continue;
-        unsafe {
-            use UEvent::*;
-
-            // let pid = dv.dwProcessId;
-            let tid = self.event.dwThreadId;
-            // if pid != this.process.pid {
-            //     this = match self.get_target(pid) {
-            //         Some(t) => t,
-            //         None => continue,       // TODO:
-            //     };
-            //     this.base.pid.set(pid);
-            //     UDbgTarget::set_current(Some(this.clone().into()));
-            // }
-
-            match self.event.dwDebugEventCode {
-                CREATE_PROCESS_DEBUG_EVENT => {
-                    let info = self.event.u.CreateProcessInfo();
-                    if info.hThread.is_null() {
-                        udbg_ui().error(format!("CREATE_PROCESS_DEBUG_EVENT {}", tid));
-                    }
-                    self.threads.borrow_mut().insert(tid, DbgThread::from(info));
-                    self.try_load_module(
-                        info.lpImageName as usize,
-                        info.lpBaseOfImage as usize,
-                        info.hFile,
-                        info.fUnicode > 0,
-                    );
-                    self.update_context(buf);
-                    (buf.callback)(ProcessCreate);
-                    (buf.callback)(ThreadCreate(tid));
-                }
-                EXIT_PROCESS_DEBUG_EVENT => {
-                    self.update_context(buf);
-                    let code = self.event.u.ExitProcess().dwExitCode;
-                    (buf.callback)(ProcessExit(code));
-                    return None; // TODO: check if all process exited
-                }
-                CREATE_THREAD_DEBUG_EVENT => {
-                    let info = self.event.u.CreateThread();
-                    if info.hThread.is_null() {
-                        udbg_ui().error(format!("CREATE_THREAD_DEBUG_EVENT {}", tid));
-                    }
-                    if !check_dont_set_hwbp() {
-                        self.enable_all_hwbp_for_thread(info.hThread, true);
-                    }
-                    self.threads.borrow_mut().insert(tid, DbgThread::from(info));
-                    self.update_context(buf);
-                    (buf.callback)(ThreadCreate(tid));
-                }
-                EXIT_THREAD_DEBUG_EVENT => {
-                    self.update_context(buf);
-                    self.threads.borrow_mut().remove(&tid);
-                    self.debug.context.set(null_mut());
-                    (buf.callback)(ThreadExit(self.event.u.ExitThread().dwExitCode));
-                }
-                LOAD_DLL_DEBUG_EVENT => {
-                    self.update_context(buf);
-                    // https://docs.microsoft.com/zh-cn/windows/win32/api/minwinbase/ns-minwinbase-load_dll_debug_info
-                    let info = self.event.u.LoadDll();
-                    self.try_load_module(
-                        info.lpImageName as usize,
-                        info.lpBaseOfDll as usize,
-                        info.hFile,
-                        info.fUnicode > 0,
-                    );
-                    if let Some(m) = self.symgr.find_module(info.lpBaseOfDll as usize) {
-                        (buf.callback)(ModuleLoad(m));
-                    }
-                }
-                UNLOAD_DLL_DEBUG_EVENT => {
-                    self.update_context(buf);
-                    let info = &self.event.u.UnloadDll();
-                    let base = info.lpBaseOfDll as usize;
-                    // let path = self.process.get_module_path(base).unwrap_or("".into());
-                    if let Some(m) = self.symgr.find_module(base) {
-                        (buf.callback)(ModuleUnload(m));
-                    }
-                    self.debug.symgr.remove(base);
-                }
-                OUTPUT_DEBUG_STRING_EVENT => {
-                    if self.show_debug_string.get() {
-                        let s = self.event.u.DebugString();
-                        if s.fUnicode > 0 {
-                            self.output_debug_string_wide(
-                                this,
-                                s.lpDebugStringData as usize,
-                                s.nDebugStringLength as usize,
-                            );
-                        } else {
-                            self.output_debug_string(
-                                this,
-                                s.lpDebugStringData as usize,
-                                s.nDebugStringLength as usize,
-                            );
-                        }
-                    } else {
-                        cotinue_status = HandleResult::NotHandled;
-                    }
-                }
-                RIP_EVENT => {
-                    // https://docs.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-rip_info
-                    let info = self.event.u.RipInfo();
-                    udbg_ui().error(format!(
-                        "RIP_EVENT: Error: {:x} Type: {}",
-                        info.dwError, info.dwType
-                    ));
-                }
-                EXCEPTION_DEBUG_EVENT => {
-                    self.update_context(buf);
-                    let first = self.event.u.Exception().dwFirstChance > 0;
-                    // align the context's address with 16
-                    let cx = buf.cx.as_mut().unwrap();
-                    let cx32 = buf.cx32.as_mut().unwrap();
-
-                    let record = self.record();
-                    let wow64 = self.wow64
-                        && match record.code as i32 {
-                            STATUS_WX86_BREAKPOINT
-                            | STATUS_WX86_SINGLE_STEP
-                            | STATUS_WX86_UNSIMULATE
-                            | STATUS_WX86_INTERNAL_ERROR
-                            | STATUS_WX86_FLOAT_STACK_CHECK => true,
-                            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-                            _ => cx.SegCs == 0x23,
-                            #[cfg(any(target_arch = "aarch64"))]
-                            _ => false,
-                        };
-                    // println!("record.code: {:x} wow64: {}", record.code, wow64);
-                    if wow64 {
-                        self.get_context(tid, cx32);
-                        *cx32.ip() = u32::from_usize(self.record().address as usize);
-                        self.cx32.set(cx32);
-                        base.update_arch(ARCH_X86);
-                    } else {
-                        base.update_arch(ARCH_X64);
-                    }
-                    cotinue_status = match record.code {
-                        EXCEPTION_WX86_BREAKPOINT => {
-                            if self.first_bp32_hitted {
-                                self.debug
-                                    .handle_int3_breakpoint(this, self, first, buf, cx32)
-                            } else {
-                                self.first_bp32_hitted = true;
-                                self.debug.handle_reply(
-                                    this,
-                                    (buf.callback)(InitBp),
-                                    buf.record,
-                                    cx32,
-                                );
-                                HandleResult::NotHandled
-                            }
-                        }
-                        EXCEPTION_BREAKPOINT => {
-                            if self.first_bp_hitted {
-                                self.debug
-                                    .handle_int3_breakpoint(this, self, first, buf, cx)
-                            } else {
-                                self.first_bp_hitted = true;
-                                // 创建32位进程时忽略 附加32位进程时不忽略
-                                if !self.symgr.is_wow64.get() || self.attached.get() {
-                                    self.debug.handle_reply(
-                                        this,
-                                        (buf.callback)(InitBp),
-                                        buf.record,
-                                        cx,
-                                    );
-                                }
-                                HandleResult::Continue
-                            }
-                        }
-                        EXCEPTION_WX86_SINGLE_STEP => {
-                            let mut result = self.handle_step(this, self, buf, cx32);
-                            if result == HandleResult::NotHandled {
-                                result = self.user_handle_exception(first, buf);
-                            }
-                            result
-                        }
-                        EXCEPTION_SINGLE_STEP => {
-                            let mut result = self.handle_step(this, self, buf, cx);
-                            if result == HandleResult::NotHandled {
-                                result = self.user_handle_exception(first, buf);
-                            }
-                            result
-                        }
-                        code => {
-                            if code == STATUS_WX86_CREATEWX86TIB as u32 {
-                                info!("STATUS_WX86_CREATEWX86TIB");
-                            }
-                            let mut result = if code == EXCEPTION_ACCESS_VIOLATION {
-                                if wow64 {
-                                    self.debug.handle_possible_table_bp(this, self, buf, cx32)
-                                } else {
-                                    self.debug.handle_possible_table_bp(this, self, buf, cx)
-                                }
-                            } else {
-                                HandleResult::NotHandled
-                            };
-                            if result == HandleResult::NotHandled && !self.detaching.get() {
-                                result = self.user_handle_exception(first, buf);
-                            }
-                            result
-                        }
-                    };
-                }
-                _code => panic!("Invalid DebugEventCode {}", _code),
-            };
-        }
-
-        Some(cotinue_status)
-    }
-
-    fn cont(&mut self, status: HandleResult) {
-        let cx32 = self.cx32.get();
-        if !cx32.is_null() {
-            self.set_context(self.event.dwThreadId, unsafe { &*cx32 });
-            self.cx32.set(null_mut());
-        } else {
-            // TODO: think detail
-            // if cx.test_eflags(EFLAGS_TF) {
-            //     cotinue_status = HandleResult::Continue;
-            // }
-            let cx = self.debug.context.get();
-            if !cx.is_null() {
-                self.set_context(self.event.dwThreadId, unsafe { &*cx });
-            }
-        }
-        self.debug.context.set(null_mut());
-        continue_debug_event(self.event.dwProcessId, self.event.dwThreadId, status as u32);
-
-        if self.detaching.get() {
-            udbg_ui().info(&format!("detach: {}", unsafe {
-                DebugActiveProcessStop(self.event.dwProcessId)
-            }));
-            // return None;
-        }
-    }
-}
-
-pub fn open_win_thread(process: *const Process, tid: tid_t) -> UDbgResult<Box<WinThread>> {
-    WinThread::new(tid)
-        .map(|mut t| unsafe {
-            t.process = process;
-            t.base.wow64 = process.as_ref().map(|p| p.is_wow64()).unwrap_or_default();
-            Box::new(t)
-        })
-        .ok_or(UDbgError::system())
+    /// continue debug event
+    fn cont(&mut self, _: HandleResult, buf: &mut TraceBuf);
 }
 
 pub fn enum_udbg_thread<'a>(
@@ -2685,39 +2251,373 @@ pub fn enum_udbg_thread<'a>(
         }
         let mut result = a
             .and_then(|a| StandardAdaptor::open_thread(a, tid).ok())
-            .or_else(|| open_win_thread(p, tid).ok())
+            .or_else(|| WinThread::open(p, tid).ok())
             .or_else(|| Some(Box::new(WinThread::new(tid)?)))?;
         result.detail = info;
         Some(result as Box<dyn UDbgThread>)
     })))
 }
 
-pub struct DefaultEngine;
+pub struct DefaultEngine {
+    targets: Vec<Arc<StandardAdaptor>>,
+    event: DEBUG_EVENT,
+    wow64: bool,
+    first_bp_hitted: bool,
+    first_bp32_hitted: bool,
+}
 
-impl UDbgEngine for DefaultEngine {
-    fn open(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Ok(StandardAdaptor::open(pid)?)
+impl DefaultEngine {
+    pub fn new() -> Self {
+        Self {
+            targets: vec![],
+            event: unsafe { core::mem::zeroed() },
+            wow64: false,
+            first_bp_hitted: false,
+            first_bp32_hitted: false,
+        }
     }
 
-    fn attach(&self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn update_context(&mut self, tb: &mut TraceBuf) {
+        let this = tb.target.clone();
+        let cx = unsafe { tb.cx.as_mut().unwrap() };
+        if this.get_context(self.event.dwThreadId, cx) {
+            this.base.event_pc.set(*AbstractRegs::ip(cx) as usize);
+            this.context.set(cx);
+        } else {
+            warn!(
+                "get_thread_context {} failed {}",
+                self.event.dwThreadId,
+                std::io::Error::last_os_error()
+            );
+        }
+    }
+}
+
+impl UDbgEngine for DefaultEngine {
+    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+        let result = StandardAdaptor::open(pid)?;
+        self.targets.push(result.clone());
+        Ok(result)
+    }
+
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         unsafe {
             DebugActiveProcess(pid).check_last()?;
             let result = StandardAdaptor::open(pid)?;
             result.attached.set(true);
+            self.first_bp32_hitted = true;
+            self.targets.push(result.clone());
             Ok(result)
         }
     }
 
     fn create(
-        &self,
+        &mut self,
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
         let ppid = udbg_ui().get_config("ppid");
-        Ok(StandardAdaptor::new(create_debug_process(
-            path, cwd, args, &mut pi, ppid,
-        )?))
+        let result = StandardAdaptor::new(create_debug_process(path, cwd, args, &mut pi, ppid)?);
+        self.targets.push(result.clone());
+        Ok(result)
+    }
+
+    fn event_loop(&mut self, callback: &mut UDbgCallback) -> UDbgResult<()> {
+        // let wow64 = self.symgr.is_wow64.get();
+        // udbg_ui().info(format!("wow64: {}", wow64));
+
+        // if self.base.is_opened() {
+        //     if wow64 {
+        //         self.base.update_arch(ARCH_X86);
+        //     }
+        //     self.wait_process_exit();
+        //     return Ok(());
+        // }
+
+        let mut cx = Align16::<CONTEXT>::new();
+        let mut cx32 = unsafe { core::mem::zeroed() };
+        let mut buf = TraceBuf {
+            callback,
+            target: self
+                .targets
+                .iter()
+                .next()
+                .map(Clone::clone)
+                .expect("no attached target"),
+            cx: cx.as_mut(),
+            cx32: &mut cx32,
+            record: unsafe { core::mem::zeroed() },
+        };
+
+        while let Some(s) = self.fetch(&mut buf).and_then(|_| self.handle(&mut buf)) {
+            self.cont(s, &mut buf);
+        }
+
+        Ok(())
+    }
+}
+
+impl EventHandler for DefaultEngine {
+    fn fetch(&mut self, tb: &mut TraceBuf) -> Option<()> {
+        self.targets
+            .iter()
+            .for_each(|p| p.base.status.set(UDbgStatus::Running));
+        self.event = wait_for_debug_event(INFINITE)?;
+        if self.event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
+            if self
+                .targets
+                .iter()
+                .find(|p| p.base.pid.get() == self.event.dwProcessId)
+                .is_none()
+            {
+                let target =
+                    StandardAdaptor::open(self.event.dwProcessId).expect("attach child process");
+                self.targets.push(target);
+            }
+        }
+
+        let this = self
+            .targets
+            .iter()
+            .find(|p| p.base.pid.get() == self.event.dwProcessId)
+            .expect("not a traced process")
+            .clone();
+
+        tb.target = this.clone();
+        let base = &this.base;
+        base.status.set(UDbgStatus::Paused);
+        base.event_tid.set(self.event.dwThreadId);
+        if self.event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT {
+            tb.record
+                .copy(unsafe { &self.event.u.Exception().ExceptionRecord });
+            *this.record() = tb.record;
+            base.event_pc.set(tb.record.address as usize);
+            // }
+        }
+        Some(())
+    }
+
+    fn handle(&mut self, tb: &mut TraceBuf) -> Option<HandleResult> {
+        let mut cotinue_status = HandleResult::Continue;
+        unsafe {
+            use UEvent::*;
+
+            let tid = self.event.dwThreadId;
+            let this = tb.target.clone();
+            let this = this.as_ref();
+            let base = &this.base;
+
+            match self.event.dwDebugEventCode {
+                CREATE_PROCESS_DEBUG_EVENT => {
+                    let info = self.event.u.CreateProcessInfo();
+                    if info.hThread.is_null() {
+                        udbg_ui().error(format!("CREATE_PROCESS_DEBUG_EVENT {}", tid));
+                    }
+                    this.threads.borrow_mut().insert(tid, DbgThread::from(info));
+                    this.try_load_module(
+                        info.lpImageName as usize,
+                        info.lpBaseOfImage as usize,
+                        info.hFile,
+                        info.fUnicode > 0,
+                    );
+                    self.update_context(tb);
+                    tb.call(ProcessCreate);
+                    tb.call(ThreadCreate(tid));
+                }
+                EXIT_PROCESS_DEBUG_EVENT => {
+                    self.update_context(tb);
+                    let code = self.event.u.ExitProcess().dwExitCode;
+                    tb.call(ProcessExit(code));
+                    self.targets
+                        .retain(|p| p.base.pid.get() != self.event.dwProcessId);
+                    if self.targets.is_empty() {
+                        return None;
+                    }
+                }
+                CREATE_THREAD_DEBUG_EVENT => {
+                    let info = self.event.u.CreateThread();
+                    if info.hThread.is_null() {
+                        udbg_ui().error(format!("CREATE_THREAD_DEBUG_EVENT {}", tid));
+                    }
+                    if !check_dont_set_hwbp() {
+                        this.enable_all_hwbp_for_thread(info.hThread, true);
+                    }
+                    this.threads.borrow_mut().insert(tid, DbgThread::from(info));
+                    self.update_context(tb);
+                    tb.call(ThreadCreate(tid));
+                }
+                EXIT_THREAD_DEBUG_EVENT => {
+                    self.update_context(tb);
+                    this.threads.borrow_mut().remove(&tid);
+                    this.context.set(null_mut());
+                    tb.call(ThreadExit(self.event.u.ExitThread().dwExitCode));
+                }
+                LOAD_DLL_DEBUG_EVENT => {
+                    self.update_context(tb);
+                    // https://docs.microsoft.com/zh-cn/windows/win32/api/minwinbase/ns-minwinbase-load_dll_debug_info
+                    let info = self.event.u.LoadDll();
+                    this.try_load_module(
+                        info.lpImageName as usize,
+                        info.lpBaseOfDll as usize,
+                        info.hFile,
+                        info.fUnicode > 0,
+                    );
+                    if let Some(m) = this.symgr.find_module(info.lpBaseOfDll as usize) {
+                        tb.call(ModuleLoad(m));
+                    }
+                }
+                UNLOAD_DLL_DEBUG_EVENT => {
+                    self.update_context(tb);
+                    let info = &self.event.u.UnloadDll();
+                    let base = info.lpBaseOfDll as usize;
+                    // let path = self.process.get_module_path(base).unwrap_or("".into());
+                    if let Some(m) = this.symgr.find_module(base) {
+                        tb.call(ModuleUnload(m));
+                    }
+                    this.symgr.remove(base);
+                }
+                OUTPUT_DEBUG_STRING_EVENT => {
+                    if this.show_debug_string.get() {
+                        let s = self.event.u.DebugString();
+                        if s.fUnicode > 0 {
+                            this.output_debug_string_wide(
+                                this,
+                                s.lpDebugStringData as usize,
+                                s.nDebugStringLength as usize,
+                            );
+                        } else {
+                            this.output_debug_string(
+                                this,
+                                s.lpDebugStringData as usize,
+                                s.nDebugStringLength as usize,
+                            );
+                        }
+                    } else {
+                        cotinue_status = HandleResult::NotHandled;
+                    }
+                }
+                RIP_EVENT => {
+                    // https://docs.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-rip_info
+                    let info = self.event.u.RipInfo();
+                    udbg_ui().error(format!(
+                        "RIP_EVENT: Error: {:x} Type: {}",
+                        info.dwError, info.dwType
+                    ));
+                }
+                EXCEPTION_DEBUG_EVENT => {
+                    self.update_context(tb);
+                    let first = self.event.u.Exception().dwFirstChance > 0;
+                    // align the context's address with 16
+                    let cx = tb.cx.as_mut().unwrap();
+                    let cx32 = tb.cx32.as_mut().unwrap();
+
+                    let record = this.record();
+                    let wow64 = self.wow64
+                        && match record.code as i32 {
+                            STATUS_WX86_BREAKPOINT
+                            | STATUS_WX86_SINGLE_STEP
+                            | STATUS_WX86_UNSIMULATE
+                            | STATUS_WX86_INTERNAL_ERROR
+                            | STATUS_WX86_FLOAT_STACK_CHECK => true,
+                            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+                            _ => cx.SegCs == 0x23,
+                            #[cfg(any(target_arch = "aarch64"))]
+                            _ => false,
+                        };
+                    // println!("record.code: {:x} wow64: {}", record.code, wow64);
+                    if wow64 {
+                        this.get_context(tid, cx32);
+                        *cx32.ip() = u32::from_usize(this.record().address as usize);
+                        this.cx32.set(cx32);
+                        base.update_arch(ARCH_X86);
+                    } else {
+                        base.update_arch(ARCH_X64);
+                    }
+                    cotinue_status = match record.code {
+                        EXCEPTION_WX86_BREAKPOINT => {
+                            if self.first_bp32_hitted {
+                                this.handle_int3_breakpoint(this, self, first, tb, cx32)
+                            } else {
+                                self.first_bp32_hitted = true;
+                                this.handle_reply(this, tb.call(InitBp), &tb.record, cx32);
+                                HandleResult::NotHandled
+                            }
+                        }
+                        EXCEPTION_BREAKPOINT => {
+                            if self.first_bp_hitted {
+                                this.handle_int3_breakpoint(this, self, first, tb, cx)
+                            } else {
+                                self.first_bp_hitted = true;
+                                // 创建32位进程时忽略 附加32位进程时不忽略
+                                if !this.symgr.is_wow64.get() || this.attached.get() {
+                                    this.handle_reply(this, tb.call(InitBp), &tb.record, cx);
+                                }
+                                HandleResult::Continue
+                            }
+                        }
+                        EXCEPTION_WX86_SINGLE_STEP => {
+                            let mut result = this.handle_step(this, self, tb, cx32);
+                            if result == HandleResult::NotHandled {
+                                result = this.user_handle_exception(first, tb);
+                            }
+                            result
+                        }
+                        EXCEPTION_SINGLE_STEP => {
+                            let mut result = this.handle_step(this, self, tb, cx);
+                            if result == HandleResult::NotHandled {
+                                result = this.user_handle_exception(first, tb);
+                            }
+                            result
+                        }
+                        code => {
+                            if code == STATUS_WX86_CREATEWX86TIB as u32 {
+                                info!("STATUS_WX86_CREATEWX86TIB");
+                            }
+                            let mut result = if code == EXCEPTION_ACCESS_VIOLATION {
+                                if wow64 {
+                                    this.handle_possible_table_bp(this, self, tb, cx32)
+                                } else {
+                                    this.handle_possible_table_bp(this, self, tb, cx)
+                                }
+                            } else {
+                                HandleResult::NotHandled
+                            };
+                            if result == HandleResult::NotHandled && !this.detaching.get() {
+                                result = this.user_handle_exception(first, tb);
+                            }
+                            result
+                        }
+                    };
+                }
+                _code => panic!("Invalid DebugEventCode {}", _code),
+            };
+        }
+
+        Some(cotinue_status)
+    }
+
+    fn cont(&mut self, status: HandleResult, tb: &mut TraceBuf) {
+        let this = tb.target.clone();
+        let cx32 = this.cx32.get();
+        if !cx32.is_null() {
+            this.set_context(self.event.dwThreadId, unsafe { &*cx32 });
+            this.cx32.set(null_mut());
+        } else {
+            let cx = this.context.get();
+            if !cx.is_null() {
+                this.set_context(self.event.dwThreadId, unsafe { &*cx });
+            }
+        }
+        this.context.set(null_mut());
+        continue_debug_event(self.event.dwProcessId, self.event.dwThreadId, status as u32);
+
+        if this.detaching.get() {
+            udbg_ui().info(&format!("detach: {}", unsafe {
+                DebugActiveProcessStop(self.event.dwProcessId)
+            }));
+            // return None;
+        }
     }
 }
