@@ -7,8 +7,11 @@ use std::cell::Cell;
 use std::io::{Error as IoError, ErrorKind, Result as IoResult};
 use std::sync::Arc;
 
-pub use crate::os::udbg::*;
-use crate::{prelude::*, regs::*};
+use crate::{
+    os::{pid_t, tid_t},
+    prelude::*,
+    regs::*,
+};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum UDbgStatus {
@@ -129,34 +132,12 @@ impl TargetBase {
     }
 }
 
-/// Thread information for UI
-#[repr(C)]
-#[derive(Serialize, Deserialize)]
-pub struct ThreadInfo {
-    pub tid: u32,
-    pub entry: usize,
-    pub teb: usize,
-    pub name: Arc<str>,
-    pub status: Arc<str>,
-    pub priority: Arc<str>,
-}
-
-/// Handle/FD information for UI
-#[repr(C)]
-#[derive(Serialize, Deserialize)]
-pub struct HandleInfo {
-    pub ty: u32,
-    pub handle: usize,
-    pub type_name: String,
-    pub name: String,
-}
-
 /// Common thread fields
 pub struct ThreadData {
     pub tid: tid_t,
     pub wow64: bool,
     #[cfg(windows)]
-    pub handle: crate::Handle,
+    pub handle: crate::os::windows::Handle,
     #[cfg(target_os = "macos")]
     pub handle: crate::process::ThreadAct,
 }
@@ -223,8 +204,8 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
 
 /// Debug Engine
 pub trait UDbgEngine {
-    fn enum_process(&self) -> Box<dyn Iterator<Item = crate::util::PsInfo>> {
-        crate::util::enum_psinfo()
+    fn enum_process(&self) -> Box<dyn Iterator<Item = ProcessInfo>> {
+        ProcessInfo::enumerate()
     }
 
     /// open a process, only open, not attach

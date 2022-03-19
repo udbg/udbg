@@ -157,7 +157,7 @@ pub trait ReadMemoryUtil: ReadMemory {
 }
 
 #[cfg(windows)]
-pub use crate::win::ReadMemUtilWin;
+pub use crate::os::windows::ReadMemUtilWin;
 
 pub trait WriteMemory {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize>;

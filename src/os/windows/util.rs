@@ -44,7 +44,6 @@ pub fn resume_thread(handle: HANDLE) -> u32 {
 pub fn enable_privilege(name: &str) -> Result<(), String> {
     use winapi::shared::winerror::ERROR_NOT_ALL_ASSIGNED;
     use winapi::um::securitybaseapi::AdjustTokenPrivileges;
-    use winapi::um::winbase::LookupPrivilegeValueW;
 
     unsafe {
         let mut token: HANDLE = null_mut();
@@ -263,7 +262,7 @@ pub fn init_object_attributes(name: PUNICODE_STRING, attr: u32) -> OBJECT_ATTRIB
     }
 }
 
-pub fn get_window(pid: pid_t) -> Option<HWND> {
+pub fn get_window(pid: u32) -> Option<HWND> {
     let mut w = null_mut();
     enum_process_window(pid, |hwnd| {
         w = hwnd;

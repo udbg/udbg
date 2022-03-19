@@ -1,4 +1,5 @@
-use crate::{prelude::*, Handle};
+use super::Handle;
+use crate::prelude::*;
 use std::{
     cell::Cell,
     collections::HashMap,
@@ -264,7 +265,7 @@ impl UDbgAdaptor for DebugTarget {
 }
 
 impl UDbgEngine for DebugEngine {
-    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         unsafe {
             self.client
                 .AttachProcess(0, pid, DEBUG_ATTACH_DEFAULT)
@@ -418,7 +419,7 @@ impl WriteMemory for DebugTarget {
 }
 
 impl TargetMemory for DebugTarget {
-    fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = crate::MemoryPage> + '_>> {
+    fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + '_>> {
         // TODO:
         // if self.ty == WDbgType::Kernel {
         //     return Err(UDbgError::NotSupport);
@@ -736,14 +737,14 @@ impl UDbgBreakpoint for IDbgBpWrapper {
         }
     }
     /// set the which can hit the bp. if tid == 0, all thread used
-    fn set_hit_thread(&self, tid: tid_t) {
+    fn set_hit_thread(&self, tid: u32) {
         // TODO: Engine TID
         unsafe {
             self.SetMatchThreadId(tid);
         }
     }
     /// current tid setted by set_hit_thread()
-    fn hit_tid(&self) -> tid_t {
+    fn hit_tid(&self) -> u32 {
         unsafe { self.GetMatchThreadId().unwrap_or_default() }
     }
     /// original bytes written by software breakpoint
@@ -796,7 +797,7 @@ impl Target for DebugTarget {
         }
     }
 
-    fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
+    fn open_thread(&self, tid: u32) -> UDbgResult<Box<dyn UDbgThread>> {
         udbg_ui().info(format!("open thread: {}", tid));
         Ok(Box::new(WDbgThread {
             data: ThreadData {
@@ -810,7 +811,7 @@ impl Target for DebugTarget {
     fn enum_handle(&self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + '_>> {
         let handle = self.handle();
         if !handle.is_null() {
-            super::enum_process_handle(
+            super::udbg::enum_process_handle(
                 unsafe { self.sysobjs.GetCurrentProcessSystemId().unwrap_or(0) },
                 handle,
             )

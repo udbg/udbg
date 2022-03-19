@@ -36,8 +36,9 @@ use winapi::um::winuser::*;
 use anyhow::{Error, Result};
 use std::io::Error as IoError;
 
-use super::ntdll::*;
-use crate::{pid_t, prelude::*};
+use crate::prelude::*;
+use crate::shell::ProcessInfo;
+use ntdll::*;
 
 #[derive(Deref)]
 pub struct Handle(HANDLE);
@@ -299,7 +300,7 @@ impl crate::range::RangeValue for MODULEENTRY32W {
     }
 }
 
-pub trait ProcessInfo: Deref<Target = PROCESSENTRY32W> + Sized {
+pub trait ProcessExt: Deref<Target = PROCESSENTRY32W> + Sized {
     #[inline]
     fn pid(self) -> u32 {
         self.th32ProcessID
@@ -309,7 +310,7 @@ pub trait ProcessInfo: Deref<Target = PROCESSENTRY32W> + Sized {
         self.szExeFile.as_ref().to_utf8()
     }
 }
-impl ProcessInfo for &PROCESSENTRY32W {}
+impl ProcessExt for &PROCESSENTRY32W {}
 
 pub fn enum_process() -> ToolHelperIter<PROCESSENTRY32W> {
     unsafe {
@@ -705,7 +706,6 @@ impl Process {
     }
 
     pub fn cmdline(&self) -> Option<String> {
-        use ntapi::ntpebteb::PEB;
         use ntapi::ntrtl::RTL_USER_PROCESS_PARAMETERS;
         use ntapi::FIELD_OFFSET;
 
@@ -927,7 +927,7 @@ pub fn create_debug_process(
     cwd: Option<&str>,
     args: &[&str],
     pi: &mut PROCESS_INFORMATION,
-    ppid: Option<pid_t>,
+    ppid: Option<u32>,
 ) -> UDbgResult<Process> {
     unsafe {
         let mut cmdline = path.trim().to_string();
@@ -997,5 +997,29 @@ pub fn create_debug_process(
             return Err(UDbgError::system());
         }
         Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).check_errstr("get pid")?)
+    }
+}
+
+impl ProcessInfo {
+    pub fn enumerate() -> Box<dyn Iterator<Item = ProcessInfo>> {
+        use winapi::um::winnt::*;
+
+        Box::new(enum_process().map(|p| {
+            let pid = p.pid();
+            let mut result = ProcessInfo {
+                pid,
+                name: p.name(),
+                wow64: false,
+                // window: get_window(pid).map(|w| w.get_text()).unwrap_or(String::new()),
+                path: String::new(),
+                cmdline: String::new(),
+            };
+            Process::open(pid, Some(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)).map(|p| {
+                result.wow64 = p.is_wow64();
+                p.image_path().map(|path| result.path = path);
+                p.cmdline().map(|cmd| result.cmdline = cmd);
+            });
+            result
+        }))
     }
 }

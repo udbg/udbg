@@ -2,7 +2,7 @@
 //! Utilities for dealing debugger event
 //!
 
-use crate::{breakpoint::UDbgBreakpoint, shell::*, symbol::UDbgModule, tid_t};
+use crate::{breakpoint::UDbgBreakpoint, os::tid_t, shell::*, symbol::UDbgModule};
 use core::marker::Unpin;
 use core::pin::Pin;
 use core::{

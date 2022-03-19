@@ -165,3 +165,15 @@ pub fn get_exception_name(code: u32) -> String {
         }
     )
 }
+
+impl ProcessInfo {
+    pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
+        Box::new(enum_pid().map(|pid| PsInfo {
+            pid,
+            wow64: false,
+            name: process_name(pid).unwrap_or(String::new()),
+            path: process_path(pid).unwrap_or(String::new()),
+            cmdline: process_cmdline(pid).join(" "),
+        }))
+    }
+}

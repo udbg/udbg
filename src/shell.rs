@@ -1,8 +1,41 @@
+use super::os::pid_t;
 use super::prelude::*;
 
 use log::*;
 use serde::de::DeserializeOwned;
 use std::{path::PathBuf, sync::Arc};
+
+#[repr(C)]
+#[derive(Serialize, Deserialize)]
+pub struct ProcessInfo {
+    pub pid: crate::os::pid_t,
+    pub wow64: bool,
+    pub name: String,
+    pub path: String,
+    pub cmdline: String,
+}
+
+/// Thread information for UI
+#[repr(C)]
+#[derive(Serialize, Deserialize)]
+pub struct ThreadInfo {
+    pub tid: u32,
+    pub entry: usize,
+    pub teb: usize,
+    pub name: Arc<str>,
+    pub status: Arc<str>,
+    pub priority: Arc<str>,
+}
+
+/// Handle/FD information for UI
+#[repr(C)]
+#[derive(Serialize, Deserialize)]
+pub struct HandleInfo {
+    pub ty: u32,
+    pub handle: usize,
+    pub type_name: String,
+    pub name: String,
+}
 
 pub struct ShellData {
     pub symcache: Option<PathBuf>,
@@ -94,10 +127,6 @@ pub trait UDbgUtil {
     ) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
         Err(UDbgError::NotSupport)
     }
-    #[cfg(windows)]
-    fn get_memory_map(&self, p: &Process, this: &dyn UDbgAdaptor) -> Vec<MemoryPageInfo>;
-    #[cfg(windows)]
-    fn open_all_thread(&self, p: &Process, pid: pid_t) -> Vec<(tid_t, Box<dyn UDbgThread>)>;
 }
 
 pub static mut UDBG_UI: Option<Arc<dyn UDbgShell>> = None;

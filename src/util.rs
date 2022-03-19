@@ -1,4 +1,3 @@
-use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use core::mem::size_of;
@@ -15,9 +14,9 @@ pub fn mapfile(path: &str) -> Option<Mmap> {
 }
 
 pub fn file_lines<P: AsRef<Path>>(path: P) -> IoResult<impl Iterator<Item = String>> {
-    BufReader::new(std::fs::File::open(path)?)
+    Ok(BufReader::new(std::fs::File::open(path)?)
         .lines()
-        .map(|line| line.unwrap_or_default())
+        .map(|line| line.unwrap_or_default()))
 }
 
 pub trait AsByteArray {
@@ -142,50 +141,4 @@ pub fn undecorate_symbol(sym: &str, flags: UFlags) -> Option<String> {
         }
         s.demangle(&opts).ok()
     })
-}
-
-#[repr(C)]
-#[derive(Serialize, Deserialize)]
-pub struct PsInfo {
-    pub pid: crate::pid_t,
-    pub wow64: bool,
-    pub name: String,
-    pub path: String,
-    pub cmdline: String,
-}
-
-#[cfg(windows)]
-pub fn enum_psinfo() -> Box<dyn Iterator<Item = PsInfo>> {
-    use crate::*;
-    use winapi::um::winnt::*;
-
-    Box::new(enum_process().map(|p| {
-        let pid = p.pid();
-        let mut result = PsInfo {
-            pid,
-            name: p.name(),
-            wow64: false,
-            // window: get_window(pid).map(|w| w.get_text()).unwrap_or(String::new()),
-            path: String::new(),
-            cmdline: String::new(),
-        };
-        Process::open(pid, Some(PROCESS_QUERY_INFORMATION | PROCESS_VM_READ)).map(|p| {
-            result.wow64 = p.is_wow64();
-            p.image_path().map(|path| result.path = path);
-            p.cmdline().map(|cmd| result.cmdline = cmd);
-        });
-        result
-    }))
-}
-
-#[cfg(not(windows))]
-pub fn enum_psinfo() -> Box<dyn Iterator<Item = PsInfo>> {
-    use crate::process::*;
-    Box::new(enum_pid().map(|pid| PsInfo {
-        pid,
-        wow64: false,
-        name: process_name(pid).unwrap_or(String::new()),
-        path: process_path(pid).unwrap_or(String::new()),
-        cmdline: process_cmdline(pid).join(" "),
-    }))
 }

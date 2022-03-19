@@ -22,6 +22,7 @@ bitflags = '1.2'
 anyhow = '1.0'
 futures = '0.3'
 thiserror = '1.0'
+cstrptr = '0.1'
 crossbeam = '0.8'
 parking_lot = '0.12'
 serde-value = '0.7'
@@ -31,7 +32,6 @@ memmap = {version = '0.7.0'}
 cpp_demangle = {version = '0.3'}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
-cstrptr = {git = 'https://github.com/metaworm/cstrptr-rs', default-features = false, features = ['alloc']}
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = '0.3.9', features = [
@@ -58,7 +58,7 @@ windows = {version = '0.33', features = [
 ]}
 ntapi = '0.3'
 unicase = '2.6'
-msvc-demangler = {git = 'https://github.com/mstange/msvc-demangler-rust'}
+msvc-demangler = '0.9'
 
 [target.'cfg(not(windows))'.dependencies]
 nix = '0.23'

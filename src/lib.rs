@@ -9,7 +9,6 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-pub extern crate iced_x86;
 #[macro_use]
 extern crate alloc;
 #[macro_use]
@@ -32,6 +31,7 @@ pub mod elf;
 pub mod error;
 pub mod event;
 pub mod memory;
+pub mod os;
 pub mod pdbfile;
 pub mod pe;
 pub mod prelude;
@@ -42,34 +42,6 @@ pub mod strutil;
 pub mod symbol;
 pub mod target;
 pub mod util;
-
-cfg_if! {
-    if #[cfg(target_os="macos")] {
-        pub mod mac;
-        pub use mac as nix;
-    } else if #[cfg(not(windows))] {
-        pub mod nix;
-    }
-}
-
-cfg_if! {
-    if #[cfg(windows)] {
-        pub mod win;
-        pub type pid_t = u32;
-        pub use self::win::{self as os, *};
-    } else {
-        pub use std::os::unix::raw::pid_t;
-        pub use self::nix::{self as os, comm::*, *};
-    }
-}
-
-cfg_if! {
-    if #[cfg(target_os="macos")] {
-        pub type tid_t = u64;
-    } else {
-        pub type tid_t = pid_t;
-    }
-}
 
 pub mod consts {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]

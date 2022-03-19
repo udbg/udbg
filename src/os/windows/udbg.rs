@@ -422,7 +422,7 @@ pub struct WinThread {
 }
 
 impl WinThread {
-    pub fn new(tid: tid_t) -> Option<Self> {
+    pub fn new(tid: u32) -> Option<Self> {
         Some(WinThread {
             base: ThreadData {
                 wow64: false,
@@ -435,7 +435,7 @@ impl WinThread {
         })
     }
 
-    pub fn open(process: *const Process, tid: tid_t) -> UDbgResult<Box<WinThread>> {
+    pub fn open(process: *const Process, tid: u32) -> UDbgResult<Box<WinThread>> {
         Self::new(tid)
             .map(|mut t| unsafe {
                 t.process = process;
@@ -607,7 +607,6 @@ impl UDbgThread for WinThread {
 
     fn last_error(&self) -> Option<u32> {
         self.teb().and_then(|teb| unsafe {
-            use ntapi::ntpebteb::TEB;
             self.process
                 .as_ref()?
                 .read_value::<u32>(teb + ntapi::FIELD_OFFSET!(TEB, LastErrorValue))
@@ -1337,11 +1336,11 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<WinThread>> {
+    pub fn open_thread(&self, tid: u32) -> UDbgResult<Box<WinThread>> {
         WinThread::open(&self.process, tid)
     }
 
-    pub fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
+    pub fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = u32> + 'a>> {
         Ok(Box::new(self.process.enum_thread().map(|e| e.tid())))
     }
 
@@ -1678,7 +1677,6 @@ impl CommonAdaptor {
         //     rest_loaded.remove(&base);
         //     self.symgr.check_load_module(dbg, base, m.size(), m.path().as_ref(), null_mut());
         // }
-        use winapi::um::psapi::LIST_MODULES_ALL;
         for m in self
             .process
             .get_module_list(LIST_MODULES_ALL)
@@ -1894,7 +1892,7 @@ pub fn query_object_name_timeout(handle: HANDLE) -> String {
 }
 
 pub fn enum_process_handle<'a>(
-    pid: pid_t,
+    pid: u32,
     p: HANDLE,
 ) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
     let mut type_cache = HashMap::<u32, String>::new();
@@ -1974,7 +1972,7 @@ unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
 
 impl StandardAdaptor {
-    pub fn open(pid: pid_t) -> Result<Arc<StandardAdaptor>, UDbgError> {
+    pub fn open(pid: u32) -> Result<Arc<StandardAdaptor>, UDbgError> {
         let p = Process::open(pid, None).check_errstr("open process")?;
         Ok(Self::new(p))
     }
@@ -2041,7 +2039,7 @@ impl StandardAdaptor {
         unsafe { transmute(self.context.get()) }
     }
 
-    fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<WinThread>> {
+    fn open_thread(&self, tid: u32) -> UDbgResult<Box<WinThread>> {
         if let Some(t) = self.threads.borrow().get(&tid) {
             let wow64 = self.symgr.is_wow64.get();
             let handle = unsafe { Handle::clone_from_raw(t.handle) }?;
@@ -2060,7 +2058,7 @@ impl StandardAdaptor {
         }
     }
 
-    pub fn get_context<C: DbgContext>(&self, tid: tid_t, context: &mut C) -> bool {
+    pub fn get_context<C: DbgContext>(&self, tid: u32, context: &mut C) -> bool {
         if let Some(t) = self.threads.borrow().get(&tid) {
             context.get_context(t.handle)
         } else {
@@ -2069,7 +2067,7 @@ impl StandardAdaptor {
         }
     }
 
-    pub fn set_context<C: DbgContext>(&self, tid: tid_t, c: &C) {
+    pub fn set_context<C: DbgContext>(&self, tid: u32, c: &C) {
         let suc = if let Some(t) = self.threads.borrow().get(&tid) {
             c.set_context(t.handle)
         } else {
@@ -2156,7 +2154,7 @@ impl Target for StandardAdaptor {
         Ok(self.symgr.enum_module())
     }
 
-    fn open_thread(&self, tid: tid_t) -> Result<Box<dyn UDbgThread>, UDbgError> {
+    fn open_thread(&self, tid: u32) -> Result<Box<dyn UDbgThread>, UDbgError> {
         StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
 
@@ -2213,7 +2211,7 @@ pub trait EventHandler {
 
 pub fn enum_udbg_thread<'a>(
     p: *const Process,
-    pid: pid_t,
+    pid: u32,
     detail: bool,
     a: Option<&'a StandardAdaptor>,
 ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + 'a>> {
@@ -2294,13 +2292,13 @@ impl DefaultEngine {
 }
 
 impl UDbgEngine for DefaultEngine {
-    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let result = StandardAdaptor::open(pid)?;
         self.targets.push(result.clone());
         Ok(result)
     }
 
-    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         unsafe {
             DebugActiveProcess(pid).check_last()?;
             let result = StandardAdaptor::open(pid)?;
