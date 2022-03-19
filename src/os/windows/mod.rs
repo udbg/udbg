@@ -1,8 +1,6 @@
 mod ffi;
 mod window;
 
-#[cfg(feature = "dbglog")]
-pub mod dbglog;
 pub mod eng;
 pub mod ntdll;
 pub mod string;

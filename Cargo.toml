@@ -4,10 +4,6 @@ version = "0.1.0"
 authors = ["metaworm <metaworm@outlook.com>"]
 edition = "2021"
 
-[features]
-dbglog = []
-dbgeng = []
-
 [dependencies]
 cfg-if = '1.0'
 glob = '0.3'
