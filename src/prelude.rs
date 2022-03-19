@@ -1,3 +1,5 @@
+//! Re-exports commonly used types for udbg
+
 pub use crate::{
     breakpoint::*,
     consts::*,

@@ -106,26 +106,6 @@ pub fn call_with_timeout<T>(
     result
 }
 
-#[cfg(debug_assertions)]
-#[macro_export]
-macro_rules! dlog {
-    () => ($crate::output_debug_string("\n"));
-    ($($arg:tt)*) => ({
-        $crate::output_debug_string(format!($($arg)*));
-    })
-}
-
-#[cfg(not(debug_assertions))]
-#[macro_export]
-macro_rules! dlog {
-    () => {
-        ()
-    };
-    ($($arg:tt)*) => {
-        ()
-    };
-}
-
 pub fn msgbox<T: AsRef<str>>(msg: T) {
     unsafe {
         MessageBoxW(

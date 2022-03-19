@@ -1,3 +1,5 @@
+//! ELF file helper
+
 use goblin::elf::{sym::Sym, Elf};
 use goblin::strtab::Strtab;
 
@@ -17,9 +19,7 @@ impl ElfSym<'_> {
 
 pub fn get_symbol<'a>(e: &'a Strtab, s: &Sym) -> Option<ElfSym<'a>> {
     if s.st_value > 0 {
-        e.get(s.st_name)
-            .and_then(|r| r.ok())
-            .map(|name| ElfSym { sym: *s, name })
+        e.get_at(s.st_name).map(|name| ElfSym { sym: *s, name })
     } else {
         None
     }

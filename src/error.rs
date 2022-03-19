@@ -1,3 +1,5 @@
+//! Error types for udbg and utilities for system error code
+
 use std::{fmt, io};
 use thiserror::Error;
 

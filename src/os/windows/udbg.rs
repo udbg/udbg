@@ -1686,11 +1686,12 @@ impl CommonAdaptor {
             if self.symgr.base.read().exists(m) {
                 continue;
             }
-            // get_module_path() 在 wow64 进程里拿到的是64位dll的路径，不准确
-            // let path = self.process.get_module_path(m).unwrap_or_default();
+
+            #[allow(deprecated)]
             let path = self
                 .process
                 .get_mapped_file_name(m)
+                // get_module_path() returns 64-bit path in WOW64 process, so put it last
                 .unwrap_or_else(|| self.process.get_module_path(m).unwrap_or_default());
             self.process.get_module_info(m).map(|m| {
                 self.symgr.check_load_module(

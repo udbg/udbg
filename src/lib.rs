@@ -4,7 +4,6 @@
 #![allow(unused_variables)]
 #![allow(unused_must_use)]
 #![allow(dead_code)]
-#![allow(deprecated)]
 #![allow(non_snake_case)]
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
@@ -42,6 +41,7 @@ pub mod string;
 pub mod symbol;
 pub mod target;
 
+/// Constants for current environment
 pub mod consts {
     #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
     pub const MAX_INSN_SIZE: usize = 16;
@@ -71,6 +71,7 @@ pub mod consts {
     pub const IS_X86: bool = IS_ARCH_X86 || IS_ARCH_X64;
 }
 
+/// Fragmented utilities
 pub mod util {
     use memmap::Mmap;
 
