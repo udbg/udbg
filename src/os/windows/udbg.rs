@@ -2265,8 +2265,8 @@ pub struct DefaultEngine {
     first_bp32_hitted: bool,
 }
 
-impl DefaultEngine {
-    pub fn new() -> Self {
+impl Default for DefaultEngine {
+    fn default() -> Self {
         Self {
             targets: vec![],
             event: unsafe { core::mem::zeroed() },
@@ -2275,7 +2275,9 @@ impl DefaultEngine {
             first_bp32_hitted: false,
         }
     }
+}
 
+impl DefaultEngine {
     fn update_context(&mut self, tb: &mut TraceBuf) {
         let this = tb.target.clone();
         let cx = unsafe { tb.cx.as_mut().unwrap() };
@@ -2393,7 +2395,6 @@ impl EventHandler for DefaultEngine {
                 .copy(unsafe { &self.event.u.Exception().ExceptionRecord });
             *this.record() = tb.record;
             base.event_pc.set(tb.record.address as usize);
-            // }
         }
         Some(())
     }

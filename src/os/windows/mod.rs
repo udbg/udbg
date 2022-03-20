@@ -12,7 +12,7 @@ pub use self::util::*;
 pub use self::window::*;
 
 pub use self::eng::DebugEngine;
-pub use self::udbg::DefaultEngine;
+pub use self::udbg::*;
 
 use alloc::string::String;
 use alloc::sync::Arc;

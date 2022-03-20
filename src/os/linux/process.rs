@@ -1,14 +1,12 @@
-use crate::prelude::{ReadMemory, WriteMemory};
-use crate::util::file_lines;
-
 use super::*;
 
-use std::io::Result as IoResult;
 use std::os::unix::prelude::AsRawFd;
 use std::sync::Arc;
 
 pub fn process_name(pid: pid_t) -> Option<String> {
-    file_lines(format!("/proc/{}/comm", pid)).ok()?.next()
+    Utils::file_lines(format!("/proc/{}/comm", pid))
+        .ok()?
+        .next()
 }
 
 pub fn process_cmdline(pid: pid_t) -> Vec<String> {
@@ -170,7 +168,7 @@ impl Process {
     }
 
     pub fn enum_memory(&self) -> IoResult<impl Iterator<Item = MemoryPage>> {
-        let mut iter = file_lines(format!("/proc/{}/maps", self.pid))?;
+        let mut iter = Utils::file_lines(format!("/proc/{}/maps", self.pid))?;
         Ok(core::iter::from_fn(move || {
             let line = iter.next()?;
             let mut line = LineParser::new(line.as_ref());
@@ -201,9 +199,9 @@ impl Process {
         process_tasks(self.pid)
     }
 
-    pub fn enum_module(&self) -> IoResult<impl Iterator<Item = Module>> {
+    pub fn enum_module(&self) -> IoResult<impl Iterator<Item = Module> + '_> {
         Ok(ModuleIter {
-            f: file_lines(format!("/proc/{}/maps", self.pid))?,
+            f: Utils::file_lines(format!("/proc/{}/maps", self.pid))?,
             p: self,
             base: 0,
             size: 0,

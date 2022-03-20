@@ -1,22 +1,26 @@
-use core::mem::{size_of, size_of_val, transmute};
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::TryFrom;
 use std::fs::{read_dir, read_link, File};
+use std::io::Result as IoResult;
 use std::path::{Path, PathBuf};
 
-use crate::prelude::reg_t;
-use crate::regs::AbstractRegs;
+use super::unix::*;
+use crate::prelude::*;
+use crate::register::AbstractRegs;
+use anyhow::Context;
 use libc::*;
 use nix::sys::signal::Signal;
+use nix::unistd::Pid;
 
-pub mod comm;
-pub mod process;
-pub mod udbg;
+// pub mod comm;
+mod process;
+mod udbg;
 pub mod util;
 
-pub use self::comm::*;
+// pub use self::comm::*;
 pub use self::process::*;
+pub use self::udbg::*;
 
 #[cfg(target_arch = "arm")]
 #[derive(Copy, Clone)]
@@ -146,16 +150,6 @@ impl AbstractRegs for user_regs_struct {
     }
 }
 
-// TODO:
-pub fn is_32(pid: pid_t) -> bool {
-    false
-}
-
-pub fn is_32bit_file(path: impl AsRef<Path>) -> bool {
-    // TODO:
-    false
-}
-
 pub fn get_exception_name(code: u32) -> String {
     format!(
         "{:?}",
@@ -168,7 +162,7 @@ pub fn get_exception_name(code: u32) -> String {
 
 impl ProcessInfo {
     pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
-        Box::new(enum_pid().map(|pid| PsInfo {
+        Box::new(enum_pid().map(|pid| Self {
             pid,
             wow64: false,
             name: process_name(pid).unwrap_or(String::new()),

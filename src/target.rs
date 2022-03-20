@@ -4,7 +4,7 @@
 
 use core::ops::Deref;
 use std::cell::Cell;
-use std::io::{Error as IoError, ErrorKind, Result as IoResult};
+use std::io::{ErrorKind, Result as IoResult};
 use std::sync::Arc;
 
 use crate::{
@@ -174,19 +174,19 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
     #[cfg(windows)]
     fn get_context(&self, cx: &mut ThreadContext) -> IoResult<()> {
-        Err(IoError::from(ErrorKind::Unsupported))
+        Err(ErrorKind::Unsupported.into())
     }
     #[cfg(windows)]
     fn set_context(&self, cx: &ThreadContext) -> IoResult<()> {
-        Err(IoError::from(ErrorKind::Unsupported))
+        Err(ErrorKind::Unsupported.into())
     }
     #[cfg(windows)]
     fn get_context32(&self, cx: &mut ThreadContext32) -> IoResult<()> {
-        Err(IoError::from(ErrorKind::Unsupported))
+        Err(ErrorKind::Unsupported.into())
     }
     #[cfg(windows)]
     fn set_context32(&self, cx: &ThreadContext32) -> IoResult<()> {
-        Err(IoError::from(ErrorKind::Unsupported))
+        Err(ErrorKind::Unsupported.into())
     }
     #[cfg(windows)]
     fn teb(&self) -> Option<usize> {

@@ -75,5 +75,6 @@ libproc = '0.10'
 cc = '1'
 
 [dev-dependencies]
+rustyline = '9'
 structopt = '0.3.8'
 flexi_logger = '0.22'

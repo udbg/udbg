@@ -1,4 +1,6 @@
-use anyhow::Context;
+use super::*;
+use crate::elf;
+use core::mem::{size_of, size_of_val, transmute};
 use libc::c_int;
 use nix::{
     sys::{
@@ -7,12 +9,8 @@ use nix::{
     },
     Result,
 };
+use std::ffi::*;
 use std::fs;
-use std::{ffi::*, io::BufRead};
-
-use crate::nix::*;
-use crate::util::mapfile;
-use crate::{elf, util::file_lines};
 
 pub fn is_selinux_enabled() -> bool {
     String::from_utf8(fs::read("/proc/filesystems").unwrap_or_default())
@@ -22,7 +20,7 @@ pub fn is_selinux_enabled() -> bool {
 }
 
 pub fn disable_selinux() -> anyhow::Result<()> {
-    let se_dir = file_lines("/proc/mounts")
+    let se_dir = Utils::file_lines("/proc/mounts")?
         .filter_map(|line| {
             let line = line.split(' ').collect::<Vec<_>>();
             if line.get(0)? == &"selinuxfs" {
@@ -38,14 +36,16 @@ pub fn disable_selinux() -> anyhow::Result<()> {
 }
 
 pub fn ptrace_inject(p: &Process, libpath: &str) -> anyhow::Result<()> {
-    is_selinux_enabled() && disable_selinux().context("selinux")?;
+    if is_selinux_enabled() {
+        disable_selinux().context("selinux")?;
+    }
 
     let m = p
         .enum_module()?
         .find(|m| m.name.as_ref() == "libc.so")
         .context("libc.so")?;
-    let map = mapfile(m.path.as_ref()).context("mapfile")?;
-    let e = elf::ElfHelper::parse(&map)?;
+    let map = Utils::mapfile(m.path.as_ref()).context("mapfile")?;
+    let e = elf::ElfHelper::parse(&map).context("elf")?;
     let mmap = m.base + e.get_export("mmap").context("mmap")?.offset();
 
     let m = p
@@ -53,7 +53,7 @@ pub fn ptrace_inject(p: &Process, libpath: &str) -> anyhow::Result<()> {
         .find(|m| m.name.as_ref() == "libdl.so")
         .context("libdl.so")?;
     let data = fs::read(m.path.as_ref())?;
-    let e = elf::ElfHelper::parse(&data)?;
+    let e = elf::ElfHelper::parse(&data).context("elf")?;
     let dlopen = m.base + e.get_export("dlopen").context("dlopen")?.offset();
 
     ptrace_attach_wait(p.pid, WUNTRACED).context("attach wait")?;
@@ -100,7 +100,7 @@ pub fn ptrace_inject(p: &Process, libpath: &str) -> anyhow::Result<()> {
         }
         Ok(())
     })();
-    ptrace::detach(p.pid.into())?;
+    ptrace::detach(Pid::from_raw(p.pid), None)?;
     result
 }
 
@@ -225,9 +225,11 @@ pub fn ptrace_write(pid: pid_t, address: usize, data: &[u8]) {
     }
 }
 
-pub fn ptrace_attach_wait(tid: pid_t, opt: c_int) -> Result<(pid_t, WaitStatus)> {
-    ptrace::attach(tid.into())?;
-    let status =
-        nix::sys::wait::waitpid(Some(tid.into()), Some(WaitPidFlag::from_bits_truncate(opt)))?;
-    Some((status.pid()?.as_raw(), status))
+pub fn ptrace_attach_wait(tid: pid_t, opt: c_int) -> Result<WaitStatus> {
+    ptrace::attach(Pid::from_raw(tid))?;
+    let status = nix::sys::wait::waitpid(
+        Pid::from_raw(tid),
+        Some(WaitPidFlag::from_bits_truncate(opt)),
+    )?;
+    Ok(status)
 }
