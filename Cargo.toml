@@ -1,8 +1,14 @@
 [package]
 name = "udbg"
 version = "0.1.0"
-authors = ["metaworm <metaworm@outlook.com>"]
 edition = "2021"
+license = "MIT"
+authors = ["metaworm <metaworm@outlook.com>"]
+description = "udbg provides a mass of functions for implementing a binary debugger"
+homepage = "https://docs.rs/udbg"
+documentation = "https://docs.rs/udbg"
+repository = "https://github.com/udbg/udbg-base"
+include = ["/src", "README.md", "/examples"]
 
 [dependencies]
 cfg-if = '1.0'
