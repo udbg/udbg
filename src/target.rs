@@ -1,5 +1,5 @@
 //!
-//! Traits && types for debugger target
+//! Traits && types for debugger target, such as memory page, module, thread, process, etc., and their iterators.
 //!
 
 use core::ops::Deref;
@@ -155,7 +155,7 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
         "".into()
     }
 
-    /// https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
+    /// see https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
     #[cfg(windows)]
     fn priority(&self) -> Option<i32> {
         None
@@ -202,7 +202,7 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
 }
 
-/// Debug Engine
+/// Debugger Engine
 pub trait UDbgEngine {
     fn enum_process(&self) -> Box<dyn Iterator<Item = ProcessInfo>> {
         ProcessInfo::enumerate()

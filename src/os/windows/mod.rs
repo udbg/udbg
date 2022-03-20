@@ -1,4 +1,5 @@
 mod ffi;
+mod util;
 mod window;
 
 pub mod eng;
@@ -6,10 +7,12 @@ pub mod ntdll;
 pub mod string;
 pub mod symbol;
 pub mod udbg;
-pub mod util;
 
 pub use self::util::*;
 pub use self::window::*;
+
+pub use self::eng::DebugEngine;
+pub use self::udbg::DefaultEngine;
 
 use alloc::string::String;
 use alloc::sync::Arc;
@@ -574,7 +577,7 @@ impl Process {
         self.basic_information().map(|i| i.PebBaseAddress as usize)
     }
 
-    /// https://docs.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process
+    // https://docs.microsoft.com/en-us/windows/win32/api/wow64apiset/nf-wow64apiset-iswow64process
     pub fn is_wow64(&self) -> bool {
         use winapi::um::wow64apiset::IsWow64Process;
         let mut result: BOOL = 0;
@@ -845,7 +848,7 @@ const LEN2: usize = 26;
 const RW3: usize = 28;
 const LEN3: usize = 30;
 
-pub trait ReadMemUtilWin: ReadMemoryUtil {
+pub trait ReadMemUtilsWin: ReadMemoryUtils {
     fn read_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         let r = self.read_cstring(address, max)?;
         Some(r.to_unicode().to_utf8())
@@ -889,7 +892,7 @@ pub trait ReadMemUtilWin: ReadMemoryUtil {
     }
 }
 
-impl<T: ReadMemoryUtil + ?Sized> ReadMemUtilWin for T {}
+impl<T: ReadMemoryUtils + ?Sized> ReadMemUtilsWin for T {}
 
 const PROC_THREAD_ATTRIBUTE_NUMBER: usize = 0x0000FFFF;
 const PROC_THREAD_ATTRIBUTE_THREAD: usize = 0x00010000;

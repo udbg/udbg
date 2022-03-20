@@ -14,8 +14,7 @@ fn main() -> anyhow::Result<()> {
         .use_utc()
         .start()?;
 
-    let mut engine = DefaultEngine::new();
-    // let engine = &DebugEngine::create()?;
+    let mut engine = udbg::os::DefaultEngine::new();
     engine.create(r"notepad.exe", None, &[]).unwrap();
     engine.event_loop(&mut |target, event| {
         println!("[event]~{} {event}", target.base().event_tid.get());

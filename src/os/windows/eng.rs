@@ -1,3 +1,5 @@
+//! Adaptive wrapper for microsoft's [dbgeng](https://docs.microsoft.com/en-us/windows-hardware/drivers/debugger/debugger-engine-overview)
+
 use super::Handle;
 use crate::prelude::*;
 use std::{

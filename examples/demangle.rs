@@ -1,5 +1,5 @@
 use structopt::StructOpt;
-use udbg::util::*;
+use udbg::{prelude::Symbol, shell::UDbgFlags};
 
 #[derive(StructOpt)]
 #[structopt(
@@ -15,6 +15,7 @@ fn main() {
     let args = ShellArg::from_args();
     println!(
         "{}",
-        undecorate_symbol(&args.name, UFlags::UNDEC_TYPE | UFlags::UNDEC_RETN).unwrap_or_default()
+        Symbol::undecorate(&args.name, UDbgFlags::UNDEC_TYPE | UDbgFlags::UNDEC_RETN)
+            .unwrap_or_default()
     );
 }

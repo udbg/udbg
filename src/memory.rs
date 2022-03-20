@@ -1,6 +1,7 @@
 //!
 //! Traits for memory read/write.
-//! This module contains some commonly used utilities, such as read/write string, read array, read structed value, etc.
+//!
+//! This module contains some commonly used utilities, you can read the most of data types from process or others debug target, such as read/write string, read array, read structed value, etc.
 //!
 
 pub use crate::os::MemoryPage;
@@ -16,7 +17,7 @@ pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
 }
 
-pub trait ReadMemoryUtil: ReadMemory {
+pub trait ReadMemoryUtils: ReadMemory {
     /// read continuous values until the conditions are met
     fn read_util<T: PartialEq + Copy>(
         &self,
@@ -78,6 +79,7 @@ pub trait ReadMemoryUtil: ReadMemory {
         self.read_util(address, |&x| x < val, max_bytes)
     }
 
+    /// read a c string, which is ended with zero
     fn read_cstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<Vec<u8>> {
         let result = self.read_util_eq(address, 0, max.into().unwrap_or(1000));
         if result.len() == 0 || (result.len() == 1 && result[0] < b' ') {
@@ -86,6 +88,7 @@ pub trait ReadMemoryUtil: ReadMemory {
         Some(result)
     }
 
+    /// read a utf8 string
     fn read_utf8(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         String::from_utf8(self.read_cstring(address, max)?).ok()
     }
@@ -156,13 +159,13 @@ pub trait ReadMemoryUtil: ReadMemory {
 }
 
 #[cfg(windows)]
-pub use crate::os::windows::ReadMemUtilWin;
+pub use crate::os::windows::ReadMemUtilsWin;
 
 pub trait WriteMemory {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize>;
 }
 
-pub trait WriteMemUtil: WriteMemory {
+pub trait WriteMemoryUtils: WriteMemory {
     #[inline]
     fn write_value<T>(&self, address: usize, val: &T) -> Option<usize> {
         self.write_memory(address, val.as_byte_array())
@@ -187,8 +190,8 @@ pub trait WriteMemUtil: WriteMemory {
     }
 }
 
-impl<T: ReadMemory + ?Sized> ReadMemoryUtil for T {}
-impl<T: WriteMemory + ?Sized> WriteMemUtil for T {}
+impl<T: ReadMemory + ?Sized> ReadMemoryUtils for T {}
+impl<T: WriteMemory + ?Sized> WriteMemoryUtils for T {}
 
 pub trait TargetMemory: ReadMemory + WriteMemory {
     /// enumerate the memory page in target memory space
@@ -238,7 +241,7 @@ impl crate::range::RangeValue for MemoryPageInfo {
     }
 }
 
-/// Convert any type to &[u8], from its memory content
+/// Convert any type to `&[u8]`, from its memory content
 pub trait AsByteArray {
     fn as_byte_array(&self) -> &[u8];
 }
