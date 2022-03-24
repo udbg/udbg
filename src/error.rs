@@ -200,3 +200,24 @@ macro_rules! impl_errno {
 impl_errno!(u8);
 impl_errno!(i32);
 impl_errno!(u32);
+
+pub trait LogError {
+    type Output;
+
+    fn log_error(self, msg: &str) -> Option<Self::Output>;
+}
+
+impl<T, E: fmt::Debug> LogError for Result<T, E> {
+    type Output = T;
+
+    fn log_error(self, msg: &str) -> Option<T> {
+        match self {
+            Ok(res) => Some(res),
+            Err(err) => {
+                use crate::shell::*;
+                udbg_ui().error(format!("{msg}: {err:?}"));
+                None
+            }
+        }
+    }
+}

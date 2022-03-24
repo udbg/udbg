@@ -86,7 +86,7 @@ impl Default for TargetBase {
             #[cfg(windows)]
             wow64: Cell::new(false),
             arch: std::env::consts::ARCH,
-            status: Cell::new(UDbgStatus::Attached),
+            status: Cell::new(UDbgStatus::Opened),
         }
     }
 }

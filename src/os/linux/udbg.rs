@@ -157,11 +157,11 @@ impl CommonAdaptor {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
         let mut base = TargetBase::default();
-        let mut trace_opts =
-            Options::PTRACE_O_EXITKILL | Options::PTRACE_O_TRACECLONE | Options::PTRACE_O_TRACEEXEC;
-        if udbg_ui().get_config::<bool>("trace_fork").unwrap_or(false) {
-            trace_opts |= Options::PTRACE_O_TRACEVFORK | Options::PTRACE_O_TRACEFORK;
-        }
+        let trace_opts = Options::PTRACE_O_EXITKILL
+            | Options::PTRACE_O_TRACECLONE
+            | Options::PTRACE_O_TRACEEXEC
+            | Options::PTRACE_O_TRACEVFORK
+            | Options::PTRACE_O_TRACEFORK;
 
         base.pid.set(ps.pid());
         base.image_path = ps.image_path().unwrap_or_default();
@@ -761,6 +761,9 @@ unsafe impl Sync for StandardAdaptor {}
 impl StandardAdaptor {
     pub fn create(path: &str, args: &[&str]) -> UDbgResult<Arc<Self>> {
         use std::ffi::CString;
+        if !std::path::Path::new(path).is_file() {
+            return Err(UDbgError::NotFound);
+        }
         unsafe {
             match libc::fork() {
                 0 => {
@@ -780,7 +783,7 @@ impl StandardAdaptor {
                 pid => {
                     let ps = Process::from_pid(pid).ok_or_else(|| UDbgError::system())?;
                     let this = Self(CommonAdaptor::new(ps));
-                    this.insert_thread(pid);
+                    // this.insert_thread(pid); // child maybe not prepared, setoptions after waitpid
                     Ok(Arc::new(this))
                 }
             }
@@ -800,19 +803,15 @@ impl StandardAdaptor {
         }
     }
 
-    pub fn remove_thread(&self, tid: tid_t, s: i32, tb: &mut TraceBuf) -> bool {
+    pub fn remove_thread(&self, tid: tid_t, s: i32, tb: &mut TraceBuf) {
         let mut threads = self.threads.write();
         if threads.remove(&tid) {
             tb.call(UEvent::ThreadExit(s as u32));
             if threads.is_empty() {
                 tb.call(UEvent::ProcessExit(s as u32));
-                true
-            } else {
-                false
             }
         } else {
             udbg_ui().error(&format!("tid {tid} not found"));
-            true
         }
     }
 }
@@ -1053,10 +1052,10 @@ impl EventHandler for DefaultEngine {
 
         self.tid = self.status.pid().map(|p| p.as_raw()).unwrap_or_default();
 
-        let target = self
+        buf.target = self
             .targets
             .iter()
-            .find(|&t| t.threads.read().contains(&self.tid))
+            .find(|&t| self.tid == t.pid() || t.threads.read().contains(&self.tid))
             .cloned()
             .or_else(|| {
                 self.targets
@@ -1079,21 +1078,23 @@ impl EventHandler for DefaultEngine {
             WaitStatus::Stopped(_, sig) => loop {
                 this.update_regs(tid);
                 let regs = unsafe { &mut *this.regs.get() };
-                if !self.inited && matches!(sig, Signal::SIGSTOP | Signal::SIGTRAP) {
-                    self.inited = true;
-                    buf.call(UEvent::InitBp);
-                    this.insert_thread(tid);
-                    break None;
-                }
                 match sig {
                     // maybe thread created (by ptrace_attach or ptrace_interrupt) (in PTRACE_EVENT_CLONE)
                     // maybe kill by SIGSTOP
                     Signal::SIGSTOP => {
+                        if matches!(
+                            this.base().status.get(),
+                            UDbgStatus::Idle | UDbgStatus::Opened
+                        ) {
+                            this.base().status.set(UDbgStatus::Attached);
+                        }
                         if this.threads.read().get(&tid).is_none() {
+                            buf.call(UEvent::ThreadCreate(tid));
                             this.insert_thread(tid);
                             break None;
                         }
                         if self.cloned_tids.remove(&tid) {
+                            buf.call(UEvent::ThreadCreate(tid));
                             break None;
                         }
                     }
@@ -1145,7 +1146,16 @@ impl EventHandler for DefaultEngine {
 
                         self.cloned_tids.insert(new_tid);
                     }
-                    PTRACE_EVENT_FORK => {}
+                    PTRACE_EVENT_FORK | PTRACE_EVENT_VFORK => {
+                        let mut new_pid: pid_t = 0;
+                        ptrace_getevtmsg(tid, &mut new_pid);
+                        StandardAdaptor::open(new_pid)
+                            .log_error("open child")
+                            .map(|t| self.targets.push(t));
+                    }
+                    PTRACE_EVENT_EXEC => {
+                        buf.call(UEvent::ProcessCreate);
+                    }
                     _ => {}
                 }
                 None
@@ -1164,6 +1174,12 @@ impl EventHandler for DefaultEngine {
             // exited normally
             WaitStatus::Exited(_, code) => {
                 this.remove_thread(tid, code, buf);
+                if this.threads.read().is_empty() {
+                    self.targets.retain(|t| !Arc::ptr_eq(t, &this));
+                }
+                if self.targets.is_empty() {
+                    return None;
+                }
                 None
             }
             _ => unreachable!("status: {status:?}"),
@@ -1236,6 +1252,13 @@ impl UDbgEngine for DefaultEngine {
                 .map(Clone::clone)
                 .expect("no attached target"),
         };
+
+        if self.fetch(&mut buf).is_some() {
+            buf.target.base().status.set(UDbgStatus::Attached);
+            buf.target.insert_thread(self.tid);
+            buf.call(UEvent::InitBp);
+            self.cont(None, &mut buf);
+        }
 
         while let Some(s) = self.fetch(&mut buf).and_then(|_| self.handle(&mut buf)) {
             self.cont(s, &mut buf);

@@ -46,7 +46,11 @@ fn main() -> anyhow::Result<()> {
     };
 
     engine.event_loop(&mut |target, event| {
-        println!("[event]~{} {event}", target.base().event_tid.get());
+        println!(
+            "[event]~{}:{} {event}",
+            target.pid(),
+            target.base().event_tid.get()
+        );
         match event {
             UEvent::Exception { .. } => handle_input(),
             UEvent::Breakpoint(bp) => handle_input(),
