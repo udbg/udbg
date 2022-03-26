@@ -1,6 +1,7 @@
 use super::*;
 use crate::elf::*;
 use crate::os::tid_t;
+use crate::os::unix::udbg::TraceBuf;
 use crate::range::RangeValue;
 use crate::register::*;
 
@@ -18,9 +19,9 @@ use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use nix::sys::{ptrace, signal::Signal, wait::*};
+use nix::sys::{ptrace, wait::*};
 
-pub const WAIT_PID_FLAG: WaitPidFlag = WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
+pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
 
 cfg_if! {
     if #[cfg(target_os = "android")] {
@@ -140,22 +141,22 @@ impl TimeCheck {
 }
 
 pub struct CommonAdaptor {
-    base: TargetBase,
-    ps: Process,
-    symgr: SymbolManager<NixModule>,
+    pub base: TargetBase,
+    pub ps: Process,
+    pub symgr: SymbolManager<NixModule>,
     pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
-    regs: UnsafeCell<user_regs_struct>,
-    threads: RwLock<HashSet<tid_t>>,
+    pub regs: UnsafeCell<user_regs_struct>,
+    pub threads: RwLock<HashSet<tid_t>>,
     tc_module: TimeCheck,
     tc_memory: TimeCheck,
     mem_pages: RwLock<Vec<MemoryPage>>,
-    detaching: Cell<bool>,
+    pub detaching: Cell<bool>,
     waiting: Cell<bool>,
     pub trace_opts: Options,
 }
 
 impl CommonAdaptor {
-    fn new(ps: Process) -> Self {
+    pub fn new(ps: Process) -> Self {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
         let mut base = TargetBase::default();
@@ -183,7 +184,7 @@ impl CommonAdaptor {
         }
     }
 
-    fn update_memory_page(&self) -> IoResult<()> {
+    pub fn update_memory_page(&self) -> IoResult<()> {
         *self.mem_pages.write() = self.ps.enum_memory()?.collect::<Vec<_>>();
         Ok(())
     }
@@ -223,7 +224,7 @@ impl CommonAdaptor {
         name
     }
 
-    fn update_module(&self) -> IoResult<()> {
+    pub fn update_module(&self) -> IoResult<()> {
         use goblin::elf::header::header32::Header as Header32;
         use goblin::elf::header::header64::Header as Header64;
         use std::io::Read;
@@ -334,7 +335,7 @@ impl CommonAdaptor {
         }
     }
 
-    fn update_regs(&self, tid: pid_t) {
+    pub fn update_regs(&self, tid: pid_t) {
         match ptrace::getregs(Pid::from_raw(tid)) {
             Ok(regs) => unsafe {
                 *self.regs.get() = regs;
@@ -464,7 +465,7 @@ impl CommonAdaptor {
         reply
     }
 
-    fn get_bp_(&self, id: BpID) -> Option<Arc<Breakpoint>> {
+    pub fn get_bp_(&self, id: BpID) -> Option<Arc<Breakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
 
@@ -755,14 +756,14 @@ pub fn ptrace_step_and_wait(tid: pid_t) -> bool {
 }
 
 #[derive(Deref)]
-pub struct StandardAdaptor(CommonAdaptor);
+pub struct StandardAdaptor(pub CommonAdaptor);
 
 unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
 
 impl StandardAdaptor {
-    pub fn open(pid: pid_t) -> Result<Arc<Self>, UDbgError> {
-        let ps = Process::from_pid(pid).ok_or(UDbgError::system())?;
+    pub fn open(pid: pid_t) -> UDbgResult<Arc<Self>> {
+        let ps = Process::from_pid(pid)?;
         Ok(Arc::new(Self(CommonAdaptor::new(ps))))
     }
 

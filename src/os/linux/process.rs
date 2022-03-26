@@ -62,26 +62,28 @@ pub struct Process {
 }
 
 impl Process {
-    pub fn from_pid(pid: pid_t) -> Option<Self> {
+    pub fn from_pid(pid: pid_t) -> UDbgResult<Self> {
         if Path::new(&format!("/proc/{}", pid)).exists() {
-            Some(Self {
+            Ok(Self {
                 pid,
                 mem: RwLock::new(None),
             })
         } else {
-            None
+            Err(UDbgError::NotFound)
         }
     }
 
-    pub fn from_comm(name: &str) -> Option<Self> {
+    pub fn from_comm(name: &str) -> UDbgResult<Self> {
         enum_pid()
             .find(|&pid| process_name(pid).as_ref().map(String::as_str) == Some(name))
+            .ok_or(UDbgError::NotFound)
             .and_then(Process::from_pid)
     }
 
-    pub fn from_name(name: &str) -> Option<Self> {
+    pub fn from_name(name: &str) -> UDbgResult<Self> {
         enum_pid()
             .find(|&pid| process_cmdline(pid).get(0).map(String::as_str) == Some(name))
+            .ok_or(UDbgError::NotFound)
             .and_then(Process::from_pid)
     }
 

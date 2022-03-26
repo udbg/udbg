@@ -1,14 +1,17 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use anyhow::Context;
+use libc::*;
 use nix::sys::signal::Signal;
 use nix::sys::wait::{waitpid, WaitStatus};
 use nix::{sys::ptrace, unistd::Pid};
 
 use crate::os::CommonAdaptor;
 use crate::{
-    os::{pid_t, tid_t, StandardAdaptor, WAIT_PID_FLAG},
+    os::{self, pid_t, tid_t, StandardAdaptor, WAIT_PID_FLAG},
     prelude::*,
+    register::AbstractRegs,
 };
 
 impl StandardAdaptor {
@@ -86,7 +89,7 @@ impl Default for DefaultEngine {
 
 impl EventHandler for DefaultEngine {
     fn fetch(&mut self, buf: &mut TraceBuf) -> Option<()> {
-        self.status = waitpid(None, Some(WAIT_PID_FLAG)).ok()?;
+        self.status = waitpid(None, Some(WAIT_PID_FLAG())).ok()?;
         info!("[status] {:?}", self.status);
 
         self.tid = self
@@ -107,13 +110,15 @@ impl EventHandler for DefaultEngine {
                 .or_else(|| {
                     self.targets
                         .iter()
-                        .find(|&t| Task::new(t.ps.pid, self.tid).is_ok())
+                        .find(|&t| procfs::process::Task::new(t.ps.pid, self.tid).is_ok())
                         .cloned()
                 })
                 .expect("not traced target");
         }
         #[cfg(any(target_os = "macos"))]
-        buf.target = target.expect("not traced target");
+        {
+            buf.target = target.expect("not traced target");
+        }
 
         buf.target.base.event_tid.set(self.tid as _);
         Some(())
@@ -188,7 +193,7 @@ impl EventHandler for DefaultEngine {
                     }
                     PTRACE_EVENT_CLONE => {
                         let mut new_tid: tid_t = 0;
-                        ptrace_getevtmsg(tid, &mut new_tid);
+                        os::ptrace_getevtmsg(tid, &mut new_tid);
                         buf.call(UEvent::ThreadCreate(new_tid));
                         // trace new thread
                         ptrace::attach(Pid::from_raw(new_tid));
@@ -199,7 +204,7 @@ impl EventHandler for DefaultEngine {
                     }
                     PTRACE_EVENT_FORK | PTRACE_EVENT_VFORK => {
                         let mut new_pid: pid_t = 0;
-                        ptrace_getevtmsg(tid, &mut new_pid);
+                        os::ptrace_getevtmsg(tid, &mut new_pid);
                         StandardAdaptor::open(new_pid)
                             .log_error("open child")
                             .map(|t| self.targets.push(t));
@@ -262,7 +267,7 @@ impl UDbgEngine for DefaultEngine {
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads
-        for tid in this.0.ps.enum_thread() {
+        for tid in this.ps.enum_thread() {
             ptrace::attach(Pid::from_raw(tid)).context("attach")?;
             // this.threads.write().insert(tid);
             this.insert_thread(tid);

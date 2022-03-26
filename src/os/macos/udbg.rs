@@ -11,7 +11,7 @@ use crate::os::unix::udbg::TraceBuf;
 use crate::os::{pid_t, tid_t, NixModule};
 use crate::prelude::*;
 
-pub const WAIT_PID_FLAG: WaitPidFlag = WaitPidFlag::WUNTRACED;
+pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::WUNTRACED;
 
 pub struct CommonAdaptor {
     pub base: TargetBase,
