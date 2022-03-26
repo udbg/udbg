@@ -1,31 +1,39 @@
-use super::{process::*, *};
+use super::process::*;
 
+use mach_o_sys::dyld::x86_thread_state;
+use nix::sys::wait::WaitPidFlag;
 use parking_lot::RwLock;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashMap;
 use std::{collections::HashSet, sync::Arc};
 
-use crate::{sym::*, *};
-use libc::pid_t;
+use crate::os::unix::udbg::TraceBuf;
+use crate::os::{pid_t, tid_t, NixModule};
+use crate::prelude::*;
+
+pub const WAIT_PID_FLAG: WaitPidFlag = WaitPidFlag::WUNTRACED;
 
 pub struct CommonAdaptor {
-    base: UDbgBase,
-    ps: Process,
-    symgr: SymbolManager<NixModule>,
+    pub base: TargetBase,
+    pub ps: Process,
+    pub symgr: SymbolManager<NixModule>,
     pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
-    threads: RwLock<HashSet<pid_t>>,
+    pub threads: RwLock<HashSet<tid_t>>,
     mem_pages: RwLock<Vec<MemoryPage>>,
-    detaching: Cell<bool>,
+    pub detaching: Cell<bool>,
+    pub regs: UnsafeCell<x86_thread_state>,
     waiting: Cell<bool>,
 }
 
 impl CommonAdaptor {
-    fn new(mut base: UDbgBase, ps: Process) -> Self {
+    pub fn new(ps: Process) -> Self {
+        let mut base = TargetBase::default();
         base.pid.set(ps.pid);
         base.image_path = process_path(ps.pid).unwrap_or_default();
         Self {
             base,
             ps,
+            regs: unsafe { core::mem::zeroed() },
             bp_map: RwLock::new(HashMap::new()),
             symgr: SymbolManager::<NixModule>::new("".into()),
             mem_pages: RwLock::new(Vec::new()),
@@ -52,7 +60,7 @@ impl CommonAdaptor {
             // MachO::parse(bytes, offset)
             let nm = (|| -> anyhow::Result<_> {
                 let data =
-                    util::mapfile(&m.path).with_context(|| format!("map file: {}", m.path))?;
+                    Utils::mapfile(&m.path).with_context(|| format!("map file: {}", m.path))?;
                 let mach = MachO::parse(&data, 0).context("parse macho")?;
                 let base = m.base;
                 let path = m.path.clone();
@@ -61,7 +69,7 @@ impl CommonAdaptor {
                 Ok(())
             })();
 
-            nm.map_err(|e| udbg_ui().error(format!("{e:?}")));
+            nm.map_err(|e| error!("{e:?}"));
             self.symgr.base.write().add(NixModule {
                 data: m,
                 loaded: false.into(),
@@ -73,7 +81,7 @@ impl CommonAdaptor {
 }
 
 #[derive(Deref)]
-pub struct StandardAdaptor(CommonAdaptor);
+pub struct StandardAdaptor(pub CommonAdaptor);
 
 unsafe impl Send for StandardAdaptor {}
 unsafe impl Sync for StandardAdaptor {}
@@ -85,71 +93,9 @@ impl AsRef<Process> for StandardAdaptor {
     }
 }
 
-impl AdaptorSpec for StandardAdaptor {}
 impl GetProp for StandardAdaptor {}
 
-impl UDbgAdaptor for StandardAdaptor {
-    fn base(&self) -> &UDbgBase {
-        &self.0.base
-    }
-
-    fn get_memory_map(&self) -> Vec<UiMemory> {
-        self.ps
-            .enum_memory()
-            .map(|m| UiMemory {
-                base: m.base,
-                size: m.size,
-                flags: 0,
-                type_: "".into(),
-                protect: m.protect().into(),
-                usage: m.usage.into(),
-            })
-            .collect()
-    }
-
-    fn enum_thread<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = tid_t> + 'a>> {
-        todo!()
-    }
-
-    fn symbol_manager(&self) -> Option<&dyn UDbgSymMgr> {
-        Some(&self.symgr)
-    }
-
-    fn enum_module<'a>(
-        &'a self,
-    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
-        self.update_module();
-        Ok(self.symgr.enum_module())
-    }
-
-    fn get_thread_context(&self, tid: u32) -> Option<register::Registers> {
-        None
-    }
-
-    fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
-        Err(UDbgError::NotSupport)
-    }
-
-    fn open_all_thread(&self) -> Vec<Box<dyn UDbgThread>> {
-        self.ps
-            .list_thread()
-            .map(|ts| {
-                ts.iter()
-                    .map(|&ts| {
-                        let handle = ThreadAct(ts);
-                        Box::new(MacThread {
-                            data: ThreadData {
-                                tid: handle.id(),
-                                wow64: false,
-                                handle,
-                            },
-                        }) as Box<dyn UDbgThread>
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .unwrap_or_default()
-    }
-
+impl BreakpointManager for StandardAdaptor {
     fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Err(UDbgError::NotSupport)
     }
@@ -172,67 +118,80 @@ impl UDbgAdaptor for StandardAdaptor {
             .filter_map(|id| self.get_bp(id))
             .collect()
     }
+}
 
-    fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = UiHandle> + 'a>> {
-        Ok(Box::new(process_fds(self.ps.pid)))
+impl Target for StandardAdaptor {
+    fn base(&self) -> &TargetBase {
+        &self.0.base
     }
 
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn register::UDbgRegs> {
+    fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
+        Some(&self.symgr)
+    }
+
+    fn enum_module<'a>(
+        &'a self,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
+        self.update_module();
+        Ok(self.symgr.enum_module())
+    }
+
+    fn enum_thread(
+        &self,
+        _detail: bool,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
+        Ok(Box::new(self.ps.list_thread()?.to_vec().into_iter().map(
+            |ts| {
+                let handle = ThreadAct(ts);
+                Box::new(MacThread {
+                    data: ThreadData {
+                        tid: handle.id(),
+                        wow64: false,
+                        handle,
+                    },
+                }) as Box<dyn UDbgThread>
+            },
+        )))
+    }
+
+    fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
+        Err(UDbgError::NotSupport)
+    }
+
+    fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
+        Ok(Box::new(process_fds(self.ps.pid)))
+    }
+}
+
+impl UDbgAdaptor for StandardAdaptor {
+    fn get_registers(&self) -> UDbgResult<&mut dyn UDbgRegs> {
         Err(UDbgError::NotSupport)
     }
 
     fn except_param(&self, i: usize) -> Option<usize> {
         None
     }
-
-    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
-    }
-
-    fn event_loop<'a>(&self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
-        if self.base().is_opened() {
-            use std::time::Duration;
-            while self.base().status.get() != UDbgStatus::Ended {
-                std::thread::sleep(Duration::from_millis(10));
-            }
-            return Ok(());
-        }
-        Err(UDbgError::NotSupport)
-    }
 }
 
 impl StandardAdaptor {
-    pub fn open(base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<Self>> {
-        Ok(Self(CommonAdaptor::new(base, Process::from_pid(pid)?)).into())
-    }
-}
-
-pub struct DefaultEngine;
-
-impl UDbgEngine for DefaultEngine {
-    fn open(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Ok(StandardAdaptor::open(base, pid)?)
+    pub fn open(pid: pid_t) -> UDbgResult<Arc<Self>> {
+        Ok(Self(CommonAdaptor::new(Process::from_pid(pid)?)).into())
     }
 
-    fn attach(&self, base: UDbgBase, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Err(UDbgError::NotSupport)
-    }
+    pub fn insert_thread(&self, tid: tid_t) {}
+    pub fn remove_thread(&self, id: tid_t, s: i32, tb: &mut TraceBuf) {}
 
-    fn create(
-        &self,
-        base: UDbgBase,
-        path: &str,
-        cwd: Option<&str>,
-        args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
-        Err(UDbgError::NotSupport)
-    }
+    pub fn update_regs(&self, tid: tid_t) {}
 }
 
 #[test]
 fn test() {
-    let a = StandardAdaptor::open(Default::default(), std::process::id() as _).unwrap();
-    for m in a.enum_module() {}
+    let a = StandardAdaptor::open(std::process::id() as _).unwrap();
+    for m in a.enum_module().unwrap() {
+        // println!("{}", m.data().path);
+    }
 
-    for p in a.get_memory_map() {}
+    for p in a.collect_memory_info() {
+        println!("{}", p.usage);
+    }
 }

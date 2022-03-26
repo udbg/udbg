@@ -351,3 +351,16 @@ impl<'a, I: Iterator<Item = String>> Iterator for ModuleIter<'a, I> {
         None
     }
 }
+
+mod test {
+    use super::*;
+
+    #[test]
+    fn process() {
+        // let pid = enum_pid().filter(|&pid| process_name(pid) == Some("bash".into())).next().unwrap();
+        let p = Process::from_comm("bash").unwrap();
+        let m = p.enum_module().unwrap().next().unwrap();
+
+        assert_eq!(p.read_value::<[u8; 4]>(m.base), Some(ELF_SIG));
+    }
+}

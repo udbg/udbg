@@ -22,6 +22,8 @@ pub enum UDbgError {
     Text(String),
     IoErr(#[from] io::Error),
     Code(usize),
+    /// for macos kern_return_t
+    Kern(i32),
     #[error(transparent)]
     Other(#[from] anyhow::Error),
 }
@@ -31,6 +33,15 @@ impl UDbgError {
     #[inline]
     pub fn system() -> UDbgError {
         UDbgError::IoErr(io::Error::last_os_error())
+    }
+
+    #[cfg(target_os = "macos")]
+    pub fn from_kern_return(code: i32) -> UDbgResult<()> {
+        if code == mach2::kern_return::KERN_SUCCESS {
+            Ok(())
+        } else {
+            Err(UDbgError::Kern(code))
+        }
     }
 }
 

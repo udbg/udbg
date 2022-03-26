@@ -1,26 +1,27 @@
-
 use libc::{task_info, *};
-use mach::*;
 use mach::mach_types::thread_act_t;
+use mach::task::*;
+use mach::task_info::task_dyld_info;
+use mach::task_info::TASK_DYLD_INFO;
 use mach::thread_act::thread_resume;
 use mach::thread_act::thread_suspend;
 use mach::vm::*;
-use mach::task::*;
-use mach::task_info::TASK_DYLD_INFO;
-use mach::task_info::task_dyld_info;
+use mach::*;
 use vm_region::*;
 
-pub use libc::pid_t;
 pub use libc::__darwin_arm_thread_state64;
+pub use libc::pid_t;
 
-use crate::*;
-use crate::sym::ModuleData;
+use crate::os::tid_t;
+use crate::prelude::*;
 
+use super::ffi::*;
+use core::mem::size_of;
 use std::ffi::CStr;
 use std::io::Error as IoErr;
-use core::mem::size_of;
+use std::io::Result as IoResult;
 use std::ops::Deref;
-use super::ffi::*;
+use std::sync::Arc;
 
 pub struct Process {
     pub pid: pid_t,
@@ -37,7 +38,8 @@ impl ReadMemory for Process {
                 data.len() as _,
                 data.as_mut_ptr() as _,
                 &mut nread,
-            ) == KERN_SUCCESS {
+            ) == KERN_SUCCESS
+            {
                 Some(&mut data[..nread as usize])
             } else {
                 None
@@ -46,20 +48,91 @@ impl ReadMemory for Process {
     }
 }
 
-impl WriteMemory for Process {
+impl<T> ReadMemory for T
+where
+    T: AsRef<Process>,
+{
+    fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        self.as_ref().read_memory(addr, data)
+    }
+}
+
+impl<T> WriteMemory for T
+where
+    T: AsRef<Process>,
+{
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize> {
         unsafe {
             if mach_vm_write(
-                self.task,
+                self.as_ref().task,
                 address as _,
                 data.as_ptr() as _,
                 data.len() as _,
-            ) == KERN_SUCCESS {
+            ) == KERN_SUCCESS
+            {
                 Some(data.len())
             } else {
                 None
             }
         }
+    }
+}
+
+impl<T> TargetMemory for T
+where
+    T: AsRef<Process>,
+{
+    default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
+        Ok(Box::new(self.as_ref().enum_memory()))
+    }
+
+    default fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
+        self.as_ref().virtual_query(address as _)
+    }
+
+    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+        self.as_ref()
+            .enum_memory()
+            .map(|m| MemoryPageInfo {
+                base: m.base,
+                size: m.size,
+                flags: 0,
+                type_: "".into(),
+                protect: m.protect().into(),
+                usage: m.usage.into(),
+            })
+            .collect()
+    }
+}
+
+impl<T> TargetControl for T
+where
+    T: AsRef<Process>,
+{
+    /// detach from debugging target
+    fn detach(&self) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
+    /// interrupt the target running
+    fn breakk(&self) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
+    /// kill target
+    fn kill(&self) -> UDbgResult<()> {
+        unsafe {
+            kill(self.as_ref().pid, SIGKILL);
+            Ok(())
+        }
+    }
+    /// suspend target
+    fn suspend(&self) -> UDbgResult<()> {
+        self.as_ref().suspend();
+        Ok(())
+    }
+    /// resume target
+    fn resume(&self) -> UDbgResult<()> {
+        self.as_ref().resume();
+        Ok(())
     }
 }
 
@@ -72,12 +145,9 @@ impl Process {
         unsafe {
             let mut task = 0;
             let r = task_for_pid(mach_task_self(), pid, &mut task);
-            if r != KERN_SUCCESS {
-                println!("err: {r}");
-                return Err(IoErr::last_os_error().into());
-            }
+            UDbgError::from_kern_return(r)?;
 
-            Ok(Self {pid, task})
+            Ok(Self { pid, task })
         }
     }
 
@@ -88,23 +158,30 @@ impl Process {
             let mut count = core::mem::size_of::<vm_region_basic_info_data_64_t>() as u32;
             let mut object_name: mach_port_t = 0;
             if vm::mach_vm_region(
-                self.task, &mut address,
-                &mut size, VM_REGION_BASIC_INFO,
+                self.task,
+                &mut address,
+                &mut size,
+                VM_REGION_BASIC_INFO,
                 &mut info as *mut _ as _,
                 &mut count,
                 &mut object_name as _,
-            ) != KERN_SUCCESS { return None; }
+            ) != KERN_SUCCESS
+            {
+                return None;
+            }
 
             Some(MemoryPage {
                 base: address as _,
                 size: size as _,
                 prot: protection_bits_to_rwx(&info),
-                usage: regionfilename(self.pid, address as _).unwrap_or_default()
+                usage: regionfilename(self.pid, address as _)
+                    .unwrap_or_default()
+                    .into(),
             })
         }
     }
 
-    pub fn enum_memory<'a>(&'a self) -> impl Iterator<Item=MemoryPage> + 'a {
+    pub fn enum_memory<'a>(&'a self) -> impl Iterator<Item = MemoryPage> + 'a {
         let mut addr = 1;
         std::iter::from_fn(move || {
             let m = self.virtual_query(addr)?;
@@ -121,29 +198,50 @@ impl Process {
                 self.task,
                 TASK_DYLD_INFO,
                 &mut info as *mut _ as _,
-                &mut count
-            ) == KERN_SUCCESS {
+                &mut count,
+            ) == KERN_SUCCESS
+            {
                 (|| {
-                    let infos = self.read_value::<dyld_all_image_infos>(info.all_image_info_addr as _)?;
+                    let infos =
+                        self.read_value::<dyld_all_image_infos>(info.all_image_info_addr as _)?;
                     let mut res = vec![core::mem::zeroed(); infos.infoArrayCount as usize];
                     self.read_to_array::<dyld_image_info>(infos.infoArray as _, &mut res);
                     Some(res)
                 })()
             } else {
                 None
-            }.unwrap_or_default()
+            }
+            .unwrap_or_default()
         }
     }
 
-    pub fn list_module(&self) -> impl Iterator<Item=ModuleData> + '_ {
+    pub fn list_module(&self) -> impl Iterator<Item = ModuleData> + '_ {
         self.read_all_image_info().into_iter().map(move |info| {
-            let path = self.read_utf8(info.imageFilePath as _, PROC_PIDPATHINFO_MAXSIZE as usize).unwrap_or_default();
+            let path = self
+                .read_utf8(info.imageFilePath as _, PROC_PIDPATHINFO_MAXSIZE as usize)
+                .unwrap_or_default();
+
+            let size = self
+                .read_value::<mach_header>(info.imageLoadAddress as _)
+                .and_then(|header| unsafe {
+                    let mut size = size_of::<mach_header>();
+                    size += header.sizeofcmds as usize;
+                    let mut lc = info.imageLoadAddress.offset(1).cast::<load_command>();
+                    for i in 0..header.ncmds {
+                        let l = self.read_value::<segment_command>(lc as _)?;
+                        if l.cmd == LC_SEGMENT {
+                            size += l.vmsize as usize;
+                        }
+                        lc = lc.cast::<u8>().add(l.cmdsize as _).cast();
+                    }
+                    Some(size)
+                })
+                .unwrap_or_default();
             ModuleData {
                 base: info.imageLoadAddress as _,
                 name: path.rsplit_once("/").unwrap_or_default().1.into(),
                 path: path.into(),
-                // TODO:
-                size: 0x1000,
+                size,
                 user_module: false.into(),
                 arch: std::env::consts::ARCH,
                 entry: 0,
@@ -163,20 +261,17 @@ impl Process {
         }
     }
 
-    pub fn list_thread(&self) -> Result<ProcessMemory<'_, thread_act_t>, i32> {
+    pub fn list_thread(&self) -> UDbgResult<ProcessMemory<'_, thread_act_t>> {
         unsafe {
             let mut threads = core::ptr::null_mut();
             let mut count = 0;
-            let err = task_threads(
-                self.task,
-                &mut threads,
-                &mut count
-            );
-            if err == KERN_SUCCESS {
-                Ok(ProcessMemory {ps: self, ptr: threads, count: count as _})
-            } else {
-                Err(err)
-            }
+            let err = task_threads(self.task, &mut threads, &mut count);
+            UDbgError::from_kern_return(err)?;
+            Ok(ProcessMemory {
+                ps: self,
+                ptr: threads,
+                count: count as _,
+            })
         }
     }
 }
@@ -191,16 +286,18 @@ impl<T> Deref for ProcessMemory<'_, T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
-        unsafe {
-            core::slice::from_raw_parts(self.ptr, self.count)
-        }
-    }    
+        unsafe { core::slice::from_raw_parts(self.ptr, self.count) }
+    }
 }
 
 impl<T> Drop for ProcessMemory<'_, T> {
     fn drop(&mut self) {
         unsafe {
-            vm_deallocate(self.ps.task, self.ptr as _, core::mem::size_of_val(&*self.ptr) * self.count);
+            vm_deallocate(
+                self.ps.task,
+                self.ptr as _,
+                core::mem::size_of_val(&*self.ptr) * self.count,
+            );
         }
     }
 }
@@ -210,6 +307,11 @@ pub struct ThreadAct(pub thread_act_t);
 pub trait ThreadActInfo {
     const FLAVOR: i32;
     const COUNT: u32;
+}
+
+impl ThreadActInfo for thread_basic_info {
+    const FLAVOR: i32 = THREAD_BASIC_INFO;
+    const COUNT: u32 = THREAD_BASIC_INFO_COUNT;
 }
 
 impl ThreadActInfo for thread_extended_info {
@@ -224,25 +326,27 @@ impl ThreadActInfo for thread_identifier_info {
 
 impl ThreadAct {
     pub fn id(&self) -> tid_t {
-        self.identifier_info().map(|x| x.thread_id).unwrap_or_default()
+        self.identifier_info()
+            .map(|x| x.thread_id)
+            .unwrap_or_default()
     }
 
     pub fn info<T: ThreadActInfo>(&self) -> Result<T, i32> {
         unsafe {
             let mut info: T = core::mem::zeroed();
             let mut size = T::COUNT;
-            let err = thread_info(
-                self.0,
-                T::FLAVOR as _,
-                &mut info as *mut _ as _,
-                &mut size
-            );
+            let err = thread_info(self.0, T::FLAVOR as _, &mut info as *mut _ as _, &mut size);
             if err == KERN_SUCCESS {
                 Ok(info)
             } else {
                 Err(err)
             }
         }
+    }
+
+    #[inline(always)]
+    pub fn basic_info(&self) -> Result<thread_basic_info, i32> {
+        self.info()
     }
 
     #[inline(always)]
@@ -284,61 +388,62 @@ pub struct MacThread {
     pub data: ThreadData,
 }
 
+impl GetProp for MacThread {
+    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        Ok(serde_value::Value::Unit)
+    }
+}
+
 impl UDbgThread for MacThread {
     fn name(&self) -> Arc<str> {
-        self.handle.extended_info().map(|info| unsafe {
-            CStr::from_bytes_with_nul_unchecked(
-                // core::mem::transmute(info.pth_name.strslice())
-                // TODO:
-                core::mem::transmute(&info.pth_name[..])
-            ).to_string_lossy()
-        }).unwrap_or_default().into()
+        self.handle
+            .extended_info()
+            .map(|info| unsafe {
+                CStr::from_bytes_with_nul_unchecked(
+                    // core::mem::transmute(info.pth_name.strslice())
+                    // TODO:
+                    core::mem::transmute(&info.pth_name[..]),
+                )
+                .to_string_lossy()
+            })
+            .unwrap_or_default()
+            .into()
     }
 
     fn status(&self) -> Arc<str> {
-        // thread_
-        "".into()
+        self.handle
+            .basic_info()
+            .map(|info| info.run_state.to_string())
+            .unwrap_or_default()
+            .into()
     }
 
     fn priority(&self) -> Arc<str> {
-        // thread_basic_info
-        
-        // thread_info(self.0, flavor, thread_info_out, thread_info_outCnt)
-        "".into()
+        self.handle
+            .extended_info()
+            .map(|info| info.pth_priority.to_string())
+            .unwrap_or_default()
+            .into()
     }
 
     fn suspend(&self) -> IoResult<i32> {
-        self.handle.suspend().map(|_| 0).map_err(IoErr::from_raw_os_error)
+        self.handle
+            .suspend()
+            .map(|_| 0)
+            .map_err(IoErr::from_raw_os_error)
     }
 
     fn resume(&self) -> IoResult<u32> {
-        self.handle.resume().map(|_| 0).map_err(IoErr::from_raw_os_error)
+        self.handle
+            .resume()
+            .map(|_| 0)
+            .map_err(IoErr::from_raw_os_error)
     }
 
-    fn last_error(&self) -> Option<u32> { None }
-}
-
-pub trait ModuleInfo: core::ops::Deref<Target=dyld_image_info> + Sized {
-    fn size(self) -> usize {
-        // FIXME:
-        unsafe {
-            self.imageLoadAddress.as_ref().map(|header| {
-                let mut size = size_of::<mach_header>();
-                size += header.sizeofcmds as usize;
-                let mut lc = self.imageLoadAddress.offset(1).cast::<load_command>();
-                for i in 0..header.ncmds {
-                    let l = lc.cast::<segment_command>().as_ref().unwrap();
-                    if l.cmd == LC_SEGMENT {
-                        size += l.vmsize as usize;
-                    }
-                    lc = lc.cast::<u8>().add(l.cmdsize as _).cast();
-                }
-                size
-            }).unwrap_or_default()
-        }
+    fn last_error(&self) -> Option<u32> {
+        None
     }
 }
-impl ModuleInfo for &dyld_image_info {}
 
 fn protection_bits_to_rwx(info: &vm_region_basic_info) -> [u8; 4] {
     let p = info.protection;
@@ -353,7 +458,10 @@ fn protection_bits_to_rwx(info: &vm_region_basic_info) -> [u8; 4] {
 pub fn get_errno_with_message(return_code: i32) -> String {
     let e = errno::errno();
     let code = e.0 as i32;
-    format!("return code = {}, errno = {}, message = '{}'", return_code, code, e)
+    format!(
+        "return code = {}, errno = {}, message = '{}'",
+        return_code, code, e
+    )
 }
 
 pub fn check_errno(ret: i32, buf: &mut Vec<u8>) -> Result<String, String> {
@@ -366,7 +474,7 @@ pub fn check_errno(ret: i32, buf: &mut Vec<u8>) -> Result<String, String> {
 
         match String::from_utf8(buf.to_vec()) {
             Ok(return_value) => Ok(return_value),
-            Err(e) => Err(format!("Invalid UTF-8 sequence: {}", e))
+            Err(e) => Err(format!("Invalid UTF-8 sequence: {}", e)),
         }
     }
 }
@@ -384,7 +492,7 @@ pub fn regionfilename(pid: i32, address: u64) -> Result<String, String> {
     check_errno(ret, &mut buf)
 }
 
-pub fn enum_pid() -> impl Iterator<Item=pid_t> {
+pub fn enum_pid() -> impl Iterator<Item = pid_t> {
     unsafe {
         let count = libc::proc_listallpids(::std::ptr::null_mut(), 0);
         if count < 1 {
@@ -407,16 +515,13 @@ pub fn enum_pid() -> impl Iterator<Item=pid_t> {
 pub fn process_name(pid: pid_t) -> Option<String> {
     unsafe {
         let mut buffer: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as usize / 2);
-        match libc::proc_name(pid,
-            buffer.as_mut_ptr() as *mut _,
-            buffer.capacity() as _,
-        ) {
+        match libc::proc_name(pid, buffer.as_mut_ptr() as *mut _, buffer.capacity() as _) {
             x if x > 0 => {
                 buffer.set_len(x as _);
                 let tmp = String::from_utf8_unchecked(buffer);
                 Some(tmp)
             }
-            _ => None
+            _ => None,
         }
     }
 }
@@ -424,7 +529,8 @@ pub fn process_name(pid: pid_t) -> Option<String> {
 pub fn process_path(pid: pid_t) -> Option<String> {
     unsafe {
         let mut buffer: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as _);
-        match libc::proc_pidpath(pid,
+        match libc::proc_pidpath(
+            pid,
             buffer.as_mut_ptr() as *mut _,
             libc::PROC_PIDPATHINFO_MAXSIZE as _,
         ) {
@@ -433,7 +539,7 @@ pub fn process_path(pid: pid_t) -> Option<String> {
                 let tmp = String::from_utf8_unchecked(buffer);
                 Some(tmp)
             }
-            _ => None
+            _ => None,
         }
     }
 }
@@ -517,14 +623,18 @@ pub fn process_cmdline(pid: pid_t) -> Vec<String> {
         let argc = *ptr.cast::<c_int>();
         let intsize = core::mem::size_of::<c_int>();
         let buf = core::slice::from_raw_parts(ptr.add(intsize), size - intsize);
-        buf.split(|&b| b == b'\0').skip(1).take(argc as _).map(|x| String::from_utf8_unchecked(x.to_vec())).collect()
+        buf.split(|&b| b == b'\0')
+            .skip(1)
+            .take(argc as _)
+            .map(|x| String::from_utf8_unchecked(x.to_vec()))
+            .collect()
     }
 }
 
-pub fn process_fds(pid: pid_t) -> impl Iterator<Item=UiHandle> {
-    use ::libproc::libproc::proc_pid::*;
-    use ::libproc::libproc::file_info::*;
+pub fn process_fds(pid: pid_t) -> impl Iterator<Item = HandleInfo> {
     use ::libproc::libproc::bsd_info::BSDInfo;
+    use ::libproc::libproc::file_info::*;
+    use ::libproc::libproc::proc_pid::*;
     // use ::libproc::libproc::net_info::*;
 
     impl Default for vnode_fdinfowithpath {
@@ -534,7 +644,9 @@ pub fn process_fds(pid: pid_t) -> impl Iterator<Item=UiHandle> {
     }
 
     impl PIDFDInfo for vnode_fdinfowithpath {
-        fn flavor() -> PIDFDInfoFlavor { PIDFDInfoFlavor::VNodePathInfo }
+        fn flavor() -> PIDFDInfoFlavor {
+            PIDFDInfoFlavor::VNodePathInfo
+        }
     }
 
     let info = pidinfo::<BSDInfo>(pid, 0).expect("pidinfo() failed");
@@ -561,14 +673,52 @@ pub fn process_fds(pid: pid_t) -> impl Iterator<Item=UiHandle> {
                 let s = unsafe { std::str::from_utf8_unchecked(core::mem::transmute(s)) };
                 s.to_string()
             }
-            _ => {
-                "".into()
-            }
+            _ => "".into(),
         };
-        UiHandle {
+        HandleInfo {
             ty: fd.proc_fdtype,
             handle: fd.proc_fd as _,
-            type_name, name
+            type_name,
+            name,
         }
     })
+}
+
+impl ProcessInfo {
+    pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
+        Box::new(enum_pid().map(|pid| Self {
+            pid,
+            wow64: false,
+            name: process_name(pid).unwrap_or_default(),
+            path: process_path(pid).unwrap_or_default(),
+            cmdline: process_cmdline(pid).join(" "),
+        }))
+    }
+}
+
+mod test {
+    use super::*;
+
+    #[test]
+    fn process() {
+        for pid in enum_pid() {
+            let ps = match Process::from_pid(pid) {
+                Ok(r) => r,
+                Err(_) => continue,
+            };
+
+            println!(
+                "{pid} {:?} {:?}",
+                process_name(pid),
+                process_path(pid),
+                // process_cmdline(pid)
+            );
+
+            for i in ps.list_module() {
+                println!("  {:x} 0x{:x} {:?}", i.base, i.size, i.path);
+            }
+
+            // process_fds(pid);
+        }
+    }
 }

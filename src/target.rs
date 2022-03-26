@@ -139,7 +139,7 @@ pub struct ThreadData {
     #[cfg(windows)]
     pub handle: crate::os::windows::Handle,
     #[cfg(target_os = "macos")]
-    pub handle: crate::process::ThreadAct,
+    pub handle: crate::os::process::ThreadAct,
 }
 
 #[cfg(windows)]
