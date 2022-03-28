@@ -98,7 +98,7 @@ pub trait UDbgShell: AsRef<ShellData> {
         }
     }
 
-    fn log_text(&self, msg: &str) {
+    fn print(&self, msg: &str) {
         print!("{msg}");
     }
 
@@ -171,5 +171,15 @@ pub fn set_ui(ui: impl UDbgShell + 'static) {
 }
 
 pub fn udbg_ui() -> &'static dyn UDbgShell {
-    unsafe { UDBG_UI.as_ref().expect("plugin not inited").as_ref() }
+    unsafe {
+        if UDBG_UI.is_none() {
+            set_ui(SimpleUDbgShell::default());
+        }
+        Arc::as_ref(UDBG_UI.as_ref().unwrap())
+    }
 }
+
+#[derive(AsRef, Default)]
+pub struct SimpleUDbgShell(ShellData);
+
+impl UDbgShell for SimpleUDbgShell {}

@@ -1,14 +1,6 @@
-#[macro_use]
-extern crate derive_more;
-
 use rustyline::Editor;
 use structopt::StructOpt;
 use udbg::prelude::*;
-
-#[derive(AsRef)]
-struct Debugger(ShellData);
-
-impl UDbgShell for Debugger {}
 
 #[cfg(windows)]
 const TARGET: &str = "notepad.exe";
@@ -24,7 +16,6 @@ struct ShellArg {
 }
 
 fn main() -> anyhow::Result<()> {
-    set_ui(Debugger(ShellData::default()));
     flexi_logger::Logger::try_with_env_or_str("info")?
         .use_utc()
         .start()?;
@@ -52,6 +43,7 @@ fn main() -> anyhow::Result<()> {
             target.base().event_tid.get()
         );
         match event {
+            UEvent::InitBp { .. } => handle_input(),
             UEvent::Exception { .. } => handle_input(),
             UEvent::Breakpoint(bp) => handle_input(),
             _ => UserReply::Run(true),

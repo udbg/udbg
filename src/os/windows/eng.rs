@@ -190,7 +190,7 @@ pub struct OutputCallbacks(sync::Weak<DebugEngine>);
 impl IDebugOutputCallbacksWide_Impl for OutputCallbacks {
     fn Output(&self, mask: u32, text: &windows::core::PCWSTR) -> windows::core::Result<()> {
         let text = String::from_wide_ptr(text.0);
-        udbg_ui().log_text(&text);
+        udbg_ui().print(&text);
         Ok(())
     }
 }
