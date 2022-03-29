@@ -209,9 +209,9 @@ pub struct DebugEngine {
 impl DebugEngine {
     pub fn create() -> anyhow::Result<Arc<Self>> {
         unsafe {
-            let hmod = LoadLibraryA(cstr!("dbgeng.dll").as_ptr());
+            let hmod = LoadLibraryA(cstr!("dbgeng.dll").as_ptr().cast());
             let DebugCreate: Option<DebugCreateFn> =
-                core::mem::transmute(GetProcAddress(hmod, cstr!("DebugCreate").as_ptr()));
+                core::mem::transmute(GetProcAddress(hmod, cstr!("DebugCreate").as_ptr().cast()));
             let DebugCreate = DebugCreate.context("get DebugCreate")?;
 
             let mut client = core::ptr::null_mut();

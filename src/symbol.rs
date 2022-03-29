@@ -286,12 +286,12 @@ impl SymbolsData {
     }
 }
 
-#[cfg(all(windows, target_arch = "x86_64"))]
+#[cfg(all(windows, any(target_arch = "x86_64", target_arch = "aarch64")))]
 pub use winapi::um::winnt::RUNTIME_FUNCTION;
 #[cfg(all(windows, target_arch = "x86"))]
 pub struct RUNTIME_FUNCTION {
-    pub BeginAddress: DWORD,
-    pub EndAddress: DWORD,
+    pub BeginAddress: winapi::shared::minwindef::DWORD,
+    pub EndAddress: winapi::shared::minwindef::DWORD,
     pub u: u32,
 }
 
