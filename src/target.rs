@@ -4,11 +4,14 @@
 
 use core::ops::Deref;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::io::{ErrorKind, Result as IoResult};
 use std::sync::Arc;
 
+use parking_lot::RwLock;
+
 use crate::{
-    os::{pid_t, tid_t},
+    os::{pid_t, tid_t, OsModule},
     prelude::*,
     register::*,
 };
@@ -132,6 +135,82 @@ impl TargetBase {
     }
 }
 
+#[derive(Deref, DerefMut)]
+pub struct CommonBase {
+    #[deref]
+    #[deref_mut]
+    pub base: TargetBase,
+    pub process: Process,
+    pub symgr: SymbolManager<OsModule>,
+    pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
+    pub dbg_reg: [Cell<usize>; 4],
+}
+
+impl CommonBase {
+    pub fn new(ps: Process) -> Self {
+        let mut base = TargetBase::default();
+        base.pid.set(ps.pid());
+        base.image_path = ps.image_path().unwrap_or_default();
+        Self {
+            base,
+            process: ps,
+            symgr: Default::default(),
+            dbg_reg: Default::default(),
+            bp_map: RwLock::new(HashMap::new()),
+        }
+    }
+
+    pub fn get_hwbp_index(&self) -> Option<usize> {
+        for (i, p) in self.dbg_reg.iter().enumerate() {
+            if p.get() == 0 {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    pub fn set_hwbp(&self, index: usize, p: usize) {
+        self.dbg_reg.get(index).map(|cell| cell.set(p));
+    }
+
+    #[inline]
+    pub fn enable_hwbp_for_context<C: HWBPRegs>(&self, cx: &mut C, info: HwbpInfo, enable: bool) {
+        let i = info.index as usize;
+        if enable {
+            cx.set_bp(self.dbg_reg[i].get(), i, info.rw, info.len);
+        } else {
+            cx.unset_bp(i);
+        }
+    }
+
+    pub fn find_table_bp_index(&self) -> Option<isize> {
+        for i in -10000..-10 {
+            if self.bp_map.read().get(&i).is_none() {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    #[inline(always)]
+    pub fn find_module(&self, address: usize) -> Option<Arc<OsModule>> {
+        self.symgr.find_module(address)
+    }
+
+    #[inline(always)]
+    pub fn bp_exists(&self, id: BpID) -> bool {
+        self.bp_map.read().get(&id).is_some()
+    }
+
+    pub fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
+        Some(self.bp_map.read().get(&id)?.clone())
+    }
+
+    pub fn get_bp_list(&self) -> Vec<BpID> {
+        self.bp_map.read().keys().cloned().collect()
+    }
+}
+
 /// Common thread fields
 pub struct ThreadData {
     pub tid: tid_t,
@@ -236,21 +315,22 @@ pub trait UDbgEngine {
         Err(UDbgError::NotSupport)
     }
 
-    // fn loop_event<
-    //     U: std::future::Future<Output = ()> + 'static,
-    //     F: FnOnce(Arc<Self>, UEventState) -> U,
-    // >(
-    //     self: Arc<Self>,
-    //     callback: F,
-    // ) {
-    //     let state = UEventState::new();
-    //     let mut fetcher = ReplyFetcher::new(Box::pin(callback(self.clone(), state.clone())), state);
-    //     self.event_loop(&mut |event| fetcher.fetch(event).unwrap_or(UserReply::Run(false)));
-    //     fetcher.fetch(None);
-    // }
+    fn task_loop(&mut self, mut task: DebugTask) -> UDbgResult<()> {
+        self.event_loop(&mut |ctx, event| {
+            task.state.ctx.set(unsafe { core::mem::transmute(ctx) });
+            match task.run_step(event) {
+                Some(reply) => reply,
+                // None if ef.ended => {
+                //     // TODO: kill all
+                //     panic!("")
+                // }
+                None => UserReply::Run(false),
+            }
+        })
+    }
 }
 
-pub type UDbgCallback<'a> = dyn FnMut(Arc<dyn UDbgAdaptor>, UEvent) -> UserReply + 'a;
+pub type UDbgCallback<'a> = dyn FnMut(&mut dyn TraceContext, UEvent) -> UserReply + 'a;
 
 /// Trait for getting property dynamically
 pub trait GetProp {
@@ -366,17 +446,13 @@ pub trait Target: GetProp + TargetMemory + TargetControl + BreakpointManager {
     }
 }
 
-pub trait UDbgAdaptor: Send + Sync + Target + 'static {
-    fn get_registers(&self) -> UDbgResult<&mut dyn UDbgRegs> {
-        Err(UDbgError::NotSupport)
-    }
-
-    fn except_param(&self, i: usize) -> Option<usize> {
-        None
-    }
-}
+pub trait UDbgAdaptor: Send + Sync + Target + 'static {}
 
 pub trait AdaptorUtil: UDbgAdaptor {
+    fn addbp(&self, opt: impl Into<BpOpt>) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
+        BreakpointManager::add_bp(self, opt.into())
+    }
+
     fn read_ptr(&self, a: usize) -> Option<usize> {
         if self.base().is_ptr32() {
             self.read_value::<u32>(a).map(|r| r as usize)
@@ -393,43 +469,43 @@ pub trait AdaptorUtil: UDbgAdaptor {
         }
     }
 
-    fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
-        self.get_registers()?
-            .get_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?)
-            .ok_or(UDbgError::InvalidRegister)
-    }
+    // fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
+    //     self.get_registers()?
+    //         .get_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?)
+    //         .ok_or(UDbgError::InvalidRegister)
+    // }
 
-    fn set_reg(&self, r: &str, val: CpuReg) -> UDbgResult<()> {
-        self.get_registers()?
-            .set_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?, val);
-        Ok(())
-    }
+    // fn set_reg(&self, r: &str, val: CpuReg) -> UDbgResult<()> {
+    //     self.get_registers()?
+    //         .set_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?, val);
+    //     Ok(())
+    // }
 
-    fn parse_address(&self, symbol: &str) -> Option<usize> {
-        let (mut left, right) = match symbol.find('+') {
-            Some(pos) => ((&symbol[..pos]).trim(), Some((&symbol[pos + 1..]).trim())),
-            None => (symbol.trim(), None),
-        };
+    // fn parse_address(&self, symbol: &str) -> Option<usize> {
+    //     let (mut left, right) = match symbol.find('+') {
+    //         Some(pos) => ((&symbol[..pos]).trim(), Some((&symbol[pos + 1..]).trim())),
+    //         None => (symbol.trim(), None),
+    //     };
 
-        let mut val = if let Ok(val) = self.get_reg(left) {
-            val.as_int()
-        } else {
-            if left.starts_with("0x") || left.starts_with("0X") {
-                left = &left[2..];
-            }
-            if let Ok(address) = usize::from_str_radix(left, 16) {
-                address
-            } else {
-                self.get_address_by_symbol(left)?
-            }
-        };
+    //     let mut val = if let Ok(val) = self.get_reg(left) {
+    //         val.as_int()
+    //     } else {
+    //         if left.starts_with("0x") || left.starts_with("0X") {
+    //             left = &left[2..];
+    //         }
+    //         if let Ok(address) = usize::from_str_radix(left, 16) {
+    //             address
+    //         } else {
+    //             self.get_address_by_symbol(left)?
+    //         }
+    //     };
 
-        if let Some(right) = right {
-            val += self.parse_address(right)?;
-        }
+    //     if let Some(right) = right {
+    //         val += self.parse_address(right)?;
+    //     }
 
-        Some(val)
-    }
+    //     Some(val)
+    // }
 
     fn get_symbol_(&self, addr: usize, o: Option<usize>) -> Option<SymbolInfo> {
         Target::get_symbol(self, addr, o.unwrap_or(0x100))
@@ -579,3 +655,14 @@ pub trait AdaptorArchUtil: UDbgAdaptor {
 }
 
 impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorArchUtil for T {}
+
+pub trait TraceContext {
+    /// registers when debugger pauses
+    fn register(&mut self) -> Option<&mut dyn UDbgRegs>;
+    /// current tracee
+    fn target(&self) -> Arc<dyn UDbgAdaptor>;
+    /// parameter of exception
+    fn exception_param(&self, i: usize) -> Option<usize> {
+        None
+    }
+}

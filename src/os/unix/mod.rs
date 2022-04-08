@@ -3,7 +3,7 @@ use core::{cell::Cell, fmt};
 use std::sync::Arc;
 
 pub mod udbg;
-pub use udbg::DefaultEngine;
+pub use self::udbg::DefaultEngine;
 
 impl Symbol {
     pub fn undecorate(sym: &str, flags: UDbgFlags) -> Option<String> {

@@ -8,7 +8,7 @@ use spin::RwLock as SpinRW;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use crate::{consts::*, error::*, prelude::GetProp};
+use crate::{consts::*, error::*, prelude::GetProp, shell::udbg_ui};
 
 #[cfg(windows)]
 use unicase::UniCase;
@@ -131,7 +131,7 @@ pub trait SymbolFile {
 }
 
 /// symbol information
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub offset: u32,
     pub len: u32,
@@ -182,8 +182,15 @@ pub struct ModuleData {
     pub name: Arc<str>,
     pub path: Arc<str>,
     pub arch: &'static str,
+    /// RVA(windows)/offset of the module
     pub entry: usize,
     pub user_module: Cell<bool>,
+}
+
+impl ModuleData {
+    pub fn entry_point(&self) -> usize {
+        self.base + self.entry
+    }
 }
 
 pub type Syms = BTreeMap<usize, Symbol>;
@@ -536,6 +543,18 @@ pub struct SymbolManager<T: UDbgModule> {
     pub base: RwLock<ModuleManager<T>>,
     pub symcache: Arc<str>,
     pub is_wow64: Cell<bool>,
+}
+
+impl<T: UDbgModule> Default for SymbolManager<T> {
+    fn default() -> Self {
+        let symcache = udbg_ui()
+            .base()
+            .symcache
+            .as_ref()
+            .map(|s| s.to_string_lossy().into())
+            .unwrap_or_else(|| "".into());
+        Self::new(symcache)
+    }
 }
 
 impl<T: UDbgModule> SymbolManager<T> {

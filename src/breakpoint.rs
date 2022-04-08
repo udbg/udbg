@@ -26,6 +26,35 @@ pub enum BpType {
     Hwbp(HwbpType, u8),
 }
 
+impl BpType {
+    #[inline]
+    pub fn is_hard(&self) -> bool {
+        if let Self::Hwbp(_, _) = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn is_soft(&self) -> bool {
+        if let Self::Soft = self {
+            true
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn is_table(&self) -> bool {
+        if let Self::Table = self {
+            true
+        } else {
+            false
+        }
+    }
+}
+
 impl ToString for BpType {
     fn to_string(&self) -> String {
         match self {
@@ -102,6 +131,18 @@ pub struct BpOpt {
     pub tid: Option<tid_t>,
 }
 
+impl From<usize> for BpOpt {
+    fn from(address: usize) -> Self {
+        Self::int3(address)
+    }
+}
+
+impl From<(usize, HwbpType)> for BpOpt {
+    fn from((address, ty): (usize, HwbpType)) -> Self {
+        Self::hwbp(address, ty, None)
+    }
+}
+
 impl BpOpt {
     pub fn int3(address: usize) -> Self {
         Self {
@@ -111,6 +152,18 @@ impl BpOpt {
             tid: None,
             rw: None,
             len: None,
+            table: false,
+        }
+    }
+
+    pub fn hwbp(address: usize, ty: HwbpType, len: Option<HwbpLen>) -> Self {
+        Self {
+            address,
+            temp: false,
+            enable: true,
+            tid: None,
+            rw: ty.into(),
+            len,
             table: false,
         }
     }
@@ -127,6 +180,11 @@ impl BpOpt {
 
     pub fn thread(mut self, tid: tid_t) -> Self {
         self.tid = Some(tid);
+        self
+    }
+
+    pub fn len(mut self, len: HwbpLen) -> Self {
+        self.len = len.into();
         self
     }
 }
@@ -211,29 +269,17 @@ impl Breakpoint {
 
     #[inline]
     pub fn is_hard(&self) -> bool {
-        if let InnerBpType::Hard { .. } = self.bp_type {
-            true
-        } else {
-            false
-        }
+        self.get_type().is_hard()
     }
 
     #[inline]
     pub fn is_soft(&self) -> bool {
-        if let InnerBpType::Soft(_) = self.bp_type {
-            true
-        } else {
-            false
-        }
+        self.get_type().is_soft()
     }
 
     #[inline]
     pub fn is_table(&self) -> bool {
-        if let InnerBpType::Table { .. } = self.bp_type {
-            true
-        } else {
-            false
-        }
+        self.get_type().is_table()
     }
 
     #[inline]
@@ -289,10 +335,7 @@ impl UDbgBreakpoint for Breakpoint {
         let t = self.target.upgrade().ok_or(UDbgError::NoTarget)?;
         unsafe {
             let common = self.common.as_ref().unwrap();
-            #[cfg(windows)]
             common.enable_breadpoint(t.as_ref(), self, enable)?;
-            #[cfg(not(windows))]
-            common.enable_breadpoint(self, enable)?;
             Ok(())
         }
     }
@@ -302,16 +345,7 @@ impl UDbgBreakpoint for Breakpoint {
         unsafe {
             let common = self.common.as_ref().unwrap();
             self.enable(false);
-            #[cfg(windows)]
             common.remove_breakpoint(t.as_ref(), self);
-            #[cfg(not(windows))]
-            {
-                if let Some(bp) = common.bp_map.write().remove(&self.get_id()) {
-                    if let InnerBpType::Hard(_) = bp.bp_type {
-                        // TODO: nix
-                    }
-                }
-            }
             Ok(())
         }
     }

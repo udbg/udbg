@@ -32,6 +32,7 @@ derive_more = '0.99'
 goblin = {version = '0.5'}
 memmap = {version = '0.7.0'}
 cpp_demangle = {version = '0.3'}
+memoffset = {version = '0.6', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
 
@@ -42,7 +43,7 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
-windows = {version = '0.33', features = [
+windows = {version = '0.35', features = [
     "alloc", "implement",
     "Data_Xml_Dom",
     "Win32_Foundation",

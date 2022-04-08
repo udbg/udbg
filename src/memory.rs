@@ -12,6 +12,7 @@ use core::{
     mem::{size_of, transmute, zeroed},
     slice::*,
 };
+use std::io::Result as IoResult;
 
 pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
@@ -163,6 +164,9 @@ pub use crate::os::windows::ReadMemUtilsWin;
 
 pub trait WriteMemory {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize>;
+    fn flush_cache(&self, address: usize, len: usize) -> IoResult<()> {
+        Ok(())
+    }
 }
 
 pub trait WriteMemoryUtils: WriteMemory {

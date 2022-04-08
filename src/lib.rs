@@ -4,6 +4,7 @@
 #![feature(once_cell)]
 #![feature(min_specialization)]
 #![feature(stmt_expr_attributes)]
+#![feature(const_ptr_offset_from)]
 #![feature(associated_type_defaults)]
 #![allow(rustdoc::bare_urls)]
 #![allow(unused_variables)]

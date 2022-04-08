@@ -36,7 +36,8 @@ fn main() -> anyhow::Result<()> {
         UserReply::Run(false)
     };
 
-    engine.event_loop(&mut |target, event| {
+    engine.event_loop(&mut |ctx, event| {
+        let target = ctx.target();
         println!(
             "[event]~{}:{} {event}",
             target.pid(),
@@ -49,11 +50,6 @@ fn main() -> anyhow::Result<()> {
             _ => UserReply::Run(true),
         }
     })?;
-    // dbg.loop_event(|dbg, state| async move {
-    //     while let Some(event) = state.cont(UserReply::Run(false)).await {
-    //         println!("[event]~{} {event}", dbg.base().event_tid.get());
-    //     }
-    // });
 
     Ok(())
 }

@@ -1,6 +1,7 @@
 use super::*;
 use crate::elf::*;
 use crate::os::tid_t;
+use crate::os::udbg::EventHandler;
 use crate::os::unix::udbg::TraceBuf;
 use crate::range::RangeValue;
 use crate::register::*;
@@ -12,27 +13,29 @@ use nix::sys::wait::waitpid;
 use parking_lot::RwLock;
 use procfs::process::{Stat as ThreadStat, Task};
 use serde_value::Value;
-use std::cell::{Cell, UnsafeCell};
-use std::collections::{HashMap, HashSet};
-use std::mem::{size_of, transmute, zeroed};
+use std::cell::Cell;
+use std::collections::HashSet;
+use std::mem::transmute;
 use std::ops::Deref;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use nix::errno::Errno;
 use nix::sys::{ptrace, wait::*};
 
 pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
+
+const TRAP_BRKPT: i32 = 1;
+const TRAP_TRACE: i32 = 2;
+const TRAP_BRANCH: i32 = 3;
+const TRAP_HWBKPT: i32 = 4;
+const TRAP_UNK: i32 = 5;
 
 cfg_if! {
     if #[cfg(target_os = "android")] {
         const PTRACE_INTERRUPT: c_uint = 0x4207;
         const PTRACE_SEIZE: c_uint = 0x4206;
     }
-}
-
-#[inline]
-unsafe fn mutable<T: Sized>(t: &T) -> &mut T {
-    transmute(transmute::<_, usize>(t))
 }
 
 pub struct ElfSymbol {
@@ -140,12 +143,71 @@ impl TimeCheck {
     }
 }
 
+impl AbstractRegs for libc::user {
+    fn ip(&mut self) -> &mut Self::REG {
+        self.regs.ip()
+    }
+
+    fn sp(&mut self) -> &mut Self::REG {
+        self.regs.sp()
+    }
+}
+
+impl HWBPRegs for libc::user {
+    fn eflags(&mut self) -> &mut u32 {
+        unsafe { core::mem::transmute(&mut self.regs.eflags) }
+    }
+
+    fn dr(&self, i: usize) -> reg_t {
+        self.u_debugreg[i]
+    }
+
+    fn set_dr(&mut self, i: usize, v: reg_t) {
+        self.u_debugreg[i] = v;
+    }
+}
+
+pub fn ptrace_peekuser(pid: i32, offset: usize) -> nix::Result<c_long> {
+    Errno::result(unsafe { libc::ptrace(PTRACE_PEEKUSER, Pid::from_raw(pid), offset) })
+}
+
+pub fn ptrace_pokeuser(pid: i32, offset: usize, val: c_long) -> nix::Result<c_long> {
+    Errno::result(unsafe { libc::ptrace(PTRACE_POKEUSER, Pid::from_raw(pid), offset, val) })
+}
+
+const OFFSET_DR: usize = memoffset::offset_of!(libc::user, u_debugreg);
+const DEBUGREG_PTR: *const reg_t = OFFSET_DR as _;
+
+#[extend::ext]
+impl libc::user {
+    fn peek_dr(&mut self, pid: i32, i: usize) -> nix::Result<c_long> {
+        ptrace_peekuser(pid, unsafe { DEBUGREG_PTR.add(i) } as usize)
+    }
+
+    fn peek_dregs(&mut self, pid: i32) -> UDbgResult<()> {
+        for i in 0..self.u_debugreg.len() {
+            self.u_debugreg[i] = ptrace_peekuser(pid, unsafe { DEBUGREG_PTR.add(i) } as usize)
+                .with_context(|| format!("peek dr[{i}]"))? as _;
+        }
+        Ok(())
+    }
+
+    fn poke_regs(&self, pid: i32) {
+        for i in (0..self.u_debugreg.len()).filter(|&i| i < 4 || i > 5) {
+            ptrace_pokeuser(
+                pid,
+                unsafe { DEBUGREG_PTR.add(i) as usize },
+                self.u_debugreg[i] as _,
+            )
+            .log_error_with(|err| format!("poke dr[{i}]: {err:?}"));
+        }
+    }
+}
+
+#[derive(Deref)]
 pub struct CommonAdaptor {
-    pub base: TargetBase,
-    pub ps: Process,
-    pub symgr: SymbolManager<NixModule>,
-    pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
-    pub regs: UnsafeCell<user_regs_struct>,
+    #[deref]
+    _base: CommonBase,
     pub threads: RwLock<HashSet<tid_t>>,
     tc_module: TimeCheck,
     tc_memory: TimeCheck,
@@ -159,21 +221,14 @@ impl CommonAdaptor {
     pub fn new(ps: Process) -> Self {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
-        let mut base = TargetBase::default();
+        let base = CommonBase::new(ps);
         let trace_opts = Options::PTRACE_O_EXITKILL
             | Options::PTRACE_O_TRACECLONE
             | Options::PTRACE_O_TRACEEXEC
             | Options::PTRACE_O_TRACEVFORK
             | Options::PTRACE_O_TRACEFORK;
-
-        base.pid.set(ps.pid());
-        base.image_path = ps.image_path().unwrap_or_default();
         Self {
-            base,
-            ps,
-            regs: unsafe { zeroed() },
-            bp_map: RwLock::new(HashMap::new()),
-            symgr: SymbolManager::<NixModule>::new("".into()),
+            _base: base,
             tc_module: TimeCheck::new(Duration::from_secs(10)),
             tc_memory: TimeCheck::new(Duration::from_secs(10)),
             mem_pages: RwLock::new(Vec::new()),
@@ -185,7 +240,7 @@ impl CommonAdaptor {
     }
 
     pub fn update_memory_page(&self) -> IoResult<()> {
-        *self.mem_pages.write() = self.ps.enum_memory()?.collect::<Vec<_>>();
+        *self.mem_pages.write() = self.process.enum_memory()?.collect::<Vec<_>>();
         Ok(())
     }
 
@@ -230,7 +285,7 @@ impl CommonAdaptor {
         use std::io::Read;
 
         // self.md.write().clear();
-        for m in self.ps.enum_module()? {
+        for m in self.process.enum_module()? {
             if self.find_module(m.base).is_some()
                 || m.name.ends_with(".oat")
                 || m.name.ends_with(".apk")
@@ -291,113 +346,6 @@ impl CommonAdaptor {
         Ok(())
     }
 
-    #[inline(always)]
-    fn find_module(&self, address: usize) -> Option<Arc<NixModule>> {
-        self.symgr.find_module(address)
-    }
-
-    #[inline(always)]
-    fn bp_exists(&self, id: BpID) -> bool {
-        self.bp_map.read().get(&id).is_some()
-    }
-
-    pub fn enable_breadpoint(&self, bp: &Breakpoint, enable: bool) -> Result<bool, UDbgError> {
-        match bp.bp_type {
-            InnerBpType::Soft(origin) => {
-                let written = if enable {
-                    self.ps.write(bp.address, &BP_INSN)
-                } else {
-                    self.ps.write(bp.address, &origin)
-                };
-                if written.unwrap_or(0) > 0 {
-                    bp.enabled.set(enable);
-                    Ok(enable)
-                } else {
-                    Err(UDbgError::MemoryError)
-                }
-            }
-            _ => Err(UDbgError::NotSupport),
-        }
-    }
-
-    fn readv<T: Copy>(&self, address: usize) -> Option<T> {
-        unsafe {
-            let mut val: T = zeroed();
-            let size = size_of::<T>();
-            let pdata: *mut u8 = transmute(&mut val);
-            let mut data = std::slice::from_raw_parts_mut(pdata, size);
-            let readed = self.ps.read(address, &mut data);
-            if readed?.len() == size {
-                Some(val)
-            } else {
-                None
-            }
-        }
-    }
-
-    pub fn update_regs(&self, tid: pid_t) {
-        match ptrace::getregs(Pid::from_raw(tid)) {
-            Ok(regs) => unsafe {
-                *self.regs.get() = regs;
-            },
-            Err(err) => {
-                error!("get_regs failed: {err:?}");
-            }
-        };
-    }
-
-    fn set_regs(&self) -> UDbgResult<()> {
-        ptrace::setregs(Pid::from_raw(self.base.event_tid.get()), unsafe {
-            *self.regs.get()
-        })
-        .context("")?;
-        Ok(())
-    }
-
-    #[cfg(target_arch = "aarch64")]
-    fn set_reg(&self, r: &str, val: CpuReg) -> UDbgResult<()> {
-        let regs = unsafe { mutable(&self.regs) };
-        let val = val.as_int() as u64;
-        match r {
-            "pc" | "_pc" => regs.pc = val,
-            "sp" | "_sp" => regs.sp = val,
-            "pstate" => regs.pstate = val,
-            "x0" => regs.regs[0] = val,
-            "x1" => regs.regs[1] = val,
-            "x2" => regs.regs[2] = val,
-            "x3" => regs.regs[3] = val,
-            "x4" => regs.regs[4] = val,
-            "x5" => regs.regs[5] = val,
-            "x6" => regs.regs[6] = val,
-            "x7" => regs.regs[7] = val,
-            "x8" => regs.regs[8] = val,
-            "x9" => regs.regs[9] = val,
-            "x10" => regs.regs[10] = val,
-            "x11" => regs.regs[11] = val,
-            "x12" => regs.regs[12] = val,
-            "x13" => regs.regs[13] = val,
-            "x14" => regs.regs[14] = val,
-            "x15" => regs.regs[15] = val,
-            "x16" => regs.regs[16] = val,
-            "x17" => regs.regs[17] = val,
-            "x18" => regs.regs[18] = val,
-            "x19" => regs.regs[19] = val,
-            "x20" => regs.regs[20] = val,
-            "x21" => regs.regs[21] = val,
-            "x22" => regs.regs[22] = val,
-            "x23" => regs.regs[23] = val,
-            "x24" => regs.regs[24] = val,
-            "x25" => regs.regs[25] = val,
-            "x26" => regs.regs[26] = val,
-            "x27" => regs.regs[27] = val,
-            "x28" => regs.regs[28] = val,
-            "x29" => regs.regs[29] = val,
-            "x30" => regs.regs[30] = val,
-            _ => return Err(UDbgError::InvalidRegister),
-        };
-        self.set_regs()
-    }
-
     fn wait_event(&self, tb: &mut TraceBuf) -> Option<WaitStatus> {
         self.base.status.set(UDbgStatus::Running);
         self.waiting.set(true);
@@ -423,29 +371,12 @@ impl CommonAdaptor {
         &self,
         this: &dyn UDbgAdaptor,
         mut reply: UserReply,
-        tid: pid_t,
-        bpid: Option<BpID>,
+        tb: &mut TraceBuf,
     ) -> UserReply {
-        let mut revert = None;
-        let ui = udbg_ui();
-        if let Some(bpid) = bpid {
-            this.get_bp(bpid).map(|bp| {
-                if bp.enabled() {
-                    // Disable breakpoint temporarily
-                    bp.enable(false);
-                    revert = Some(bpid);
-                }
-            });
-        }
-        ptrace_step_and_wait(tid);
-        // TODO:
-        // if let Some(bpid) = revert { this.enable_bp(bpid, true); }
-
         let mut temp_address: Option<usize> = None;
         match reply {
             UserReply::StepOut => {
-                let regs = unsafe { &mut *self.regs.get() };
-                temp_address = this.check_call(*regs.ip() as usize);
+                temp_address = this.check_call(*tb.user.regs.ip() as usize);
                 if temp_address.is_none() {
                     reply = UserReply::StepIn;
                 }
@@ -460,8 +391,6 @@ impl CommonAdaptor {
         if let Some(address) = temp_address {
             this.add_bp(BpOpt::int3(address).enable(true).temp(true));
         }
-
-        self.update_regs(tid);
         reply
     }
 
@@ -472,25 +401,95 @@ impl CommonAdaptor {
     pub fn handle_breakpoint(
         &self,
         this: &dyn UDbgAdaptor,
-        tid: pid_t,
-        info: &siginfo_t,
-        bp: Arc<Breakpoint>,
+        eh: &mut dyn EventHandler,
         tb: &mut TraceBuf,
-    ) {
+        si: &siginfo_t,
+    ) -> UDbgResult<()> {
+        // correct the pc register
+        let ip = *tb.user.regs.ip();
+        let address = if si.si_signo == SIGTRAP && ip > 0 {
+            ip - 1
+        } else {
+            ip
+        };
+        *tb.user.regs.ip() = address;
+
+        let tid = self.base.event_tid.get();
+        let bp = self
+            .get_bp_(address as _)
+            .or_else(|| {
+                let dr6 = tb.user.peek_dr(tid, 6).log_error("peek dr6")?;
+                self.get_bp_(if dr6 & 0x01 > 0 {
+                    -1
+                } else if dr6 & 0x02 > 0 {
+                    -2
+                } else if dr6 & 0x04 > 0 {
+                    -3
+                } else if dr6 & 0x08 > 0 {
+                    -4
+                } else {
+                    return None;
+                })
+            })
+            .ok_or(UDbgError::NotFound)?;
+
         bp.hit_count.set(bp.hit_count.get() + 1);
-        let regs = unsafe { mutable(&self.regs) };
         if bp.temp.get() {
-            bp.remove();
+            self.remove_breakpoint(this, &bp);
         }
-        let mut reply = self.handle_reply(
-            this,
-            tb.call(UEvent::Breakpoint(bp.clone())),
-            tid,
-            Some(bp.get_id()),
-        );
-        while reply == UserReply::StepIn {
-            reply = self.handle_reply(this, tb.call(UEvent::Step), tid, None);
+
+        // handle by user
+        let hitted = bp.hit_tid.map(|t| t == tid).unwrap_or(true);
+        let mut reply = UserReply::Run(true);
+        if hitted {
+            reply = self.handle_reply(this, tb.call(UEvent::Breakpoint(bp.clone())), tb);
         }
+
+        let mut user_step = reply == UserReply::StepIn;
+        let id = bp.get_id();
+
+        if bp.is_hard() && self.get_bp(id).is_some() {
+            tb.user.set_rf();
+        }
+
+        // int3 breakpoint revert
+        if bp.is_soft() && self.get_bp(id).is_some() {
+            // if bp is not deleted by user during the interruption
+            if bp.enabled.get() {
+                // disabled temporarily, in order to be able to continue
+                self.enable_breadpoint(this, &bp, false)
+                    .log_error("disable bp");
+
+                // step once and revert
+                loop {
+                    ptrace::step(Pid::from_raw(tid), None);
+                    match eh.fetch(tb) {
+                        Some(_) => {
+                            if core::ptr::eq(self, &tb.target.0) && self.base.event_tid.get() == tid
+                            {
+                                break;
+                            } else if let Some(s) = eh.handle(tb) {
+                                eh.cont(s, tb);
+                            } else {
+                                return Ok(());
+                            }
+                        }
+                        None => return Ok(()),
+                    }
+                }
+
+                self.enable_breadpoint(this, &bp, true)
+                    .log_error("enable bp");
+            }
+        }
+
+        while user_step {
+            ptrace::step(Pid::from_raw(tid), None);
+            reply = self.handle_reply(this, tb.call(UEvent::Step), tb);
+            user_step = reply == UserReply::StepIn;
+        }
+
+        Ok(())
     }
 
     fn enum_module<'a>(
@@ -532,7 +531,7 @@ impl CommonAdaptor {
         use std::os::unix::fs::FileTypeExt;
 
         Ok(Box::new(
-            process_fd(self.ps.pid)
+            process_fd(self.process.pid)
                 .ok_or(UDbgError::system())?
                 .map(|(id, path)| {
                     let ps = path.to_str().unwrap_or("");
@@ -569,143 +568,183 @@ impl CommonAdaptor {
         ))
     }
 
-    fn get_regs(&self) -> UDbgResult<Registers> {
+    pub fn enable_hwbp_for_thread(
+        &self,
+        tid: tid_t,
+        info: HwbpInfo,
+        enable: bool,
+    ) -> UDbgResult<bool> {
         unsafe {
-            let mut result: Registers = zeroed();
-            self.get_reg("", Some(&mut result))?;
-            Ok(result)
+            let mut user: libc::user = core::mem::zeroed();
+            user.peek_dregs(tid)?;
+
+            let i = info.index as usize;
+            if enable {
+                user.u_debugreg[i] = self.dbg_reg[i].get() as _;
+                user.set_bp(self.dbg_reg[i].get(), i, info.rw, info.len);
+            } else {
+                user.unset_bp(i);
+            }
+
+            user.poke_regs(tid);
         }
+
+        Ok(true)
     }
 
-    fn regs(&self) -> &mut user_regs_struct {
-        unsafe { &mut *self.regs.get() }
+    pub fn enable_hwbp(
+        &self,
+        dbg: &dyn UDbgAdaptor,
+        bp: &Breakpoint,
+        info: HwbpInfo,
+        enable: bool,
+    ) -> UDbgResult<bool> {
+        let mut result = Ok(enable);
+        // Set Context for each thread
+        for &tid in self.threads.read().iter() {
+            if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) {
+                continue;
+            }
+            // Set Debug Register
+            result = self.enable_hwbp_for_thread(tid, info, enable);
+            if let Err(e) = &result {
+                udbg_ui().error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
+                // break;
+            }
+        }
+        // TODO: Set Context for current thread, update eflags from user
+
+        if result.is_ok() {
+            bp.enabled.set(enable);
+        }
+        result
     }
 
-    #[cfg(target_arch = "x86_64")]
-    fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
-        let regs = self.regs();
-        if let Some(r) = r {
-            r.rax = regs.rax;
-            r.rbx = regs.rbx;
-            r.rcx = regs.rcx;
-            r.rdx = regs.rdx;
-            r.rbp = regs.rbp;
-            r.rsp = regs.rsp;
-            r.rsi = regs.rsi;
-            r.rdi = regs.rdi;
-            r.r8 = regs.r8;
-            r.r9 = regs.r9;
-            r.r10 = regs.r10;
-            r.r11 = regs.r11;
-            r.r12 = regs.r12;
-            r.r13 = regs.r13;
-            r.r14 = regs.r14;
-            r.r15 = regs.r15;
-            r.rip = regs.rip;
-            r.rflags = regs.eflags as reg_t;
-            Ok(0.into())
-        } else {
-            Ok(CpuReg::Int(match reg {
-                "rax" => regs.rax,
-                "rbx" => regs.rbx,
-                "rcx" => regs.rcx,
-                "rdx" => regs.rdx,
-                "rbp" => regs.rbp,
-                "rsp" | "_sp" => regs.rsp,
-                "rsi" => regs.rsi,
-                "rdi" => regs.rdi,
-                "r8" => regs.r8,
-                "r9" => regs.r9,
-                "r10" => regs.r10,
-                "r11" => regs.r11,
-                "r12" => regs.r12,
-                "r13" => regs.r13,
-                "r14" => regs.r14,
-                "r15" => regs.r15,
-                "rip" | "_pc" => regs.rip,
-                "rflags" => regs.eflags as reg_t,
-                _ => return Err(UDbgError::InvalidRegister),
-            } as usize))
-        }
-    }
+    // #[cfg(target_arch = "x86_64")]
+    // fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
+    //     let regs = self.regs();
+    //     if let Some(r) = r {
+    //         r.rax = regs.rax;
+    //         r.rbx = regs.rbx;
+    //         r.rcx = regs.rcx;
+    //         r.rdx = regs.rdx;
+    //         r.rbp = regs.rbp;
+    //         r.rsp = regs.rsp;
+    //         r.rsi = regs.rsi;
+    //         r.rdi = regs.rdi;
+    //         r.r8 = regs.r8;
+    //         r.r9 = regs.r9;
+    //         r.r10 = regs.r10;
+    //         r.r11 = regs.r11;
+    //         r.r12 = regs.r12;
+    //         r.r13 = regs.r13;
+    //         r.r14 = regs.r14;
+    //         r.r15 = regs.r15;
+    //         r.rip = regs.rip;
+    //         r.rflags = regs.eflags as reg_t;
+    //         Ok(0.into())
+    //     } else {
+    //         Ok(CpuReg::Int(match reg {
+    //             "rax" => regs.rax,
+    //             "rbx" => regs.rbx,
+    //             "rcx" => regs.rcx,
+    //             "rdx" => regs.rdx,
+    //             "rbp" => regs.rbp,
+    //             "rsp" | "_sp" => regs.rsp,
+    //             "rsi" => regs.rsi,
+    //             "rdi" => regs.rdi,
+    //             "r8" => regs.r8,
+    //             "r9" => regs.r9,
+    //             "r10" => regs.r10,
+    //             "r11" => regs.r11,
+    //             "r12" => regs.r12,
+    //             "r13" => regs.r13,
+    //             "r14" => regs.r14,
+    //             "r15" => regs.r15,
+    //             "rip" | "_pc" => regs.rip,
+    //             "rflags" => regs.eflags as reg_t,
+    //             _ => return Err(UDbgError::InvalidRegister),
+    //         } as usize))
+    //     }
+    // }
 
-    #[cfg(target_arch = "arm")]
-    fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
-        let regs = self.regs();
-        if let Some(r) = r {
-            *r = unsafe { transmute(*regs) };
-            Ok(CpuReg::Int(0))
-        } else {
-            Ok(CpuReg::Int(match reg {
-                "r0" => regs.regs[0],
-                "r1" => regs.regs[1],
-                "r2" => regs.regs[2],
-                "r3" => regs.regs[3],
-                "r4" => regs.regs[4],
-                "r5" => regs.regs[5],
-                "r6" => regs.regs[6],
-                "r7" => regs.regs[7],
-                "r8" => regs.regs[8],
-                "r9" => regs.regs[9],
-                "r10" => regs.regs[10],
-                "r11" => regs.regs[11],
-                "r12" => regs.regs[12],
-                "_sp" | "r13" => regs.regs[13],
-                "r14" => regs.regs[14],
-                "_pc" | "r15" => regs.regs[15],
-                "r16" => regs.regs[16],
-                "r17" => regs.regs[17],
-                _ => return Err(UDbgError::InvalidRegister),
-            } as usize))
-        }
-    }
+    // #[cfg(target_arch = "arm")]
+    // fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
+    //     let regs = self.regs();
+    //     if let Some(r) = r {
+    //         *r = unsafe { transmute(*regs) };
+    //         Ok(CpuReg::Int(0))
+    //     } else {
+    //         Ok(CpuReg::Int(match reg {
+    //             "r0" => regs.regs[0],
+    //             "r1" => regs.regs[1],
+    //             "r2" => regs.regs[2],
+    //             "r3" => regs.regs[3],
+    //             "r4" => regs.regs[4],
+    //             "r5" => regs.regs[5],
+    //             "r6" => regs.regs[6],
+    //             "r7" => regs.regs[7],
+    //             "r8" => regs.regs[8],
+    //             "r9" => regs.regs[9],
+    //             "r10" => regs.regs[10],
+    //             "r11" => regs.regs[11],
+    //             "r12" => regs.regs[12],
+    //             "_sp" | "r13" => regs.regs[13],
+    //             "r14" => regs.regs[14],
+    //             "_pc" | "r15" => regs.regs[15],
+    //             "r16" => regs.regs[16],
+    //             "r17" => regs.regs[17],
+    //             _ => return Err(UDbgError::InvalidRegister),
+    //         } as usize))
+    //     }
+    // }
 
-    #[cfg(target_arch = "aarch64")]
-    fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
-        let regs = self.regs();
-        if let Some(r) = r {
-            *r = unsafe { transmute(*regs) };
-            Ok(CpuReg::Int(0))
-        } else {
-            Ok(CpuReg::Int(match reg {
-                "pc" | "_pc" => regs.pc,
-                "sp" | "_sp" => regs.sp,
-                "pstate" => regs.pstate,
-                "x0" => regs.regs[0],
-                "x1" => regs.regs[1],
-                "x2" => regs.regs[2],
-                "x3" => regs.regs[3],
-                "x4" => regs.regs[4],
-                "x5" => regs.regs[5],
-                "x6" => regs.regs[6],
-                "x7" => regs.regs[7],
-                "x8" => regs.regs[8],
-                "x9" => regs.regs[9],
-                "x10" => regs.regs[10],
-                "x11" => regs.regs[11],
-                "x12" => regs.regs[12],
-                "x13" => regs.regs[13],
-                "x14" => regs.regs[14],
-                "x15" => regs.regs[15],
-                "x16" => regs.regs[16],
-                "x17" => regs.regs[17],
-                "x18" => regs.regs[18],
-                "x19" => regs.regs[19],
-                "x20" => regs.regs[20],
-                "x21" => regs.regs[21],
-                "x22" => regs.regs[22],
-                "x23" => regs.regs[23],
-                "x24" => regs.regs[24],
-                "x25" => regs.regs[25],
-                "x26" => regs.regs[26],
-                "x27" => regs.regs[27],
-                "x28" => regs.regs[28],
-                "x29" => regs.regs[29],
-                "x30" => regs.regs[30],
-                _ => return Err(UDbgError::InvalidRegister),
-            } as usize))
-        }
-    }
+    // #[cfg(target_arch = "aarch64")]
+    // fn get_reg(&self, reg: &str, r: Option<&mut Registers>) -> Result<CpuReg, UDbgError> {
+    //     let regs = self.regs();
+    //     if let Some(r) = r {
+    //         *r = unsafe { transmute(*regs) };
+    //         Ok(CpuReg::Int(0))
+    //     } else {
+    //         Ok(CpuReg::Int(match reg {
+    //             "pc" | "_pc" => regs.pc,
+    //             "sp" | "_sp" => regs.sp,
+    //             "pstate" => regs.pstate,
+    //             "x0" => regs.regs[0],
+    //             "x1" => regs.regs[1],
+    //             "x2" => regs.regs[2],
+    //             "x3" => regs.regs[3],
+    //             "x4" => regs.regs[4],
+    //             "x5" => regs.regs[5],
+    //             "x6" => regs.regs[6],
+    //             "x7" => regs.regs[7],
+    //             "x8" => regs.regs[8],
+    //             "x9" => regs.regs[9],
+    //             "x10" => regs.regs[10],
+    //             "x11" => regs.regs[11],
+    //             "x12" => regs.regs[12],
+    //             "x13" => regs.regs[13],
+    //             "x14" => regs.regs[14],
+    //             "x15" => regs.regs[15],
+    //             "x16" => regs.regs[16],
+    //             "x17" => regs.regs[17],
+    //             "x18" => regs.regs[18],
+    //             "x19" => regs.regs[19],
+    //             "x20" => regs.regs[20],
+    //             "x21" => regs.regs[21],
+    //             "x22" => regs.regs[22],
+    //             "x23" => regs.regs[23],
+    //             "x24" => regs.regs[24],
+    //             "x25" => regs.regs[25],
+    //             "x26" => regs.regs[26],
+    //             "x27" => regs.regs[27],
+    //             "x28" => regs.regs[28],
+    //             "x29" => regs.regs[29],
+    //             "x30" => regs.regs[30],
+    //             _ => return Err(UDbgError::InvalidRegister),
+    //         } as usize))
+    //     }
+    // }
 }
 
 fn trim_ver(name: &str) -> &str {
@@ -790,13 +829,13 @@ impl StandardAdaptor {
 
 impl ReadMemory for StandardAdaptor {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.ps.read(addr, data)
+        self.process.read(addr, data)
     }
 }
 
 impl WriteMemory for StandardAdaptor {
     fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
-        self.ps.write(addr, data)
+        self.process.write(addr, data)
     }
 }
 
@@ -842,7 +881,7 @@ impl TargetControl for StandardAdaptor {
     }
 
     fn kill(&self) -> UDbgResult<()> {
-        if unsafe { kill(self.ps.pid, SIGKILL) } == 0 {
+        if unsafe { kill(self.process.pid, SIGKILL) } == 0 {
             Ok(())
         } else {
             Err(UDbgError::system())
@@ -859,7 +898,7 @@ impl TargetControl for StandardAdaptor {
         //     }
         // }
         // return Err(UDbgError::system());
-        match unsafe { kill(self.ps.pid, SIGSTOP) } {
+        match unsafe { kill(self.process.pid, SIGSTOP) } {
             0 => Ok(()),
             code => Err(UDbgError::system()),
         }
@@ -869,57 +908,9 @@ impl TargetControl for StandardAdaptor {
 // impl TargetSymbol for StandardAdaptor {
 // }
 
-impl BreakpointManager for StandardAdaptor {
-    fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
-        self.base.check_opened()?;
-        if self.bp_exists(opt.address as BpID) {
-            return Err(UDbgError::BpExists);
-        }
-
-        let enable = opt.enable;
-        let result = if let Some(rw) = opt.rw {
-            return Err(UDbgError::NotSupport);
-        } else {
-            if let Some(origin) = self.readv::<BpInsn>(opt.address) {
-                let bp = Breakpoint {
-                    address: opt.address,
-                    enabled: Cell::new(false),
-                    temp: Cell::new(opt.temp),
-                    hit_tid: opt.tid,
-                    hit_count: Cell::new(0),
-                    bp_type: InnerBpType::Soft(origin),
-
-                    target: unsafe { Utils::to_weak(self) },
-                    common: &self.0,
-                };
-                let bp = Arc::new(bp);
-                self.bp_map.write().insert(bp.get_id(), bp.clone());
-                Ok(bp)
-            } else {
-                Err(UDbgError::InvalidAddress)
-            }
-        };
-
-        Ok(result.map(|bp| {
-            if enable {
-                bp.enable(true);
-            }
-            bp
-        })?)
-    }
-
-    fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
-        Some(self.bp_map.read().get(&id)?.clone())
-    }
-
-    fn get_bp_list(&self) -> Vec<BpID> {
-        self.bp_map.read().keys().cloned().collect()
-    }
-}
-
 impl Target for StandardAdaptor {
     fn base(&self) -> &TargetBase {
-        &self.base
+        &self._base
     }
 
     fn enum_module<'a>(
@@ -945,7 +936,7 @@ impl Target for StandardAdaptor {
     }
 
     fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
-        let task = Task::new(self.ps.pid, tid).context("task")?;
+        let task = Task::new(self.process.pid, tid).context("task")?;
         Ok(Box::new(NixThread {
             base: ThreadData { tid, wow64: false },
             stat: task.stat().context("stat")?,
@@ -961,15 +952,11 @@ impl Target for StandardAdaptor {
         detail: bool,
     ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
         Ok(Box::new(
-            self.ps
+            self.process
                 .enum_thread()
                 .filter_map(|tid| self.open_thread(tid).ok()),
         ))
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
-        Ok(self.regs() as &mut dyn UDbgRegs)
-    }
-}
+impl UDbgAdaptor for StandardAdaptor {}

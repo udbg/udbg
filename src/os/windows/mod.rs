@@ -2,7 +2,7 @@ mod ffi;
 mod util;
 mod window;
 
-pub mod eng;
+pub mod dbgeng;
 pub mod ntdll;
 pub mod string;
 pub mod symbol;
@@ -11,7 +11,6 @@ pub mod udbg;
 pub use self::util::*;
 pub use self::window::*;
 
-pub use self::eng::DebugEngine;
 pub use self::udbg::*;
 
 use alloc::string::String;
@@ -35,7 +34,7 @@ use winapi::um::winnt::*;
 use winapi::um::winuser::*;
 
 use anyhow::{Error, Result};
-use std::io::Error as IoError;
+use std::io::{Error as IoError, Result as IoResult};
 
 use crate::prelude::*;
 use crate::shell::ProcessInfo;
@@ -521,6 +520,14 @@ impl WriteMemory for Process {
             None
         }
     }
+
+    fn flush_cache(&self, address: usize, len: usize) -> IoResult<()> {
+        if unsafe { FlushInstructionCache(*self.handle, address as LPCVOID, len) > 0 } {
+            Ok(())
+        } else {
+            Err(IoError::last_os_error())
+        }
+    }
 }
 
 impl Process {
@@ -738,15 +745,6 @@ impl Process {
         write_process_memory(*self.handle, address, data)
     }
 
-    pub fn write_code(&self, address: usize, data: &[u8]) -> Result<usize, IoError> {
-        let r = write_process_memory(*self.handle, address, data);
-        if unsafe { FlushInstructionCache(*self.handle, address as LPCVOID, data.len()) > 0 } {
-            Ok(r)
-        } else {
-            Err(IoError::last_os_error())
-        }
-    }
-
     pub fn enum_memory(&self, address: usize) -> MemoryIter {
         MemoryIter {
             process: self,
@@ -808,45 +806,6 @@ impl Process {
         }
     }
 }
-
-#[inline(always)]
-fn set_bit(n: &mut reg_t, x: usize, set: bool) {
-    if set {
-        *n |= 1 << x;
-    } else {
-        *n &= !(1 << x);
-    }
-}
-
-#[inline(always)]
-fn test_bit(n: reg_t, x: usize) -> bool {
-    n & (1 << x) > 0
-}
-
-#[inline(always)]
-fn set_bit2(n: &mut reg_t, x: usize, v: reg_t) {
-    *n &= !(0b11 << x);
-    *n |= v << x;
-}
-
-const L0: usize = 0;
-const G0: usize = 1;
-const L1: usize = 2;
-const G1: usize = 3;
-const L2: usize = 4;
-const G2: usize = 5;
-const L3: usize = 5;
-const G3: usize = 7;
-const L_ENABLE: usize = 8;
-const G_ENABLE: usize = 9;
-const RW0: usize = 16;
-const LEN0: usize = 18;
-const RW1: usize = 20;
-const LEN1: usize = 22;
-const RW2: usize = 24;
-const LEN2: usize = 26;
-const RW3: usize = 28;
-const LEN3: usize = 30;
 
 pub trait ReadMemUtilsWin: ReadMemoryUtils {
     fn read_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {

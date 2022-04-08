@@ -242,29 +242,7 @@ impl DebugEngine {
     }
 }
 
-unsafe fn mutable<T: Sized>(t: &T) -> &mut T {
-    use core::mem::transmute;
-    transmute(transmute::<_, usize>(t))
-}
-
-impl UDbgAdaptor for DebugTarget {
-    fn except_param(&self, i: usize) -> Option<usize> {
-        None
-    }
-
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
-        unsafe {
-            let this = mutable(self);
-            self.advanced
-                .GetThreadContext(
-                    core::mem::transmute(&mut this.context),
-                    core::mem::size_of::<CONTEXT>() as _,
-                )
-                .context("")?;
-            Ok(&mut this.context)
-        }
-    }
-}
+impl UDbgAdaptor for DebugTarget {}
 
 impl UDbgEngine for DebugEngine {
     fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
@@ -365,11 +343,8 @@ impl From<&DebugEngine> for DebugTarget {
                 let mut buf = [0u16; 500];
                 let mut len = 0u32;
                 // eng.syms.GetImagePathWide(buf.as_mut_ptr(), buf.len() as u32, &mut len);
-                eng.sysobjs.GetCurrentProcessExecutableNameWide(
-                    PWSTR(buf.as_mut_ptr()),
-                    buf.len() as u32,
-                    &mut len,
-                );
+                eng.sysobjs
+                    .GetCurrentProcessExecutableNameWide(&mut buf, &mut len);
                 base.image_path = buf.to_utf8();
                 base.pid
                     .set(eng.sysobjs.GetCurrentProcessSystemId().unwrap_or_default());
@@ -418,6 +393,8 @@ impl WriteMemory for DebugTarget {
             )
         }
     }
+
+    // TODO: flush
 }
 
 impl TargetMemory for DebugTarget {
@@ -604,12 +581,7 @@ impl IDebugControl4 {
     fn system_version(&self, which: u32) -> String {
         let mut buf = [0u16; 300];
         unsafe {
-            self.GetSystemVersionStringWide(
-                which,
-                PWSTR(buf.as_mut_ptr()),
-                buf.len() as _,
-                core::ptr::null_mut(),
-            );
+            self.GetSystemVersionStringWide(which, &mut buf, core::ptr::null_mut());
             buf.to_utf8()
         }
     }
@@ -835,13 +807,8 @@ impl Target for DebugTarget {
             let mut buf = [0; 1024];
             let mut disp = 0u64;
             let mut size = 0;
-            self.symbols.GetNameByOffset(
-                addr as _,
-                PSTR(buf.as_mut_ptr()),
-                buf.len() as _,
-                &mut size,
-                &mut disp,
-            );
+            self.symbols
+                .GetNameByOffset(addr as _, &mut buf, &mut size, &mut disp);
 
             if size > 0 {
                 let name = CStr::from_ptr(buf.as_ptr().cast()).to_string_lossy();
@@ -889,13 +856,7 @@ impl IDebugSymbols3 {
                 let mut buf = [0; 1000];
                 let mut offset = 0;
                 if h.0
-                    .GetNextSymbolMatchWide(
-                        h.1,
-                        PWSTR(buf.as_mut_ptr()),
-                        buf.len() as u32,
-                        core::ptr::null_mut(),
-                        &mut offset,
-                    )
+                    .GetNextSymbolMatchWide(h.1, &mut buf, core::ptr::null_mut(), &mut offset)
                     .is_ok()
                 {
                     Some((buf.to_utf8(), offset))
@@ -937,8 +898,7 @@ impl IDebugSymbols3 {
                 which,
                 DEBUG_ANY_ID,
                 base,
-                PWSTR(buf.as_mut_ptr()),
-                buf.len() as u32,
+                &mut buf,
                 core::ptr::null_mut(),
             )?;
             Ok(buf.to_utf8())

@@ -2,7 +2,13 @@
 //! Utilities for dealing debugger event
 //!
 
-use crate::{breakpoint::UDbgBreakpoint, os::tid_t, shell::*, symbol::UDbgModule};
+use crate::{
+    breakpoint::UDbgBreakpoint,
+    os::tid_t,
+    shell::*,
+    symbol::UDbgModule,
+    target::{TraceContext, UDbgAdaptor},
+};
 use core::marker::Unpin;
 use core::pin::Pin;
 use core::{
@@ -11,7 +17,7 @@ use core::{
 };
 use futures::task::{waker_ref, ArcWake};
 use spin::mutex::Mutex;
-use std::rc::Rc;
+use std::{cell::Cell, rc::Rc};
 use std::{sync::Arc, time::Instant};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -26,66 +32,87 @@ pub enum UserReply {
 
 pub type EventPumper = Pin<Box<dyn Future<Output = ()> + 'static>>;
 
-pub struct EventState {
-    pub reply: Option<UserReply>,
-    pub event: Option<Option<UEvent>>,
+pub struct EventData {
+    pub event: Mutex<Option<UEvent>>,
+    pub reply: Mutex<UserReply>,
+    pub ctx: Cell<Option<*mut dyn TraceContext>>,
 }
 
-#[derive(Deref, Clone)]
-pub struct UEventState(Rc<Mutex<EventState>>);
+#[derive(Deref)]
+pub struct UEventState(Rc<EventData>);
+
+impl Clone for UEventState {
+    fn clone(&self) -> Self {
+        Self(self.0.clone())
+    }
+}
+
+impl Default for UEventState {
+    fn default() -> Self {
+        Self(Rc::new(EventData {
+            reply: Mutex::new(UserReply::Run(true)),
+            event: Mutex::new(None),
+            ctx: Cell::new(None),
+        }))
+    }
+}
 
 impl UEventState {
-    pub fn new() -> Self {
-        Self(Rc::new(Mutex::new(EventState {
-            reply: None,
-            event: None,
-        })))
+    pub fn cont(&self) -> AsyncEvent {
+        self.event.lock().take();
+        AsyncEvent(self.0.clone())
     }
 
-    pub fn cont(&self, reply: UserReply) -> AsyncEvent {
-        let r = self.0.clone();
-        {
-            let mut c = r.lock();
-            c.reply = Some(reply);
-            c.event = None;
+    pub fn context(&self) -> &mut dyn TraceContext {
+        unsafe { self.ctx.get().unwrap().as_mut().unwrap() }
+    }
+
+    pub fn reply(&self, reply: UserReply) {
+        *self.reply.lock() = reply;
+    }
+
+    pub async fn loop_util<F: Fn(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool>(
+        &self,
+        exit: F,
+    ) -> Arc<dyn UDbgAdaptor> {
+        loop {
+            let event = self.cont().await;
+            let target = self.context().target();
+            if exit(&target, &event) {
+                return target;
+            }
+            self.reply(match event {
+                UEvent::Exception { .. } => UserReply::Run(false),
+                _ => UserReply::Run(true),
+            });
         }
-        AsyncEvent(r)
     }
 }
 
-pub struct AsyncEvent(Rc<Mutex<EventState>>);
+pub struct AsyncEvent(Rc<EventData>);
 
 impl Future for AsyncEvent {
-    type Output = Option<UEvent>;
+    type Output = UEvent;
 
     fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.0.lock().event.take() {
-            Some(r) => Poll::Ready(r),
+        match self.0.event.lock().clone() {
+            Some(e) => Poll::Ready(e),
             None => Poll::Pending,
         }
     }
 }
 
-pub struct Reply(Rc<Mutex<EventState>>);
-
-impl Future for Reply {
-    type Output = UserReply;
-
-    fn poll(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match self.0.lock().reply.take() {
-            Some(r) => Poll::Ready(r),
-            None => Poll::Pending,
-        }
-    }
-}
-
-#[derive(Display)]
+#[derive(Clone, Display)]
 pub enum UEvent {
     #[display(fmt = "InitBp")]
     InitBp,
     #[display(fmt = "Step")]
     Step,
-    #[display(fmt = "Bp(address={:x} type={:?})", "_0.address()", "_0.get_type()")]
+    #[display(
+        fmt = "Bp {{ address={:x} type={:?} }}",
+        "_0.address()",
+        "_0.get_type()"
+    )]
     Breakpoint(Arc<dyn UDbgBreakpoint>),
     #[display(fmt = "ThreadCreate({_0})")]
     ThreadCreate(tid_t),
@@ -105,24 +132,47 @@ pub enum UEvent {
 
 impl Unpin for UEvent {}
 
-pub struct ReplyFetcher {
+/// An asynchronous procedure for handling debug event
+/// CANNOT mix it with other asynchronous runtime
+pub struct DebugTask {
+    pub state: UEventState,
+    pub ended: bool,
     future: EventPumper,
-    state: UEventState,
 }
 
-impl ReplyFetcher {
+impl DebugTask {
     pub fn new(e: EventPumper, state: UEventState) -> Self {
-        Self { future: e, state }
+        Self {
+            future: e,
+            state,
+            ended: false,
+        }
     }
 
-    pub fn fetch(&mut self, event: impl Into<Option<UEvent>>) -> Option<UserReply> {
-        self.state.lock().event = Some(event.into());
+    fn step(&mut self) -> Poll<()> {
         let waker = waker_ref(DummyTask::get());
         let context = &mut Context::from_waker(&*waker);
-        match self.future.as_mut().poll(context) {
-            Poll::Pending => self.state.lock().reply.take(),
-            Poll::Ready(_) => None,
+        self.future.as_mut().poll(context)
+    }
+
+    pub fn run_step(&mut self, event: UEvent) -> Option<UserReply> {
+        self.state.event.lock().replace(event.into());
+        match self.step() {
+            Poll::Pending => Some(self.state.reply.lock().clone()),
+            Poll::Ready(_) => {
+                self.ended = true;
+                None
+            }
         }
+    }
+}
+
+impl<F: FnOnce(UEventState) -> C, C: Future<Output = ()> + 'static> From<F> for DebugTask {
+    fn from(callback: F) -> Self {
+        let state = UEventState::default();
+        let mut result = Self::new(Box::pin(callback(UEventState::clone(&state))), state);
+        result.step();
+        result
     }
 }
 

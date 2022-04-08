@@ -101,6 +101,139 @@ pub struct Arm64Regs {
     pub pstate: reg_t,
 }
 
+const L0: usize = 0;
+const G0: usize = 1;
+const L1: usize = 2;
+const G1: usize = 3;
+const L2: usize = 4;
+const G2: usize = 5;
+const L3: usize = 5;
+const G3: usize = 7;
+const L_ENABLE: usize = 8;
+const G_ENABLE: usize = 9;
+const RW0: usize = 16;
+const LEN0: usize = 18;
+const RW1: usize = 20;
+const LEN1: usize = 22;
+const RW2: usize = 24;
+const LEN2: usize = 26;
+const RW3: usize = 28;
+const LEN3: usize = 30;
+
+macro_rules! set_bit {
+    ($n:expr, $x:expr, $set:expr) => {
+        if $set {
+            $n |= 1 << $x;
+        } else {
+            $n &= !(1 << $x);
+        }
+    };
+}
+
+macro_rules! test_bit {
+    ($n:expr, $x:expr) => {
+        ($n & (1 << $x) > 0)
+    };
+}
+
+macro_rules! set_bit2 {
+    ($n:expr, $x:expr, $v:expr) => {
+        $n &= !(0b11 << $x);
+        $n |= $v << $x;
+    };
+}
+
+pub trait HWBPRegs: AbstractRegs {
+    fn eflags(&mut self) -> &mut u32;
+
+    fn set_step(&mut self, step: bool) {
+        let flags = *self.eflags();
+        *self.eflags() = if step {
+            flags | EFLAGS_TF
+        } else {
+            flags & (!EFLAGS_TF)
+        };
+    }
+
+    #[inline(always)]
+    fn set_rf(&mut self) {
+        *self.eflags() |= EFLAGS_RF;
+    }
+
+    #[inline(always)]
+    fn test_eflags(&mut self, flag: u32) -> bool {
+        *self.eflags() & flag > 0
+    }
+
+    fn empty(&self) -> bool {
+        let n = self.dr(7);
+        !test_bit!(n, L0) && !test_bit!(n, L1) && !test_bit!(n, L2) && !test_bit!(n, L3)
+    }
+
+    fn l_enable(&mut self, enable: bool) {
+        let mut dr7 = self.dr(7);
+        set_bit!(dr7, L_ENABLE, enable);
+        self.set_dr(7, dr7);
+    }
+
+    fn set_local(&mut self, idx: usize, set: bool) {
+        let x = match idx {
+            0 => L0,
+            1 => L1,
+            2 => L2,
+            _ => L3,
+        };
+        let mut dr7 = self.dr(7);
+        set_bit!(dr7, x, set);
+        self.set_dr(7, dr7);
+    }
+
+    fn set_rw(&mut self, idx: usize, val: u8) {
+        let x = match idx {
+            0 => RW0,
+            1 => RW1,
+            2 => RW2,
+            _ => RW3,
+        } as reg_t;
+        let mut dr7 = self.dr(7);
+        set_bit2!(dr7, x, val as reg_t);
+        self.set_dr(7, dr7);
+    }
+
+    fn set_len(&mut self, idx: usize, val: u8) {
+        let x = match idx {
+            0 => LEN0,
+            1 => LEN1,
+            2 => LEN2,
+            _ => LEN3,
+        } as reg_t;
+        let mut dr7 = self.dr(7);
+        set_bit2!(dr7, x, val as reg_t);
+        self.set_dr(7, dr7);
+    }
+
+    fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8) {
+        self.l_enable(true);
+        self.set_local(idx, true);
+        self.set_rw(idx, rw);
+        self.set_len(idx, len);
+        self.set_dr(idx.min(3), address as _);
+    }
+
+    fn unset_bp(&mut self, idx: usize) {
+        self.set_local(idx, false);
+        self.set_rw(idx, 0);
+        self.set_len(idx, 0);
+        self.set_dr(idx.min(3), 0);
+        if self.empty() {
+            self.l_enable(false);
+        }
+    }
+
+    fn dr(&self, i: usize) -> reg_t;
+    fn set_dr(&mut self, i: usize, v: reg_t);
+}
+
 pub trait AbstractRegs {
     type REG: FromUsize + Copy = reg_t;
 
@@ -1282,6 +1415,7 @@ pub fn get_regid(r: &str) -> Option<u32> {
         "edi" => X86_REG_EDI,
         "eip" => X86_REG_EIP,
         "_pc" => COMM_REG_PC,
+        "_ip" => COMM_REG_PC,
         "_sp" => COMM_REG_SP,
         "eflags" => X86_REG_EFLAGS,
         _ => {

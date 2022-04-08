@@ -11,7 +11,6 @@ use crate::os::CommonAdaptor;
 use crate::{
     os::{self, pid_t, tid_t, StandardAdaptor, WAIT_PID_FLAG},
     prelude::*,
-    register::AbstractRegs,
 };
 
 impl StandardAdaptor {
@@ -34,9 +33,11 @@ impl StandardAdaptor {
                 }
                 -1 => Err(UDbgError::system()),
                 pid => {
+                    waitpid(None, Some(WAIT_PID_FLAG())).context("waitpid")?;
                     let ps = Process::from_pid(pid)?;
                     let this = Self(CommonAdaptor::new(ps));
-                    // this.insert_thread(pid); // child maybe not prepared, setoptions after waitpid
+                    this.base().status.set(UDbgStatus::Attached);
+                    this.insert_thread(pid);
                     Ok(Arc::new(this))
                 }
             }
@@ -45,14 +46,43 @@ impl StandardAdaptor {
 }
 
 pub struct TraceBuf<'a> {
-    pub callback: &'a mut UDbgCallback<'a>,
+    pub callback: *mut UDbgCallback<'a>,
     pub target: Arc<StandardAdaptor>,
+    pub user: libc::user,
+    pub regs_dirty: bool,
 }
 
 impl TraceBuf<'_> {
     #[inline]
     pub fn call(&mut self, event: UEvent) -> UserReply {
-        (self.callback)(self.target.clone(), event)
+        unsafe { (self.callback.as_mut().unwrap())(self, event) }
+    }
+
+    pub fn update_regs(&mut self, tid: pid_t) {
+        ptrace::getregs(Pid::from_raw(tid))
+            .log_error("getregs")
+            .map(|regs| {
+                self.user.regs = regs;
+                self.regs_dirty = true;
+            });
+    }
+
+    // pub fn set_regs(&self) -> UDbgResult<()> {
+    //     ptrace::setregs(Pid::from_raw(self.base.event_tid.get()), unsafe {
+    //         *self.regs.get()
+    //     })
+    //     .context("")?;
+    //     Ok(())
+    // }
+}
+
+impl TraceContext for TraceBuf<'_> {
+    fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
+        Some(&mut self.user.regs)
+    }
+
+    fn target(&self) -> Arc<dyn UDbgAdaptor> {
+        self.target.clone()
     }
 }
 
@@ -110,7 +140,7 @@ impl EventHandler for DefaultEngine {
                 .or_else(|| {
                     self.targets
                         .iter()
-                        .find(|&t| procfs::process::Task::new(t.ps.pid, self.tid).is_ok())
+                        .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
                         .cloned()
                 })
                 .expect("not traced target");
@@ -131,8 +161,7 @@ impl EventHandler for DefaultEngine {
 
         Some(match status {
             WaitStatus::Stopped(_, sig) => loop {
-                this.update_regs(tid);
-                let regs = unsafe { &mut *this.regs.get() };
+                buf.update_regs(tid);
                 match sig {
                     // maybe thread created (by ptrace_attach or ptrace_interrupt) (in PTRACE_EVENT_CLONE)
                     // maybe kill by SIGSTOP
@@ -156,24 +185,11 @@ impl EventHandler for DefaultEngine {
                     #[cfg(any(target_os = "linux", target_os = "android"))]
                     Signal::SIGTRAP | Signal::SIGILL => {
                         let si = ptrace::getsiginfo(Pid::from_raw(tid)).expect("siginfo");
-                        // let info = this.ps.siginfo(tid).expect("siginfo");
-                        println!("stop info: {si:?}, pc: {:p}", unsafe { si.si_addr() });
-                        // match info.si_code {
-                        //     TRAP_BRKPT => println!("info.si_code TRAP_BRKPT"),
-                        //     TRAP_HWBKPT => println!("info.si_code TRAP_HWBKPT"),
-                        //     TRAP_TRACE => println!("info.si_code TRAP_TRACE"),
-                        //     code => println!("info.si_code {}", code),
-                        // };
-                        let ip = *regs.ip();
-                        let address = if sig == Signal::SIGTRAP && ip > 0 {
-                            ip - 1
-                        } else {
-                            ip
-                        };
-                        *regs.ip() = address;
-                        // println!("sigtrap address {:x}", address);
-                        if let Some(bp) = this.get_bp_(address as BpID) {
-                            this.handle_breakpoint(this.as_ref(), tid, &si, bp, buf);
+                        if this
+                            .handle_breakpoint(this.as_ref(), self, buf, &si)
+                            .log_error("handle trap")
+                            .is_some()
+                        {
                             break None;
                         }
                     }
@@ -254,7 +270,12 @@ impl EventHandler for DefaultEngine {
                 }
             }
         }
-        ptrace::cont(Pid::from_raw(self.tid as _), sig);
+        let tid = Pid::from_raw(self.tid as _);
+        if buf.regs_dirty {
+            buf.regs_dirty = false;
+            ptrace::setregs(tid, buf.user.regs);
+        }
+        ptrace::cont(tid, sig);
     }
 }
 
@@ -267,7 +288,7 @@ impl UDbgEngine for DefaultEngine {
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads
-        for tid in this.ps.enum_thread() {
+        for tid in this.process.enum_thread() {
             ptrace::attach(Pid::from_raw(tid)).context("attach")?;
             // this.threads.write().insert(tid);
             this.insert_thread(tid);
@@ -289,6 +310,7 @@ impl UDbgEngine for DefaultEngine {
     ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let result = StandardAdaptor::create(path, args)?;
         self.targets.push(result.clone());
+        self.tid = result.pid();
         Ok(result)
     }
 
@@ -299,15 +321,10 @@ impl UDbgEngine for DefaultEngine {
             t.update_memory_page();
         });
 
-        // if self.base.is_opened() {
-        //     use std::time::Duration;
-        //     while self.base.status.get() != UDbgStatus::Ended {
-        //         std::thread::sleep(Duration::from_millis(10));
-        //     }
-        //     return Ok(());
-        // }
         let mut buf = TraceBuf {
             callback,
+            user: unsafe { core::mem::zeroed() },
+            regs_dirty: false,
             target: self
                 .targets
                 .iter()
@@ -316,12 +333,8 @@ impl UDbgEngine for DefaultEngine {
                 .expect("no attached target"),
         };
 
-        if self.fetch(&mut buf).is_some() {
-            buf.target.base().status.set(UDbgStatus::Attached);
-            buf.target.insert_thread(self.tid);
-            buf.call(UEvent::InitBp);
-            self.cont(None, &mut buf);
-        }
+        buf.call(UEvent::InitBp);
+        self.cont(None, &mut buf);
 
         while let Some(s) = self.fetch(&mut buf).and_then(|_| self.handle(&mut buf)) {
             self.cont(s, &mut buf);

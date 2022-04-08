@@ -44,248 +44,70 @@ pub enum HandleResult {
 // pub const DBG_PRINTEXCEPTION_C: u32 = 0x40010006;
 // pub const DBG_PRINTEXCEPTION_WIDE_C: u32 = 0x4001000A;
 
-macro_rules! set_bit {
-    ($n:expr, $x:expr, $set:expr) => {
-        if $set {
-            $n |= 1 << $x;
-        } else {
-            $n &= !(1 << $x);
-        }
-    };
-}
-
-macro_rules! test_bit {
-    ($n:expr, $x:expr) => {
-        ($n & (1 << $x) > 0)
-    };
-}
-
-macro_rules! set_bit2 {
-    ($n:expr, $x:expr, $v:expr) => {
-        $n &= !(0b11 << $x);
-        $n |= $v << $x;
-    };
-}
-
-const L0: usize = 0;
-const G0: usize = 1;
-const L1: usize = 2;
-const G1: usize = 3;
-const L2: usize = 4;
-const G2: usize = 5;
-const L3: usize = 5;
-const G3: usize = 7;
-const L_ENABLE: usize = 8;
-const G_ENABLE: usize = 9;
-const RW0: usize = 16;
-const LEN0: usize = 18;
-const RW1: usize = 20;
-const LEN1: usize = 22;
-const RW2: usize = 24;
-const LEN2: usize = 26;
-const RW3: usize = 28;
-const LEN3: usize = 30;
-
-pub trait HWBPRegs: AbstractRegs {
-    fn set_step(&mut self, step: bool);
-    fn set_rf(&mut self);
-    fn test_eflags(&self, flag: u32) -> bool;
-
-    fn l_enable(&mut self, enable: bool);
-    fn set_local(&mut self, idx: usize, set: bool);
-    fn set_rw(&mut self, idx: usize, val: u8);
-    fn set_len(&mut self, idx: usize, val: u8);
-
-    fn empty(&self) -> bool;
-
-    fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8);
-    fn unset_bp(&mut self, idx: usize);
-
-    fn dr6(&self) -> usize;
-}
-
 #[cfg(target_arch = "x86_64")]
 impl HWBPRegs for CONTEXT {
-    fn set_step(&mut self, step: bool) {
-        let flags = self.EFlags;
-        self.EFlags = if step {
-            flags | EFLAGS_TF
-        } else {
-            flags & (!EFLAGS_TF)
-        };
+    #[inline(always)]
+    fn eflags(&mut self) -> &mut u32 {
+        &mut self.EFlags
     }
 
-    fn set_rf(&mut self) {
-        self.EFlags |= EFLAGS_RF;
-    }
-
-    fn test_eflags(&self, flag: u32) -> bool {
-        self.EFlags & flag > 0
-    }
-
-    fn l_enable(&mut self, enable: bool) {
-        set_bit!(self.Dr7, L_ENABLE, enable);
-    }
-
-    fn set_local(&mut self, idx: usize, set: bool) {
-        let x = match idx {
-            0 => L0,
-            1 => L1,
-            2 => L2,
-            _ => L3,
-        };
-        set_bit!(self.Dr7, x, set);
-    }
-
-    fn set_rw(&mut self, idx: usize, val: u8) {
-        let x = match idx {
-            0 => RW0,
-            1 => RW1,
-            2 => RW2,
-            _ => RW3,
-        };
-        set_bit2!(self.Dr7, x, (val as Self::REG));
-    }
-
-    fn set_len(&mut self, idx: usize, val: u8) {
-        let x = match idx {
-            0 => LEN0,
-            1 => LEN1,
-            2 => LEN2,
-            _ => LEN3,
-        };
-        set_bit2!(self.Dr7, x, (val as Self::REG));
-    }
-
-    fn empty(&self) -> bool {
-        let n = self.Dr7;
-        !test_bit!(n, L0) && !test_bit!(n, L1) && !test_bit!(n, L2) && !test_bit!(n, L3)
-    }
-
-    fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8) {
-        self.l_enable(true);
-        self.set_local(idx, true);
-        self.set_rw(idx, rw);
-        self.set_len(idx, len);
-        let address = address as Self::REG;
-        match idx {
-            0 => self.Dr0 = address,
-            1 => self.Dr1 = address,
-            2 => self.Dr2 = address,
-            _ => self.Dr3 = address,
-        };
-    }
-
-    fn unset_bp(&mut self, idx: usize) {
-        self.set_local(idx, false);
-        self.set_rw(idx, 0);
-        self.set_len(idx, 0);
-        match idx {
-            0 => self.Dr0 = 0,
-            1 => self.Dr1 = 0,
-            2 => self.Dr2 = 0,
-            _ => self.Dr3 = 0,
-        };
-        if self.empty() {
-            self.l_enable(false);
+    #[inline(always)]
+    fn dr(&self, i: usize) -> reg_t {
+        match i {
+            0 => self.Dr0,
+            1 => self.Dr1,
+            2 => self.Dr2,
+            3 => self.Dr3,
+            6 => self.Dr6,
+            7 => self.Dr7,
+            _ => unreachable!(),
         }
     }
 
     #[inline(always)]
-    fn dr6(&self) -> usize {
-        self.Dr6 as usize
+    fn set_dr(&mut self, i: usize, v: reg_t) {
+        *match i {
+            0 => &mut self.Dr0,
+            1 => &mut self.Dr1,
+            2 => &mut self.Dr2,
+            3 => &mut self.Dr3,
+            6 => &mut self.Dr6,
+            7 => &mut self.Dr7,
+            _ => unreachable!(),
+        } = v;
     }
 }
 
 impl HWBPRegs for CONTEXT32 {
-    fn set_step(&mut self, step: bool) {
-        let flags = self.EFlags;
-        self.EFlags = if step {
-            flags | EFLAGS_TF
-        } else {
-            flags & (!EFLAGS_TF)
-        };
-    }
-
-    fn set_rf(&mut self) {
-        self.EFlags |= EFLAGS_RF;
-    }
-
-    fn test_eflags(&self, flag: u32) -> bool {
-        self.EFlags & flag > 0
-    }
-
-    fn l_enable(&mut self, enable: bool) {
-        set_bit!(self.Dr7, L_ENABLE, enable);
-    }
-
-    fn set_local(&mut self, idx: usize, set: bool) {
-        let x = match idx {
-            0 => L0,
-            1 => L1,
-            2 => L2,
-            _ => L3,
-        };
-        set_bit!(self.Dr7, x, set);
-    }
-
-    fn set_rw(&mut self, idx: usize, val: u8) {
-        let x = match idx {
-            0 => RW0,
-            1 => RW1,
-            2 => RW2,
-            _ => RW3,
-        };
-        set_bit2!(self.Dr7, x, (val as Self::REG));
-    }
-
-    fn set_len(&mut self, idx: usize, val: u8) {
-        let x = match idx {
-            0 => LEN0,
-            1 => LEN1,
-            2 => LEN2,
-            _ => LEN3,
-        };
-        set_bit2!(self.Dr7, x, (val as Self::REG));
-    }
-
-    fn empty(&self) -> bool {
-        let n = self.Dr7;
-        !test_bit!(n, L0) && !test_bit!(n, L1) && !test_bit!(n, L2) && !test_bit!(n, L3)
-    }
-
-    fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8) {
-        self.l_enable(true);
-        self.set_local(idx, true);
-        self.set_rw(idx, rw);
-        self.set_len(idx, len);
-        let address = address as Self::REG;
-        match idx {
-            0 => self.Dr0 = address,
-            1 => self.Dr1 = address,
-            2 => self.Dr2 = address,
-            _ => self.Dr3 = address,
-        };
-    }
-
-    fn unset_bp(&mut self, idx: usize) {
-        self.set_local(idx, false);
-        self.set_rw(idx, 0);
-        self.set_len(idx, 0);
-        match idx {
-            0 => self.Dr0 = 0,
-            1 => self.Dr1 = 0,
-            2 => self.Dr2 = 0,
-            _ => self.Dr3 = 0,
-        };
-        if self.empty() {
-            self.l_enable(false);
-        }
+    #[inline(always)]
+    fn eflags(&mut self) -> &mut u32 {
+        &mut self.EFlags
     }
 
     #[inline(always)]
-    fn dr6(&self) -> usize {
-        self.Dr6 as usize
+    fn dr(&self, i: usize) -> reg_t {
+        (match i {
+            0 => self.Dr0,
+            1 => self.Dr1,
+            2 => self.Dr2,
+            3 => self.Dr3,
+            6 => self.Dr6,
+            7 => self.Dr7,
+            _ => unreachable!(),
+        }) as reg_t
+    }
+
+    #[inline(always)]
+    fn set_dr(&mut self, i: usize, v: reg_t) {
+        *match i {
+            0 => &mut self.Dr0,
+            1 => &mut self.Dr1,
+            2 => &mut self.Dr2,
+            3 => &mut self.Dr3,
+            6 => &mut self.Dr6,
+            7 => &mut self.Dr7,
+            _ => unreachable!(),
+        } = v as _;
     }
 }
 
@@ -902,13 +724,11 @@ impl TargetSymbol for SymbolManager<WinModule> {
     }
 }
 
+#[derive(Deref)]
 pub struct CommonAdaptor {
-    pub base: TargetBase,
-    dbg_reg: [Cell<usize>; 4],
-    pub symgr: SymbolManager<WinModule>,
+    #[deref]
+    _base: CommonBase,
     pub protected_thread: RwLock<Vec<u32>>,
-    pub process: Process,
-    pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
     pub context: Cell<*mut CONTEXT>,
     pub cx32: Cell<*mut CONTEXT32>,
     pub step_tid: Cell<u32>,
@@ -934,6 +754,10 @@ where
             0 => None,
             s => Some(s),
         }
+    }
+
+    default fn flush_cache(&self, address: usize, len: usize) -> IoRes<()> {
+        self.process.flush_cache(address, len)
     }
 }
 
@@ -968,52 +792,23 @@ where
     }
 }
 
-impl<T> BreakpointManager for T
-where
-    T: Deref<Target = CommonAdaptor> + UDbgAdaptor,
-{
-    default fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
-        Ok(self.deref().add_bp(self, &opt)?)
-    }
-
-    default fn get_bp(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
-        Some(self.deref().bp_map.read().get(&id)?.clone())
-    }
-
-    default fn get_bp_list(&self) -> Vec<BpID> {
-        self.deref().get_bp_list()
-    }
-}
-
 impl CommonAdaptor {
-    pub fn new(mut base: TargetBase, p: Process) -> CommonAdaptor {
+    pub fn new(p: Process) -> CommonAdaptor {
         let ui = udbg_ui();
-        let symbol_cache = ui
-            .get_config::<String>("symbol_cache")
-            .or_else(|| {
-                let var = std::env::var("_NT_SYMBOL_PATH").ok();
-                var.and_then(|s| s.split('*').nth(1).map(ToString::to_string))
-            })
-            .unwrap_or_default();
-        let sds = ui.get_config::<bool>("show_debug_string").unwrap_or(true);
-        let symgr = SymbolManager::new(symbol_cache.into());
-        symgr.is_wow64.set(p.is_wow64());
         let image_base = p
             .peb()
             .and_then(|peb| p.read_value::<PEB>(peb))
             .map(|peb| peb.ImageBaseAddress)
             .unwrap_or(null_mut()) as usize;
-        base.pid.set(p.pid());
+        let mut base = CommonBase::new(p);
+        let sds = ui.get_config::<bool>("show_debug_string").unwrap_or(true);
+        base.symgr.is_wow64.set(base.process.is_wow64());
         base.image_base = image_base;
 
         let result = Self {
-            process: p,
-            dbg_reg: Default::default(),
-            bp_map: RwLock::new(HashMap::new()),
+            _base: base,
             show_debug_string: sds.into(),
             protected_thread: vec![].into(),
-            base,
-            symgr,
             step_tid: Cell::new(0),
             cx32: Cell::new(null_mut()),
             context: Cell::new(null_mut()),
@@ -1025,19 +820,6 @@ impl CommonAdaptor {
 
     pub fn get_mapped_file_name(&self, module: usize) -> Option<String> {
         self.process.get_mapped_file_name(module)
-    }
-
-    pub fn get_hwbp_index(&self) -> Option<usize> {
-        for (i, p) in self.dbg_reg.iter().enumerate() {
-            if p.get() == 0 {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    pub fn occupy_hwbp_index(&self, index: usize, p: usize) {
-        self.dbg_reg[index].set(p);
     }
 
     pub fn get_registers(&self, tid: u32) -> Option<Registers> {
@@ -1107,16 +889,14 @@ impl CommonAdaptor {
             UserReply::StepOut => {
                 if let Some(address) = this.check_call(exception.address as _) {
                     context.set_step(false);
-                    self.check_result(
-                        "add bp",
-                        self.add_int3_bp(
-                            this,
-                            &BpOpt::int3(address)
-                                .temp(true)
-                                .enable(true)
-                                .thread(self.base.event_tid.get()),
-                        ),
-                    );
+                    self.add_int3_bp(
+                        this,
+                        &BpOpt::int3(address)
+                            .temp(true)
+                            .enable(true)
+                            .thread(self.base.event_tid.get()),
+                    )
+                    .log_error("add bp");
                 } else {
                     context.set_step(true);
                     self.step_tid.set(tid);
@@ -1124,10 +904,8 @@ impl CommonAdaptor {
                 }
             }
             UserReply::Goto(address) => {
-                self.check_result(
-                    "add bp",
-                    self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true)),
-                );
+                self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true))
+                    .log_error("add bp");
             }
             _ => {}
         };
@@ -1135,13 +913,6 @@ impl CommonAdaptor {
 
     fn get_bp(&self, id: BpID) -> Option<Arc<Breakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
-    }
-
-    fn check_result<T>(&self, msg: &str, r: UDbgResult<T>) {
-        match r {
-            Ok(_) => {}
-            Err(e) => udbg_ui().error(&format!("{}: {:?}", msg, e)),
-        }
     }
 
     pub fn user_handle_exception(&self, first: bool, tb: &mut TraceBuf) -> HandleResult {
@@ -1182,7 +953,7 @@ impl CommonAdaptor {
         context: &mut C,
     ) -> HandleResult {
         let address = tb.record.address;
-        let dr6 = context.dr6();
+        let dr6 = context.dr(6);
         let id: BpID = if dr6 & 0x01 > 0 {
             -1
         } else if dr6 & 0x02 > 0 {
@@ -1262,12 +1033,13 @@ impl CommonAdaptor {
         }
 
         let id = bp.get_id();
-        // int3断点需要特殊处理 revert
+        // int3 breakpoint revert
         if bp.is_soft() && self.get_bp(id).is_some() {
-            // 中断过程中，断点没有被用户删除
+            // if bp is not deleted by user during the interruption
             if bp.enabled.get() {
-                // 暂时禁用，以便能继续运行
-                self.check_result("disable bp", self.enable_breadpoint(this, &bp, false));
+                // disabled temporarily, in order to be able to continue
+                self.enable_breadpoint(this, &bp, false)
+                    .log_error("disable bp");
 
                 // step once and revert
                 let user_step = context.test_eflags(EFLAGS_TF);
@@ -1282,10 +1054,20 @@ impl CommonAdaptor {
                                 && self.base.event_tid.get() == tid
                             {
                                 // TODO: maybe other exception?
-                                assert!(matches!(
+                                // assert!(matches!(
+                                //     tb.record.code,
+                                //     EXCEPTION_SINGLE_STEP | EXCEPTION_WX86_SINGLE_STEP
+                                // ));
+                                if !matches!(
                                     tb.record.code,
                                     EXCEPTION_SINGLE_STEP | EXCEPTION_WX86_SINGLE_STEP
-                                ));
+                                ) {
+                                    udbg_ui().warn(format!(
+                                        "[bp]@{:x} expect step, but {:x} occured",
+                                        bp.address, tb.record.code
+                                    ));
+                                    return HandleResult::NotHandled;
+                                }
                                 break;
                             } else if let Some(s) = eh.handle(tb) {
                                 eh.cont(s, tb);
@@ -1296,7 +1078,8 @@ impl CommonAdaptor {
                         None => return HandleResult::Handled,
                     }
                 }
-                self.check_result("enable bp", self.enable_breadpoint(this, &bp, true));
+                self.enable_breadpoint(this, &bp, true)
+                    .log_error("enable bp");
                 return if user_step {
                     eh.handle(tb).unwrap_or(HandleResult::Handled)
                 } else {
@@ -1349,136 +1132,6 @@ impl CommonAdaptor {
             dbg: self,
             address: 0,
         }))
-    }
-
-    pub fn find_table_bp_index(&self) -> Option<isize> {
-        for i in -10000..-10 {
-            if self.bp_map.read().get(&i).is_none() {
-                return Some(i);
-            }
-        }
-        None
-    }
-
-    fn add_int3_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
-        // int3 breakpoint
-        if let Some(raw_byte) = this.read_value::<BpInsn>(opt.address) {
-            let bp = Arc::new(Breakpoint {
-                address: opt.address,
-                enabled: Cell::new(false),
-                temp: Cell::new(opt.temp),
-                hit_tid: opt.tid,
-                hit_count: Cell::new(0),
-                bp_type: InnerBpType::Soft(raw_byte),
-
-                target: unsafe { Utils::to_weak(this) },
-                common: self,
-            });
-            if opt.enable {
-                self.enable_breadpoint(this, &bp, true)?;
-            }
-            self.bp_map.write().insert(bp.get_id(), bp.clone());
-            Ok(bp)
-        } else {
-            Err(UDbgError::InvalidAddress)
-        }
-    }
-
-    pub fn add_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
-        self.base.check_opened()?;
-        if self.bp_exists(opt.address as BpID) {
-            return Err(UDbgError::BpExists);
-        }
-
-        let bp = if let Some(rw) = opt.rw {
-            // hardware breakpoint
-            if let Some(index) = self.get_hwbp_index() {
-                let bp = Arc::new(Breakpoint {
-                    address: opt.address,
-                    enabled: Cell::new(false),
-                    temp: Cell::new(opt.temp),
-                    hit_count: Cell::new(0),
-                    hit_tid: opt.tid,
-                    bp_type: InnerBpType::Hard(HwbpInfo {
-                        rw: rw.into(),
-                        index: index as u8,
-                        len: opt.len.unwrap_or(HwbpLen::L1).into(),
-                    }),
-
-                    target: unsafe { Utils::to_weak(this) },
-                    common: self,
-                });
-                self.occupy_hwbp_index(index, opt.address);
-                // 硬件断点额外记录
-                self.bp_map.write().insert(-(index as BpID + 1), bp.clone());
-                Ok(bp)
-            } else {
-                Err(UDbgError::HWBPSlotMiss)
-            }
-        } else if opt.table {
-            // table breakpoint
-            let origin = this.read_ptr(opt.address).ok_or("read origin failed")?;
-            let index = self.find_table_bp_index().ok_or("no more table index")?;
-            let bp = Arc::new(Breakpoint {
-                address: opt.address,
-                enabled: Cell::new(false),
-                temp: Cell::new(opt.temp),
-                hit_count: Cell::new(0),
-                hit_tid: opt.tid,
-                bp_type: InnerBpType::Table { index, origin },
-
-                target: unsafe { Utils::to_weak(this) },
-                common: self,
-            });
-            self.bp_map.write().insert(index, bp.clone());
-            Ok(bp)
-        } else {
-            self.add_int3_bp(this, opt)
-        }?;
-        let bpid = bp.get_id();
-        self.bp_map.write().insert(bpid, bp.clone());
-
-        if opt.enable {
-            self.check_result("enable bp falied", self.enable_breadpoint(this, &bp, true));
-        }
-        Ok(bp)
-    }
-
-    pub fn remove_breakpoint(&self, this: &dyn UDbgAdaptor, bp: &Breakpoint) {
-        let mut hard_id = 0;
-        let mut table_index = None;
-        self.check_result(
-            "disable bp falied",
-            self.enable_breadpoint(this, &bp, false),
-        );
-        if self.bp_map.write().remove(&bp.get_id()).is_some() {
-            match bp.bp_type {
-                InnerBpType::Hard(info) => {
-                    self.occupy_hwbp_index(info.index as usize, 0);
-                    hard_id = -(info.index as BpID + 1);
-                }
-                InnerBpType::Table { index, .. } => {
-                    table_index = Some(index);
-                }
-                _ => {}
-            }
-        }
-        // delete hardware breakpoint
-        if hard_id < 0 {
-            self.bp_map.write().remove(&hard_id);
-        }
-        // delete table breakpoint
-        table_index.map(|i| self.bp_map.write().remove(&i));
-    }
-
-    #[inline]
-    pub fn enable_hwbp_for_context<C: DbgContext>(&self, cx: &mut C, info: HwbpInfo, enable: bool) {
-        let i = info.index as usize;
-        if enable {
-            cx.set_bp(self.dbg_reg[i].get(), i, info.rw, info.len);
-        } else {
-            cx.unset_bp(i);
-        }
     }
 
     pub fn enable_hwbp_for_thread(
@@ -1538,117 +1191,63 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn enable_breadpoint(
+    pub fn enable_hwbp(
         &self,
         dbg: &dyn UDbgAdaptor,
         bp: &Breakpoint,
+        info: HwbpInfo,
         enable: bool,
     ) -> UDbgResult<bool> {
-        match bp.bp_type {
-            InnerBpType::Soft(raw_byte) => {
-                let written = if enable {
-                    self.process.write_code(bp.address, &[0xCC])
-                } else {
-                    self.process.write_code(bp.address, &raw_byte)
-                };
-                // println!("enable softbp @{:x} {} {:?}", bp.address, enable, written);
-                if written.unwrap_or_default() > 0 {
-                    bp.enabled.set(enable);
-                    Ok(enable)
-                } else {
-                    Err(UDbgError::MemoryError)
-                }
+        let mut result = Ok(enable);
+        // Set Context for each thread
+        for tid in self.enum_thread()? {
+            // Ignore threads
+            if self.protected_thread.read().contains(&tid) {
+                continue;
             }
-            InnerBpType::Table { index, origin } => {
-                let r = if enable {
-                    dbg.write_ptr(bp.address, index as usize)
-                } else {
-                    dbg.write_ptr(bp.address, origin)
-                };
-                if r.is_some() {
-                    bp.enabled.set(enable);
-                    Ok(enable)
-                } else {
-                    Err(UDbgError::MemoryError)
-                }
+            if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) {
+                continue;
             }
-            InnerBpType::Hard(info) => {
-                let mut result = Ok(enable);
-                // Set Context for each thread
-                for tid in self.enum_thread()? {
-                    // Ignore threads
-                    if self.protected_thread.read().contains(&tid) {
-                        continue;
-                    }
-                    if bp.hit_tid.is_some() && bp.hit_tid != Some(tid) {
-                        continue;
-                    }
-                    // Set Debug Register
-                    let th = match dbg.open_thread(tid) {
-                        Ok(r) => r,
-                        Err(e) => {
-                            udbg_ui().error(format!("open thread {} failed {:?}", tid, e));
-                            continue;
-                        }
-                    };
-                    result = self.enable_hwbp_for_thread(*th.handle, info, enable);
-                    if let Err(e) = &result {
-                        udbg_ui()
-                            .error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
-                        // break;
-                    }
+            // Set Debug Register
+            let th = match dbg.open_thread(tid) {
+                Ok(r) => r,
+                Err(e) => {
+                    udbg_ui().error(format!("open thread {} failed {:?}", tid, e));
+                    continue;
                 }
-                // Set Context for current thread
-                for _ in 0..1 {
-                    if bp.hit_tid.is_some() && bp.hit_tid != Some(self.base.event_tid.get()) {
-                        break;
-                    }
-                    if !self.context.get().is_null() {
-                        self.enable_hwbp_for_context(
-                            unsafe { self.context.get().as_mut().unwrap() },
-                            info,
-                            enable,
-                        );
-                    }
-                    let cx32 = self.cx32.get();
-                    if !cx32.is_null() {
-                        self.enable_hwbp_for_context(
-                            unsafe { self.cx32.get().as_mut().unwrap() },
-                            info,
-                            enable,
-                        );
-                    }
-                }
-                // TODO: wow64
-                if result.is_ok() {
-                    bp.enabled.set(enable);
-                }
-                result
+            };
+            result = self.enable_hwbp_for_thread(*th.handle, info, enable);
+            if let Err(e) = &result {
+                udbg_ui().error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
+                // break;
             }
         }
-    }
-
-    pub fn enable_bp(
-        &self,
-        dbg: &dyn UDbgAdaptor,
-        id: BpID,
-        enable: bool,
-    ) -> Result<bool, UDbgError> {
-        if let Some(bp) = self.bp_map.read().get(&id) {
-            self.enable_breadpoint(dbg, bp, enable)
-        } else {
-            Err(UDbgError::NotFound)
+        // Set Context for current thread
+        for _ in 0..1 {
+            if bp.hit_tid.is_some() && bp.hit_tid != Some(self.base.event_tid.get()) {
+                break;
+            }
+            if !self.context.get().is_null() {
+                self.enable_hwbp_for_context(
+                    unsafe { self.context.get().as_mut().unwrap() },
+                    info,
+                    enable,
+                );
+            }
+            let cx32 = self.cx32.get();
+            if !cx32.is_null() {
+                self.enable_hwbp_for_context(
+                    unsafe { self.cx32.get().as_mut().unwrap() },
+                    info,
+                    enable,
+                );
+            }
         }
-    }
-
-    #[inline]
-    pub fn get_bp_list(&self) -> Vec<BpID> {
-        self.bp_map
-            .read()
-            .keys()
-            .filter(|&id| *id > 0)
-            .cloned()
-            .collect()
+        // TODO: wow64
+        if result.is_ok() {
+            bp.enabled.set(enable);
+        }
+        result
     }
 
     pub fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
@@ -1979,12 +1578,8 @@ impl StandardAdaptor {
     }
 
     fn new(p: Process) -> Arc<Self> {
-        let mut base = TargetBase::default();
-        base.pid.set(p.pid());
-        base.image_path = p.image_path().unwrap_or_default();
-
         Arc::new(Self {
-            _common: CommonAdaptor::new(base, p),
+            _common: CommonAdaptor::new(p),
             record: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             threads: HashMap::new().into(),
             attached: false.into(),
@@ -2171,23 +1766,10 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {
-    fn except_param(&self, i: usize) -> Option<usize> {
-        self.record().params.get(i).map(|v| *v as usize)
-    }
-
-    fn get_registers<'a>(&'a self) -> UDbgResult<&'a mut dyn UDbgRegs> {
-        let p = self.cx32.get();
-        if p.is_null() {
-            Ok(self.context().ok_or(UDbgError::TargetIsBusy)?)
-        } else {
-            Ok(unsafe { &mut *p })
-        }
-    }
-}
+impl UDbgAdaptor for StandardAdaptor {}
 
 pub struct TraceBuf<'a> {
-    pub callback: &'a mut UDbgCallback<'a>,
+    pub callback: *mut UDbgCallback<'a>,
     pub target: Arc<StandardAdaptor>,
     pub record: ExceptionRecord,
     pub cx: *mut CONTEXT,
@@ -2197,7 +1779,21 @@ pub struct TraceBuf<'a> {
 impl TraceBuf<'_> {
     #[inline]
     pub fn call(&mut self, event: UEvent) -> UserReply {
-        (self.callback)(self.target.clone(), event)
+        unsafe { (self.callback.as_mut().unwrap())(self, event) }
+    }
+}
+
+impl TraceContext for TraceBuf<'_> {
+    fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
+        Some(unsafe { self.cx.as_mut() }?)
+    }
+
+    fn target(&self) -> Arc<dyn UDbgAdaptor> {
+        self.target.clone()
+    }
+
+    fn exception_param(&self, i: usize) -> Option<usize> {
+        self.record.params.get(i).map(|v| *v as usize)
     }
 }
 

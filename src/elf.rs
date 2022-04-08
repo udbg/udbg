@@ -1,6 +1,6 @@
 //! ELF file helper
 
-use goblin::elf::{sym::Sym, Elf};
+use goblin::elf::{header::*, sym::Sym, Elf};
 use goblin::strtab::Strtab;
 
 #[derive(Deref, Clone)]
@@ -30,10 +30,9 @@ pub struct ElfHelper<'a>(Elf<'a>);
 
 impl<'a> ElfHelper<'a> {
     pub fn enum_export(&'a self) -> impl 'a + Iterator<Item = ElfSym<'a>> {
-        self.0
-            .dynsyms
-            .iter()
-            .filter_map(move |s| get_symbol(&self.0.dynstrtab, &s))
+        self.0.dynsyms.iter().filter_map(move |s| {
+            get_symbol(&self.0.dynstrtab, &s).or_else(|| get_symbol(&self.0.strtab, &s))
+        })
     }
 
     pub fn enum_symbol(&'a self) -> impl 'a + Iterator<Item = ElfSym<'a>> {
@@ -72,16 +71,8 @@ impl<'a> ElfHelper<'a> {
             EM_X86_64 => "x86_64",
             EM_MIPS => "mips",
             EM_ARM => "arm",
-            EM_ARM64 => "arm64",
+            EM_AARCH64 => "arm64",
             _ => return None,
         })
     }
 }
-
-pub const EM_386: u16 = 3; //Intel 80386
-pub const EM_860: u16 = 7; //Intel 80860
-pub const EM_960: u16 = 19;
-pub const EM_X86_64: u16 = 62;
-pub const EM_MIPS: u16 = 8; //MIPS I Architecture
-pub const EM_ARM: u16 = 40;
-pub const EM_ARM64: u16 = 183;
