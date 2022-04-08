@@ -2,6 +2,7 @@ mod ffi;
 mod util;
 mod window;
 
+#[cfg(feature = "dbgeng")]
 pub mod dbgeng;
 pub mod ntdll;
 pub mod string;

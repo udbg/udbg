@@ -10,6 +10,9 @@ documentation = "https://docs.rs/udbg"
 repository = "https://github.com/udbg/udbg-base"
 include = ["/src", "README.md", "/examples"]
 
+[features]
+dbgeng = ['windows']
+
 [dependencies]
 cfg-if = '1.0'
 glob = '0.3'
@@ -58,7 +61,7 @@ windows = {version = '0.35', features = [
     "ApplicationModel",
     "Win32_System_WinRT",
     "Win32_System_Diagnostics_Debug",
-]}
+], optional = true}
 ntapi = '0.3'
 unicase = '2.6'
 msvc-demangler = '0.9'
