@@ -79,9 +79,9 @@ impl CommonAdaptor {
                     hit_count: Cell::new(0),
                     hit_tid: opt.tid,
                     bp_type: InnerBpType::Hard(HwbpInfo {
-                        rw: rw.into(),
+                        rw: rw as u8,
                         index: index as u8,
-                        len: opt.len.unwrap_or(HwbpLen::L1).into(),
+                        len: opt.len.unwrap_or(HwbpLen::L1).encode(),
                     }),
 
                     target: unsafe { Utils::to_weak(this) },

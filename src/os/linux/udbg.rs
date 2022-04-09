@@ -10,7 +10,7 @@ use nix::sys::wait::waitpid;
 use parking_lot::RwLock;
 use procfs::process::{Stat as ThreadStat, Task};
 use serde_value::Value;
-use std::cell::Cell;
+use std::cell::{Cell, UnsafeCell};
 use std::collections::HashSet;
 use std::mem::transmute;
 use std::ops::Deref;
@@ -145,6 +145,7 @@ pub struct CommonAdaptor {
     pub detaching: Cell<bool>,
     waiting: Cell<bool>,
     pub trace_opts: Options,
+    pub hwbps: UnsafeCell<user_hwdebug_state>,
 }
 
 impl CommonAdaptor {
@@ -166,6 +167,7 @@ impl CommonAdaptor {
             trace_opts,
             waiting: Cell::new(false),
             detaching: Cell::new(false),
+            hwbps: unsafe { core::mem::zeroed() },
         }
     }
 
@@ -295,7 +297,9 @@ impl CommonAdaptor {
         Some(status)
     }
 
-    fn handle_event(&self, tb: &mut TraceBuf) {}
+    pub fn hwbps(&self) -> &mut user_hwdebug_state {
+        unsafe { self.hwbps.get().as_mut().unwrap() }
+    }
 
     fn handle_reply(
         &self,
@@ -499,7 +503,7 @@ impl CommonAdaptor {
                 continue;
             }
             // Set Debug Register
-            result = self.enable_hwbp_for_thread(tid, info, enable);
+            result = self.enable_hwbp_for_thread(tid, bp, info, enable);
             if let Err(e) = &result {
                 udbg_ui().error(format!("enable_hwbp_for_thread for {} failed {:?}", tid, e));
                 // break;

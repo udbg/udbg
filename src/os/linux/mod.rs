@@ -18,6 +18,12 @@ use std::sync::Arc;
 
 pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
 
+pub const TRAP_BRKPT: i32 = 1;
+pub const TRAP_TRACE: i32 = 2;
+pub const TRAP_BRANCH: i32 = 3;
+pub const TRAP_HWBKPT: i32 = 4;
+pub const TRAP_UNK: i32 = 5;
+
 // pub mod comm;
 mod process;
 mod udbg;
@@ -148,6 +154,7 @@ mod arch_util {
     use super::*;
 
     pub type user_regs = libc::user;
+    pub type user_hwdebug_state = [reg_t; 8];
 
     const OFFSET_DR: usize = memoffset::offset_of!(libc::user, u_debugreg);
     const DEBUGREG_PTR: *const reg_t = OFFSET_DR as _;
@@ -242,6 +249,7 @@ mod arch_util {
         pub fn enable_hwbp_for_thread(
             &self,
             tid: tid_t,
+            _bp: &Breakpoint,
             info: HwbpInfo,
             enable: bool,
         ) -> UDbgResult<bool> {
@@ -292,8 +300,11 @@ mod arch_util {
     use super::*;
     use core::mem::*;
 
-    // https://github.com/innogames/android-ndk/blob/master/platforms/android-9/arch-arm/usr/include/asm/ptrace.h
+    // https://elixir.bootlin.com/linux/latest/source/include/uapi/linux/elf.h
     pub const NT_PRSTATUS: i32 = 1;
+    pub const NT_PRFPREG: i32 = 2;
+    pub const NT_ARM_HW_BREAK: i32 = 0x402;
+    pub const NT_ARM_HW_WATCH: i32 = 0x403;
 
     pub const PTRACE_GETREGS: i32 = 12;
     pub const PTRACE_SETREGS: i32 = 13;
@@ -311,6 +322,18 @@ mod arch_util {
         pub addr: u64,
         pub ctrl: u32,
         pub pad: u32,
+    }
+
+    impl user_hwdebug_state {
+        pub fn watch_len(&self, i: usize) -> usize {
+            match (self.dbg_regs[i].ctrl >> 5) & 0xff {
+                0x01 => 1,
+                0x03 => 2,
+                0x0f => 4,
+                0xff => 8,
+                _ => 0,
+            }
+        }
     }
 
     #[cfg(target_arch = "aarch64")]
@@ -366,14 +389,84 @@ mod arch_util {
         pub fn enable_hwbp_for_thread(
             &self,
             tid: tid_t,
+            bp: &Breakpoint,
             info: HwbpInfo,
             enable: bool,
         ) -> UDbgResult<bool> {
-            Err(UDbgError::NotSupport)
+            let mut dreg = self.hwbps();
+            let i = info.index as usize;
+            dreg.dbg_regs[i].ctrl =
+                ((info.rw as u32) << 3) | ((info.len as u32) << 5) | (2 << 1) | enable as u32;
+            // info!("bp info: {info:?}");
+            // info!(
+            //     "set addr[{i}]: {:x}, ctrl[{i}]: {}",
+            //     bp.address, dreg.dbg_regs[i].ctrl
+            // );
+            dreg.dbg_regs[i].addr = bp.address as _;
+            dreg.ptrace_set(tid).context("set regset")?;
+            Ok(true)
         }
 
         pub fn get_hwbp(&self, tb: &mut TraceBuf) -> Option<Arc<Breakpoint>> {
+            if tb.si.si_code != TRAP_HWBKPT {
+                return None;
+            }
+            let addr = unsafe { tb.si.si_addr() as reg_t };
+            let dreg = self.hwbps();
+            let max_hwbps = 4;
+            // info!("max_hwbps: {max_hwbps} si_addr: {addr:x}");
+            for i in 0..max_hwbps {
+                let a = dreg.dbg_regs[i].addr;
+                let len = dreg.watch_len(i) as reg_t;
+                // info!("  {i} {:x} {a:x}:{len}", dreg.dbg_regs[i].ctrl);
+                if dreg.dbg_regs[i].ctrl & 1 == 1 && addr >= a && addr < a + len {
+                    return self.get_bp_(-(i as isize) - 1);
+                }
+            }
             None
+        }
+    }
+
+    pub trait RegSet: Sized {
+        const NT: i32;
+
+        fn ptrace_get(&mut self, tid: pid_t) -> nix::Result<libc::c_long> {
+            unsafe {
+                let mut io = iovec {
+                    iov_base: self as *mut _ as _,
+                    iov_len: size_of_val(self),
+                };
+                Errno::result(ptrace(PTRACE_GETREGSET, tid, Self::NT, &mut io))
+            }
+        }
+
+        fn ptrace_set(&self, tid: pid_t) -> nix::Result<libc::c_long> {
+            unsafe {
+                let mut io = iovec {
+                    iov_base: transmute(self),
+                    iov_len: size_of_val(self),
+                };
+                Errno::result(ptrace(PTRACE_SETREGSET, tid, Self::NT, &mut io))
+            }
+        }
+    }
+
+    impl RegSet for user_regs_struct {
+        const NT: i32 = NT_PRSTATUS;
+    }
+
+    impl RegSet for user_hwdebug_state {
+        const NT: i32 = NT_ARM_HW_WATCH;
+
+        fn ptrace_set(&self, tid: pid_t) -> nix::Result<libc::c_long> {
+            unsafe {
+                let mut io = iovec {
+                    iov_base: transmute(self),
+                    iov_len: memoffset::offset_of!(user_hwdebug_state, dbg_regs)
+                        + size_of_val(&self.dbg_regs[0]) * 4,
+                };
+                Errno::result(ptrace(PTRACE_SETREGSET, tid, Self::NT, &mut io))
+            }
         }
     }
 

@@ -12,10 +12,16 @@ use cfg_if::*;
 
 pub type BpID = isize;
 
+#[repr(u8)]
 #[derive(Copy, Clone, Debug)]
 pub enum HwbpType {
     Execute = 0,
+    #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     Write = 1,
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    Read = 1,
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    Write = 2,
     Access = 3,
 }
 
@@ -65,22 +71,14 @@ impl ToString for BpType {
                     "hwbp:{}{}",
                     match t {
                         HwbpType::Execute => "e",
+                        #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+                        HwbpType::Read => "r",
                         HwbpType::Write => "w",
                         HwbpType::Access => "a",
                     },
                     ["1", "2", "8", "4"][*l as usize]
                 )
             }
-        }
-    }
-}
-
-impl Into<u8> for HwbpType {
-    fn into(self) -> u8 {
-        match self {
-            HwbpType::Execute => 0,
-            HwbpType::Write => 1,
-            HwbpType::Access => 3,
         }
     }
 }
@@ -102,12 +100,13 @@ impl Into<u8> for HwbpLen {
     }
 }
 
-#[derive(Copy, Clone)]
+#[repr(u8)]
+#[derive(Debug, Copy, Clone)]
 pub enum HwbpLen {
     L1 = 0,
-    L2 = 1,
-    L4 = 3,
-    L8 = 2,
+    L2,
+    L4,
+    L8,
 }
 
 impl HwbpLen {
@@ -119,8 +118,26 @@ impl HwbpLen {
             Self::L8 => 8,
         }
     }
+
+    pub fn encode(self) -> u8 {
+        if crate::consts::IS_X86 {
+            return match self {
+                Self::L1 => 0,
+                Self::L2 => 1,
+                Self::L4 => 3,
+                Self::L8 => 2,
+            };
+        }
+
+        if crate::consts::IS_ARM {
+            return ((1 << self.to_int()) - 1) as _;
+        }
+
+        unreachable!()
+    }
 }
 
+#[derive(Debug)]
 pub struct BpOpt {
     pub address: usize,
     pub rw: Option<HwbpType>,
@@ -189,7 +206,7 @@ impl BpOpt {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct HwbpInfo {
     pub rw: u8,
     pub len: u8,
