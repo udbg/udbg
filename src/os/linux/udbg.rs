@@ -204,6 +204,21 @@ impl libc::user {
     }
 }
 
+impl TraceBuf<'_> {
+    pub fn update_regs(&mut self, tid: pid_t) {
+        ptrace::getregs(Pid::from_raw(tid))
+            .log_error("getregs")
+            .map(|regs| {
+                self.user.regs = regs;
+                self.regs_dirty = true;
+            });
+    }
+
+    pub fn write_regs(&self, tid: tid_t) {
+        ptrace::setregs(Pid::from_raw(tid), self.user.regs);
+    }
+}
+
 #[derive(Deref)]
 pub struct CommonAdaptor {
     #[deref]

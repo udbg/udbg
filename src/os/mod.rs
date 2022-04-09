@@ -5,7 +5,7 @@ use std::{cell::Cell, sync::Arc};
 use crate::prelude::*;
 
 cfg_if! {
-    if #[cfg(target_os="linux")] {
+    if #[cfg(any(target_os="linux", target_os="android"))] {
         pub mod linux;
         pub use self::linux::*;
     }

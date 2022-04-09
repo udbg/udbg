@@ -58,15 +58,6 @@ impl TraceBuf<'_> {
         unsafe { (self.callback.as_mut().unwrap())(self, event) }
     }
 
-    pub fn update_regs(&mut self, tid: pid_t) {
-        ptrace::getregs(Pid::from_raw(tid))
-            .log_error("getregs")
-            .map(|regs| {
-                self.user.regs = regs;
-                self.regs_dirty = true;
-            });
-    }
-
     // pub fn set_regs(&self) -> UDbgResult<()> {
     //     ptrace::setregs(Pid::from_raw(self.base.event_tid.get()), unsafe {
     //         *self.regs.get()
@@ -273,7 +264,7 @@ impl EventHandler for DefaultEngine {
         let tid = Pid::from_raw(self.tid as _);
         if buf.regs_dirty {
             buf.regs_dirty = false;
-            ptrace::setregs(tid, buf.user.regs);
+            buf.write_regs(self.tid);
         }
         ptrace::cont(tid, sig);
     }
