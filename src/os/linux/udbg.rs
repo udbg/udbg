@@ -333,11 +333,10 @@ impl CommonAdaptor {
         this: &dyn UDbgAdaptor,
         eh: &mut dyn EventHandler,
         tb: &mut TraceBuf,
-        si: &siginfo_t,
     ) -> UDbgResult<()> {
         // correct the pc register
         let ip = *tb.user.regs.ip();
-        let address = if si.si_signo == SIGTRAP && ip > 0 {
+        let address = if IS_X86 && tb.si.si_signo == SIGTRAP && ip > 0 {
             ip - 1
         } else {
             ip

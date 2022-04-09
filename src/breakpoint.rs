@@ -205,7 +205,7 @@ cfg_if! {
             Table {index: isize, origin: usize},
         }
         pub type BpInsn = [u8; 1];
-        pub const BP_INSN: BpInsn = [0xCC];
+        pub const BP_INSN: &BpInsn = &[0xCC];
     } else if #[cfg(any(target_arch = "arm", target_arch = "aarch64"))] {
         #[derive(Copy, Clone)]
         pub enum InnerBpType {
@@ -214,7 +214,7 @@ cfg_if! {
             Table {index: isize, origin: usize},
         }
         pub type BpInsn = [u8; 4];
-        pub const BP_INSN: BpInsn = [0xF0, 0x01, 0xF0, 0xE7];
+        pub const BP_INSN: &BpInsn = &[0x00, 0x00, 0x3E, 0xD4];
     }
 }
 

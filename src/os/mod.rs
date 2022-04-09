@@ -133,12 +133,11 @@ impl CommonAdaptor {
         match bp.bp_type {
             InnerBpType::Soft(raw_byte) => {
                 let written = if enable {
-                    dbg.write_memory(bp.address, &[0xCC])
+                    dbg.write_memory(bp.address, BP_INSN)
                 } else {
                     dbg.write_memory(bp.address, &raw_byte)
                 }
                 .unwrap_or_default();
-                // println!("enable softbp @{:x} {} {:?}", bp.address, enable, written);
                 if written > 0 {
                     dbg.flush_cache(bp.address, written)?;
                     bp.enabled.set(enable);

@@ -111,7 +111,7 @@ pub mod util {
 
 #[cfg(test)]
 pub(crate) mod test {
-    use crate::prelude::*;
+    use crate::{prelude::*, register::regid};
     use std::{cell::Cell, rc::Rc, sync::Arc};
 
     #[cfg(windows)]
@@ -126,11 +126,27 @@ pub(crate) mod test {
     ) -> Arc<dyn UDbgAdaptor> {
         state
             .loop_util(|target, event| {
-                println!(
+                info!(
                     "[event]~{}:{} {event}",
                     target.pid(),
                     target.base().event_tid.get()
                 );
+                match event {
+                    UEvent::Exception { first, code } => {
+                        let pc = state
+                            .context()
+                            .register()
+                            .unwrap()
+                            .get("_pc")
+                            .unwrap()
+                            .as_int();
+                        info!("  PC: {pc:x} {:?}", target.get_symbol_string(pc));
+                    }
+                    UEvent::ProcessCreate => {
+                        info!("  {}", target.base().image_path);
+                    }
+                    _ => {}
+                }
                 exit(target, event)
             })
             .await
@@ -162,11 +178,18 @@ pub(crate) mod test {
             info!("initbp occured");
             let main = target.get_main_module().unwrap();
             info!(
-                "main module: {} entry: {:x}",
+                "main module: {} entry: {:x} +{:x}",
                 main.data().path,
-                main.data().entry_point()
+                main.data().entry_point(),
+                main.data().entry,
             );
             target.addbp(main.data().entry_point()).expect("add bp");
+            assert_eq!(
+                &target
+                    .read_value::<BpInsn>(main.data().entry_point())
+                    .unwrap(),
+                BP_INSN
+            );
             info!("breakpoint added");
 
             loop_util(state, |target, event| match event {
@@ -175,8 +198,8 @@ pub(crate) mod test {
                     assert_eq!(regs.get("_pc").unwrap().as_int(), bp.address() as _);
                     info!("entrypoint bp occured");
                     bp.remove().unwrap();
-                    ds.entry_hitted.set(true);
 
+                    ds.entry_hitted.set(true);
                     target
                         .add_bp(
                             target
@@ -202,14 +225,21 @@ pub(crate) mod test {
                     let arg1;
                     #[cfg(windows)]
                     {
-                        arg1 = regs.get("rcx").unwrap().as_int();
+                        arg1 = regs.get_reg(regid::X86_REG_RCX).unwrap().as_int();
                         let arg1 = target.read_wstring(arg1, None).unwrap_or_default();
                         let arg1 = arg1.strip_suffix(".txt").unwrap_or(&arg1);
                         assert_eq!(arg1, arg);
                     }
                     #[cfg(unix)]
                     {
-                        arg1 = regs.get("rdi").unwrap().as_int();
+                        arg1 = regs
+                            .get_reg(match std::env::consts::ARCH {
+                                "aarch64" => regid::ARM_REG_S0,
+                                "x86_64" => regid::X86_REG_RDI,
+                                _ => unreachable!(),
+                            })
+                            .unwrap()
+                            .as_int();
                         assert_eq!(target.read_utf8(arg1, None).unwrap_or_default(), arg);
                     }
                     target
