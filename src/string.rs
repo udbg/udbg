@@ -3,7 +3,7 @@
 #[cfg(windows)]
 pub use crate::os::windows::string::*;
 
-use std::ffi::{CString, OsStr};
+use std::ffi::CString;
 
 pub trait ToUnicode {
     fn to_unicode(&self) -> Vec<u16>;
@@ -51,6 +51,7 @@ pub trait StringUtil {
 impl StringUtil for str {
     #[cfg(windows)]
     fn to_wide(&self) -> Vec<u16> {
+        use std::ffi::OsStr;
         use std::os::windows::ffi::OsStrExt;
         let mut r: Vec<u16> = OsStr::new(self).encode_wide().collect();
         r.push(0u16);

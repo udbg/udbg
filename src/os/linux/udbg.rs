@@ -1,10 +1,7 @@
 use super::*;
 use crate::elf::*;
-use crate::os::tid_t;
 use crate::os::udbg::EventHandler;
-use crate::os::unix::udbg::TraceBuf;
 use crate::range::RangeValue;
-use crate::register::*;
 
 use anyhow::Context;
 use goblin::elf::sym::Sym;
@@ -17,13 +14,7 @@ use std::cell::Cell;
 use std::collections::HashSet;
 use std::mem::transmute;
 use std::ops::Deref;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use nix::errno::Errno;
-use nix::sys::{ptrace, wait::*};
-
-pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
 
 const TRAP_BRKPT: i32 = 1;
 const TRAP_TRACE: i32 = 2;
@@ -140,82 +131,6 @@ impl TimeCheck {
             callback();
             self.last.set(Instant::now());
         }
-    }
-}
-
-impl AbstractRegs for libc::user {
-    fn ip(&mut self) -> &mut Self::REG {
-        self.regs.ip()
-    }
-
-    fn sp(&mut self) -> &mut Self::REG {
-        self.regs.sp()
-    }
-}
-
-impl HWBPRegs for libc::user {
-    fn eflags(&mut self) -> &mut u32 {
-        unsafe { core::mem::transmute(&mut self.regs.eflags) }
-    }
-
-    fn dr(&self, i: usize) -> reg_t {
-        self.u_debugreg[i]
-    }
-
-    fn set_dr(&mut self, i: usize, v: reg_t) {
-        self.u_debugreg[i] = v;
-    }
-}
-
-pub fn ptrace_peekuser(pid: i32, offset: usize) -> nix::Result<c_long> {
-    Errno::result(unsafe { libc::ptrace(PTRACE_PEEKUSER, Pid::from_raw(pid), offset) })
-}
-
-pub fn ptrace_pokeuser(pid: i32, offset: usize, val: c_long) -> nix::Result<c_long> {
-    Errno::result(unsafe { libc::ptrace(PTRACE_POKEUSER, Pid::from_raw(pid), offset, val) })
-}
-
-const OFFSET_DR: usize = memoffset::offset_of!(libc::user, u_debugreg);
-const DEBUGREG_PTR: *const reg_t = OFFSET_DR as _;
-
-#[extend::ext]
-impl libc::user {
-    fn peek_dr(&mut self, pid: i32, i: usize) -> nix::Result<c_long> {
-        ptrace_peekuser(pid, unsafe { DEBUGREG_PTR.add(i) } as usize)
-    }
-
-    fn peek_dregs(&mut self, pid: i32) -> UDbgResult<()> {
-        for i in 0..self.u_debugreg.len() {
-            self.u_debugreg[i] = ptrace_peekuser(pid, unsafe { DEBUGREG_PTR.add(i) } as usize)
-                .with_context(|| format!("peek dr[{i}]"))? as _;
-        }
-        Ok(())
-    }
-
-    fn poke_regs(&self, pid: i32) {
-        for i in (0..self.u_debugreg.len()).filter(|&i| i < 4 || i > 5) {
-            ptrace_pokeuser(
-                pid,
-                unsafe { DEBUGREG_PTR.add(i) as usize },
-                self.u_debugreg[i] as _,
-            )
-            .log_error_with(|err| format!("poke dr[{i}]: {err:?}"));
-        }
-    }
-}
-
-impl TraceBuf<'_> {
-    pub fn update_regs(&mut self, tid: pid_t) {
-        ptrace::getregs(Pid::from_raw(tid))
-            .log_error("getregs")
-            .map(|regs| {
-                self.user.regs = regs;
-                self.regs_dirty = true;
-            });
-    }
-
-    pub fn write_regs(&self, tid: tid_t) {
-        ptrace::setregs(Pid::from_raw(tid), self.user.regs);
     }
 }
 
@@ -432,20 +347,7 @@ impl CommonAdaptor {
         let tid = self.base.event_tid.get();
         let bp = self
             .get_bp_(address as _)
-            .or_else(|| {
-                let dr6 = tb.user.peek_dr(tid, 6).log_error("peek dr6")?;
-                self.get_bp_(if dr6 & 0x01 > 0 {
-                    -1
-                } else if dr6 & 0x02 > 0 {
-                    -2
-                } else if dr6 & 0x04 > 0 {
-                    -3
-                } else if dr6 & 0x08 > 0 {
-                    -4
-                } else {
-                    return None;
-                })
-            })
+            .or_else(|| self.get_hwbp(tb))
             .ok_or(UDbgError::NotFound)?;
 
         bp.hit_count.set(bp.hit_count.get() + 1);
@@ -463,6 +365,7 @@ impl CommonAdaptor {
         let mut user_step = reply == UserReply::StepIn;
         let id = bp.get_id();
 
+        #[cfg(target_arch = "x86_64")]
         if bp.is_hard() && self.get_bp(id).is_some() {
             tb.user.set_rf();
         }
@@ -581,30 +484,6 @@ impl CommonAdaptor {
                     }
                 }),
         ))
-    }
-
-    pub fn enable_hwbp_for_thread(
-        &self,
-        tid: tid_t,
-        info: HwbpInfo,
-        enable: bool,
-    ) -> UDbgResult<bool> {
-        unsafe {
-            let mut user: libc::user = core::mem::zeroed();
-            user.peek_dregs(tid)?;
-
-            let i = info.index as usize;
-            if enable {
-                user.u_debugreg[i] = self.dbg_reg[i].get() as _;
-                user.set_bp(self.dbg_reg[i].get(), i, info.rw, info.len);
-            } else {
-                user.unset_bp(i);
-            }
-
-            user.poke_regs(tid);
-        }
-
-        Ok(true)
     }
 
     pub fn enable_hwbp(

@@ -2,6 +2,9 @@
 //! Traits and types for CPU registers
 //!
 
+pub use self::arch::*;
+pub use self::plat::*;
+
 #[cfg(target_pointer_width = "64")]
 pub type reg_t = u64;
 #[cfg(target_pointer_width = "32")]
@@ -239,23 +242,10 @@ pub trait AbstractRegs {
 
     fn ip(&mut self) -> &mut Self::REG;
     fn sp(&mut self) -> &mut Self::REG;
-}
 
-impl AbstractRegs for X86Regs {
-    fn ip(&mut self) -> &mut reg_t {
-        &mut self.eip
-    }
-    fn sp(&mut self) -> &mut reg_t {
-        &mut self.esp
-    }
-}
-
-impl AbstractRegs for X64Regs {
-    fn ip(&mut self) -> &mut reg_t {
-        &mut self.rip
-    }
-    fn sp(&mut self) -> &mut reg_t {
-        &mut self.rsp
+    #[cfg(any(target_arch = "aarch64", target_arch = "arm"))]
+    fn lr(&mut self) -> &mut Self::REG {
+        unimplemented!();
     }
 }
 
@@ -276,13 +266,6 @@ impl AbstractRegs for Arm64Regs {
         &mut self.sp
     }
 }
-
-use core::mem::transmute;
-
-#[cfg(target_arch = "x86")]
-use std::arch::x86::*;
-#[cfg(target_arch = "x86_64")]
-use std::arch::x86_64::*;
 
 #[cfg(windows)]
 use winapi::um::winnt::{CONTEXT, WOW64_CONTEXT};
@@ -758,12 +741,23 @@ impl FromUsize for u64 {
 #[cfg(windows)]
 mod plat {
     use super::*;
+    use core::mem::transmute;
     use core::slice::{from_raw_parts, from_raw_parts_mut};
+
+    #[cfg(target_arch = "x86")]
+    use std::arch::x86::*;
+    #[cfg(target_arch = "x86_64")]
+    use std::arch::x86_64::*;
 
     #[cfg(any(target_arch = "x86_64", target_arch = "aarch64"))]
     pub type CONTEXT32 = WOW64_CONTEXT;
     #[cfg(target_arch = "x86")]
     pub type CONTEXT32 = CONTEXT;
+
+    #[inline]
+    unsafe fn mutable<T: Sized>(t: &T) -> &mut T {
+        transmute(transmute::<_, usize>(t))
+    }
 
     // https://docs.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-context
     #[cfg(target_arch = "x86_64")]
@@ -1176,9 +1170,6 @@ mod plat {
 #[cfg(any(target_os = "linux", target_os = "android"))]
 mod plat {
     use super::*;
-    #[cfg(target_arch = "aarch64")]
-    use crate::nix::user_regs_struct;
-    #[cfg(target_arch = "x86_64")]
     use libc::user_regs_struct;
 
     #[cfg(target_arch = "x86_64")]
@@ -1304,13 +1295,6 @@ mod plat {
 #[cfg(target_os = "macos")]
 mod plat {}
 
-pub use self::plat::*;
-
-#[inline]
-unsafe fn mutable<T: Sized>(t: &T) -> &mut T {
-    transmute(transmute::<_, usize>(t))
-}
-
 cfg_if! {
     if #[cfg(target_arch = "x86")] {
         pub type Registers = X86Regs;
@@ -1386,181 +1370,207 @@ pub trait UDbgRegs: crate::memory::AsByteArray {
 }
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub fn get_regid(r: &str) -> Option<u32> {
-    Some(match r {
-        "rax" => X86_REG_RAX,
-        "rbx" => X86_REG_RBX,
-        "rcx" => X86_REG_RCX,
-        "rdx" => X86_REG_RDX,
-        "rbp" => X86_REG_RBP,
-        "rsp" => X86_REG_RSP,
-        "rsi" => X86_REG_RSI,
-        "rdi" => X86_REG_RDI,
-        "r8" => X86_REG_R8,
-        "r9" => X86_REG_R9,
-        "r10" => X86_REG_R10,
-        "r11" => X86_REG_R11,
-        "r12" => X86_REG_R12,
-        "r13" => X86_REG_R13,
-        "r14" => X86_REG_R14,
-        "r15" => X86_REG_R15,
-        "rip" => X86_REG_RIP,
-        "eax" => X86_REG_EAX,
-        "ebx" => X86_REG_EBX,
-        "ecx" => X86_REG_ECX,
-        "edx" => X86_REG_EDX,
-        "ebp" => X86_REG_EBP,
-        "esp" => X86_REG_ESP,
-        "esi" => X86_REG_ESI,
-        "edi" => X86_REG_EDI,
-        "eip" => X86_REG_EIP,
-        "_pc" => COMM_REG_PC,
-        "_ip" => COMM_REG_PC,
-        "_sp" => COMM_REG_SP,
-        "eflags" => X86_REG_EFLAGS,
-        _ => {
-            if r.starts_with("xmm") {
-                u32::from_str_radix(&r[3..], 10)
-                    .map(|i| X86_REG_XMM0 + i)
-                    .ok()?
-            } else if r.starts_with("mm") {
-                u32::from_str_radix(&r[2..], 10)
-                    .map(|i| X86_REG_MM0 + i)
-                    .ok()?
-            } else if r.starts_with("dr") {
-                u32::from_str_radix(&r[2..], 10)
-                    .map(|i| X86_REG_DR0 + i)
-                    .ok()?
-            } else {
-                return None;
-            }
+mod arch {
+    use super::*;
+
+    impl AbstractRegs for X86Regs {
+        fn ip(&mut self) -> &mut reg_t {
+            &mut self.eip
         }
-    })
+        fn sp(&mut self) -> &mut reg_t {
+            &mut self.esp
+        }
+    }
+
+    impl AbstractRegs for X64Regs {
+        fn ip(&mut self) -> &mut reg_t {
+            &mut self.rip
+        }
+        fn sp(&mut self) -> &mut reg_t {
+            &mut self.rsp
+        }
+    }
+
+    pub fn get_regid(r: &str) -> Option<u32> {
+        Some(match r {
+            "rax" => X86_REG_RAX,
+            "rbx" => X86_REG_RBX,
+            "rcx" => X86_REG_RCX,
+            "rdx" => X86_REG_RDX,
+            "rbp" => X86_REG_RBP,
+            "rsp" => X86_REG_RSP,
+            "rsi" => X86_REG_RSI,
+            "rdi" => X86_REG_RDI,
+            "r8" => X86_REG_R8,
+            "r9" => X86_REG_R9,
+            "r10" => X86_REG_R10,
+            "r11" => X86_REG_R11,
+            "r12" => X86_REG_R12,
+            "r13" => X86_REG_R13,
+            "r14" => X86_REG_R14,
+            "r15" => X86_REG_R15,
+            "rip" => X86_REG_RIP,
+            "eax" => X86_REG_EAX,
+            "ebx" => X86_REG_EBX,
+            "ecx" => X86_REG_ECX,
+            "edx" => X86_REG_EDX,
+            "ebp" => X86_REG_EBP,
+            "esp" => X86_REG_ESP,
+            "esi" => X86_REG_ESI,
+            "edi" => X86_REG_EDI,
+            "eip" => X86_REG_EIP,
+            "_pc" => COMM_REG_PC,
+            "_ip" => COMM_REG_PC,
+            "_sp" => COMM_REG_SP,
+            "eflags" => X86_REG_EFLAGS,
+            _ => {
+                if r.starts_with("xmm") {
+                    u32::from_str_radix(&r[3..], 10)
+                        .map(|i| X86_REG_XMM0 + i)
+                        .ok()?
+                } else if r.starts_with("mm") {
+                    u32::from_str_radix(&r[2..], 10)
+                        .map(|i| X86_REG_MM0 + i)
+                        .ok()?
+                } else if r.starts_with("dr") {
+                    u32::from_str_radix(&r[2..], 10)
+                        .map(|i| X86_REG_DR0 + i)
+                        .ok()?
+                } else {
+                    return None;
+                }
+            }
+        })
+    }
 }
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-pub fn get_regid(r: &str) -> Option<u32> {
-    Some(match r {
-        "apsr" => ARM_REG_APSR,
-        "apsr_nzcv" => ARM_REG_APSR_NZCV,
-        "cpsr" => ARM_REG_CPSR,
-        "fpexc" => ARM_REG_FPEXC,
-        "fpinst" => ARM_REG_FPINST,
-        "fpscr" => ARM_REG_FPSCR,
-        "fpscr_nzcv" => ARM_REG_FPSCR_NZCV,
-        "fpsid" => ARM_REG_FPSID,
-        "itstate" => ARM_REG_ITSTATE,
-        "lr" => ARM_REG_LR,
-        "pc" => ARM_REG_PC,
-        "sp" => ARM_REG_SP,
-        "_pc" => COMM_REG_PC,
-        "_sp" => COMM_REG_SP,
-        "spsr" => ARM_REG_SPSR,
-        "d0" => ARM_REG_D0,
-        "d1" => ARM_REG_D1,
-        "d2" => ARM_REG_D2,
-        "d3" => ARM_REG_D3,
-        "d4" => ARM_REG_D4,
-        "d5" => ARM_REG_D5,
-        "d6" => ARM_REG_D6,
-        "d7" => ARM_REG_D7,
-        "d8" => ARM_REG_D8,
-        "d9" => ARM_REG_D9,
-        "d10" => ARM_REG_D10,
-        "d11" => ARM_REG_D11,
-        "d12" => ARM_REG_D12,
-        "d13" => ARM_REG_D13,
-        "d14" => ARM_REG_D14,
-        "d15" => ARM_REG_D15,
-        "d16" => ARM_REG_D16,
-        "d17" => ARM_REG_D17,
-        "d18" => ARM_REG_D18,
-        "d19" => ARM_REG_D19,
-        "d20" => ARM_REG_D20,
-        "d21" => ARM_REG_D21,
-        "d22" => ARM_REG_D22,
-        "d23" => ARM_REG_D23,
-        "d24" => ARM_REG_D24,
-        "d25" => ARM_REG_D25,
-        "d26" => ARM_REG_D26,
-        "d27" => ARM_REG_D27,
-        "d28" => ARM_REG_D28,
-        "d29" => ARM_REG_D29,
-        "d30" => ARM_REG_D30,
-        "d31" => ARM_REG_D31,
-        "fpinst2" => ARM_REG_FPINST2,
-        "mvfr0" => ARM_REG_MVFR0,
-        "mvfr1" => ARM_REG_MVFR1,
-        "mvfr2" => ARM_REG_MVFR2,
-        "q0" => ARM_REG_Q0,
-        "q1" => ARM_REG_Q1,
-        "q2" => ARM_REG_Q2,
-        "q3" => ARM_REG_Q3,
-        "q4" => ARM_REG_Q4,
-        "q5" => ARM_REG_Q5,
-        "q6" => ARM_REG_Q6,
-        "q7" => ARM_REG_Q7,
-        "q8" => ARM_REG_Q8,
-        "q9" => ARM_REG_Q9,
-        "q10" => ARM_REG_Q10,
-        "q11" => ARM_REG_Q11,
-        "q12" => ARM_REG_Q12,
-        "q13" => ARM_REG_Q13,
-        "q14" => ARM_REG_Q14,
-        "q15" => ARM_REG_Q15,
-        "r0" => ARM_REG_R0,
-        "r1" => ARM_REG_R1,
-        "r2" => ARM_REG_R2,
-        "r3" => ARM_REG_R3,
-        "r4" => ARM_REG_R4,
-        "r5" => ARM_REG_R5,
-        "r6" => ARM_REG_R6,
-        "r7" => ARM_REG_R7,
-        "r8" => ARM_REG_R8,
-        "r9" => ARM_REG_R9,
-        "r10" => ARM_REG_R10,
-        "r11" => ARM_REG_R11,
-        "r12" => ARM_REG_R12,
-        "s0" => ARM_REG_S0,
-        "s1" => ARM_REG_S1,
-        "s2" => ARM_REG_S2,
-        "s3" => ARM_REG_S3,
-        "s4" => ARM_REG_S4,
-        "s5" => ARM_REG_S5,
-        "s6" => ARM_REG_S6,
-        "s7" => ARM_REG_S7,
-        "s8" => ARM_REG_S8,
-        "s9" => ARM_REG_S9,
-        "x10" => ARM_REG_S10,
-        "x11" => ARM_REG_S11,
-        "x12" => ARM_REG_S12,
-        "x13" => ARM_REG_S13,
-        "x14" => ARM_REG_S14,
-        "x15" => ARM_REG_S15,
-        "x16" => ARM_REG_S16,
-        "x17" => ARM_REG_S17,
-        "x18" => ARM_REG_S18,
-        "x19" => ARM_REG_S19,
-        "x20" => ARM_REG_S20,
-        "x21" => ARM_REG_S21,
-        "x22" => ARM_REG_S22,
-        "x23" => ARM_REG_S23,
-        "x24" => ARM_REG_S24,
-        "x25" => ARM_REG_S25,
-        "x26" => ARM_REG_S26,
-        "x27" => ARM_REG_S27,
-        "x28" => ARM_REG_S28,
-        "x29" => ARM_REG_S29,
-        "x30" => ARM_REG_S30,
-        "x31" => ARM_REG_S31,
-        "ending" => ARM_REG_ENDING,
-        "r13" => ARM_REG_R13,
-        "r14" => ARM_REG_R14,
-        "r15" => ARM_REG_R15,
-        "sb" => ARM_REG_SB,
-        "sl" => ARM_REG_SL,
-        "fp" => ARM_REG_FP,
-        "ip" => ARM_REG_IP,
-        _ => return None,
-    })
+mod arch {
+    use super::*;
+
+    pub fn get_regid(r: &str) -> Option<u32> {
+        Some(match r {
+            "apsr" => ARM_REG_APSR,
+            "apsr_nzcv" => ARM_REG_APSR_NZCV,
+            "cpsr" => ARM_REG_CPSR,
+            "fpexc" => ARM_REG_FPEXC,
+            "fpinst" => ARM_REG_FPINST,
+            "fpscr" => ARM_REG_FPSCR,
+            "fpscr_nzcv" => ARM_REG_FPSCR_NZCV,
+            "fpsid" => ARM_REG_FPSID,
+            "itstate" => ARM_REG_ITSTATE,
+            "lr" => ARM_REG_LR,
+            "pc" => ARM_REG_PC,
+            "sp" => ARM_REG_SP,
+            "_pc" => COMM_REG_PC,
+            "_sp" => COMM_REG_SP,
+            "spsr" => ARM_REG_SPSR,
+            "d0" => ARM_REG_D0,
+            "d1" => ARM_REG_D1,
+            "d2" => ARM_REG_D2,
+            "d3" => ARM_REG_D3,
+            "d4" => ARM_REG_D4,
+            "d5" => ARM_REG_D5,
+            "d6" => ARM_REG_D6,
+            "d7" => ARM_REG_D7,
+            "d8" => ARM_REG_D8,
+            "d9" => ARM_REG_D9,
+            "d10" => ARM_REG_D10,
+            "d11" => ARM_REG_D11,
+            "d12" => ARM_REG_D12,
+            "d13" => ARM_REG_D13,
+            "d14" => ARM_REG_D14,
+            "d15" => ARM_REG_D15,
+            "d16" => ARM_REG_D16,
+            "d17" => ARM_REG_D17,
+            "d18" => ARM_REG_D18,
+            "d19" => ARM_REG_D19,
+            "d20" => ARM_REG_D20,
+            "d21" => ARM_REG_D21,
+            "d22" => ARM_REG_D22,
+            "d23" => ARM_REG_D23,
+            "d24" => ARM_REG_D24,
+            "d25" => ARM_REG_D25,
+            "d26" => ARM_REG_D26,
+            "d27" => ARM_REG_D27,
+            "d28" => ARM_REG_D28,
+            "d29" => ARM_REG_D29,
+            "d30" => ARM_REG_D30,
+            "d31" => ARM_REG_D31,
+            "fpinst2" => ARM_REG_FPINST2,
+            "mvfr0" => ARM_REG_MVFR0,
+            "mvfr1" => ARM_REG_MVFR1,
+            "mvfr2" => ARM_REG_MVFR2,
+            "q0" => ARM_REG_Q0,
+            "q1" => ARM_REG_Q1,
+            "q2" => ARM_REG_Q2,
+            "q3" => ARM_REG_Q3,
+            "q4" => ARM_REG_Q4,
+            "q5" => ARM_REG_Q5,
+            "q6" => ARM_REG_Q6,
+            "q7" => ARM_REG_Q7,
+            "q8" => ARM_REG_Q8,
+            "q9" => ARM_REG_Q9,
+            "q10" => ARM_REG_Q10,
+            "q11" => ARM_REG_Q11,
+            "q12" => ARM_REG_Q12,
+            "q13" => ARM_REG_Q13,
+            "q14" => ARM_REG_Q14,
+            "q15" => ARM_REG_Q15,
+            "r0" => ARM_REG_R0,
+            "r1" => ARM_REG_R1,
+            "r2" => ARM_REG_R2,
+            "r3" => ARM_REG_R3,
+            "r4" => ARM_REG_R4,
+            "r5" => ARM_REG_R5,
+            "r6" => ARM_REG_R6,
+            "r7" => ARM_REG_R7,
+            "r8" => ARM_REG_R8,
+            "r9" => ARM_REG_R9,
+            "r10" => ARM_REG_R10,
+            "r11" => ARM_REG_R11,
+            "r12" => ARM_REG_R12,
+            "s0" => ARM_REG_S0,
+            "s1" => ARM_REG_S1,
+            "s2" => ARM_REG_S2,
+            "s3" => ARM_REG_S3,
+            "s4" => ARM_REG_S4,
+            "s5" => ARM_REG_S5,
+            "s6" => ARM_REG_S6,
+            "s7" => ARM_REG_S7,
+            "s8" => ARM_REG_S8,
+            "s9" => ARM_REG_S9,
+            "x10" => ARM_REG_S10,
+            "x11" => ARM_REG_S11,
+            "x12" => ARM_REG_S12,
+            "x13" => ARM_REG_S13,
+            "x14" => ARM_REG_S14,
+            "x15" => ARM_REG_S15,
+            "x16" => ARM_REG_S16,
+            "x17" => ARM_REG_S17,
+            "x18" => ARM_REG_S18,
+            "x19" => ARM_REG_S19,
+            "x20" => ARM_REG_S20,
+            "x21" => ARM_REG_S21,
+            "x22" => ARM_REG_S22,
+            "x23" => ARM_REG_S23,
+            "x24" => ARM_REG_S24,
+            "x25" => ARM_REG_S25,
+            "x26" => ARM_REG_S26,
+            "x27" => ARM_REG_S27,
+            "x28" => ARM_REG_S28,
+            "x29" => ARM_REG_S29,
+            "x30" => ARM_REG_S30,
+            "x31" => ARM_REG_S31,
+            "ending" => ARM_REG_ENDING,
+            "r13" => ARM_REG_R13,
+            "r14" => ARM_REG_R14,
+            "r15" => ARM_REG_R15,
+            "sb" => ARM_REG_SB,
+            "sl" => ARM_REG_SL,
+            "fp" => ARM_REG_FP,
+            "ip" => ARM_REG_IP,
+            _ => return None,
+        })
+    }
 }

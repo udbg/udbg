@@ -9,7 +9,7 @@ use nix::{sys::ptrace, unistd::Pid};
 
 use crate::os::CommonAdaptor;
 use crate::{
-    os::{self, pid_t, tid_t, StandardAdaptor, WAIT_PID_FLAG},
+    os::{pid_t, tid_t, user_regs, StandardAdaptor, WAIT_PID_FLAG},
     prelude::*,
 };
 
@@ -48,7 +48,7 @@ impl StandardAdaptor {
 pub struct TraceBuf<'a> {
     pub callback: *mut UDbgCallback<'a>,
     pub target: Arc<StandardAdaptor>,
-    pub user: libc::user,
+    pub user: user_regs,
     pub regs_dirty: bool,
 }
 
@@ -68,9 +68,15 @@ impl TraceBuf<'_> {
 }
 
 impl TraceContext for TraceBuf<'_> {
+    // #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
     fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
         Some(&mut self.user.regs)
     }
+
+    // #[cfg(any(target_arch = "aarch64"))]
+    // fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
+    //     Some(&mut self.user)
+    // }
 
     fn target(&self) -> Arc<dyn UDbgAdaptor> {
         self.target.clone()
@@ -199,8 +205,8 @@ impl EventHandler for DefaultEngine {
                         this.insert_thread(tid);
                     }
                     PTRACE_EVENT_CLONE => {
-                        let mut new_tid: tid_t = 0;
-                        os::ptrace_getevtmsg(tid, &mut new_tid);
+                        let new_tid =
+                            ptrace::getevent(Pid::from_raw(tid)).unwrap_or_default() as tid_t;
                         buf.call(UEvent::ThreadCreate(new_tid));
                         // trace new thread
                         ptrace::attach(Pid::from_raw(new_tid));
@@ -210,8 +216,8 @@ impl EventHandler for DefaultEngine {
                         self.cloned_tids.insert(new_tid);
                     }
                     PTRACE_EVENT_FORK | PTRACE_EVENT_VFORK => {
-                        let mut new_pid: pid_t = 0;
-                        os::ptrace_getevtmsg(tid, &mut new_pid);
+                        let new_pid =
+                            ptrace::getevent(Pid::from_raw(tid)).unwrap_or_default() as pid_t;
                         StandardAdaptor::open(new_pid)
                             .log_error("open child")
                             .map(|t| self.targets.push(t));
@@ -275,7 +281,7 @@ impl UDbgEngine for DefaultEngine {
         Ok(StandardAdaptor::open(pid)?)
     }
 
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "android"))]
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads

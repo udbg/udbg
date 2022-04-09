@@ -284,7 +284,7 @@ impl WinThread {
 
 static mut GetThreadDescription: Option<extern "system" fn(HANDLE, *mut PWSTR) -> HRESULT> = None;
 
-#[ctor]
+#[ctor::ctor]
 unsafe fn foo() {
     use winapi::um::libloaderapi::*;
 

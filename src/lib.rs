@@ -27,8 +27,6 @@ extern crate serde;
 #[macro_use]
 extern crate log;
 #[macro_use]
-extern crate ctor;
-#[macro_use]
 extern crate cstrptr;
 
 pub mod breakpoint;
