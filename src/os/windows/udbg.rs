@@ -737,6 +737,7 @@ pub struct CommonAdaptor {
     pub step_tid: Cell<u32>,
     pub show_debug_string: Cell<bool>,
     pub uspy_tid: Cell<u32>,
+    hwbps: UnsafeCell<CONTEXT>,
 }
 
 impl<T> ReadMemory for T
@@ -816,9 +817,14 @@ impl CommonAdaptor {
             cx32: Cell::new(null_mut()),
             context: Cell::new(null_mut()),
             uspy_tid: Cell::new(0),
+            hwbps: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         };
         result.check_all_module(&result.process);
         result
+    }
+
+    fn hwbps(&self) -> &mut CONTEXT {
+        unsafe { self.hwbps.get().as_mut().unwrap() }
     }
 
     pub fn get_mapped_file_name(&self, module: usize) -> Option<String> {
@@ -930,7 +936,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_int3_breakpoint<C: DbgContext>(
+    pub fn handle_breakpoint<C: DbgContext>(
         &self,
         this: &dyn UDbgAdaptor,
         eh: &mut dyn EventHandler,
@@ -939,51 +945,39 @@ impl CommonAdaptor {
         context: &mut C,
     ) -> HandleResult {
         let address = tb.record.address;
-        // info!("Breakpoint On 0x{:x}", address);
+        let step = matches!(
+            tb.record.code,
+            EXCEPTION_WX86_SINGLE_STEP | EXCEPTION_SINGLE_STEP
+        );
+        // info!("record: {:x?}", tb.record);
+        let possible_hwbp = step || cfg!(target_arch = "aarch64");
         let id = address as BpID;
-        if let Some(bp) = self.get_bp(id) {
-            self.handle_bp_has_data(this, eh, bp, tb, context)
-        } else {
-            self.user_handle_exception(first, tb)
-        }
-    }
-
-    pub fn handle_step<C: DbgContext>(
-        &self,
-        this: &dyn UDbgAdaptor,
-        eh: &mut dyn EventHandler,
-        tb: &mut TraceBuf,
-        context: &mut C,
-    ) -> HandleResult {
-        let address = tb.record.address;
-        let id: BpID = context
-            .hwbp_index(address as _)
-            .map(|i| -(i + 1))
-            .unwrap_or(address as _);
-
-        if let Some(bp) = self.get_bp(id) {
-            // check the address for HWBP
+        #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
+        let get_hwbp = || context.hwbp_index();
+        #[cfg(any(target_arch = "aarch64"))]
+        let get_hwbp = || self.hwbps().hwbp_index(tb.record.params[1] as _);
+        if let Some(bp) = self.get_bp(id).or_else(|| {
+            possible_hwbp
+                .then(get_hwbp)
+                .flatten()
+                .map(|i| -(i + 1))
+                .and_then(|hwid| self.get_bp(hwid))
+        }) {
             if let InnerBpType::Hard(info) = bp.bp_type {
+                // check the address for HWBP
                 if info.rw == HwbpType::Execute as u8 && bp.address as u64 != address {
                     return HandleResult::NotHandled;
                 }
-            }
-
-            // if exists breakpoint at IP
-            if let Some(i) = bp.hard_index() {
                 if !bp.temp.get() {
                     // disable the HWBP temporarily
                     context.disable_hwbp_temporarily();
                 }
-                self.handle_bp_has_data(this, eh, bp, tb, context)
-            } else {
-                // 如果是软件断点，作为软件断点处理
-                self.handle_bp_has_data(this, eh, bp, tb, context)
             }
+            self.handle_bp_has_data(this, eh, bp, tb, context)
         } else {
-            // 不存在断点，可能是用户选择了单步
+            // breakpoint not exists, it's possible a step action from user
             let tid = self.base.event_tid.get();
-            if self.step_tid.get() == tid {
+            if step && self.step_tid.get() == tid {
                 self.step_tid.set(0);
                 self.handle_reply(this, tb.call(UEvent::Step), &tb.record, context);
                 return HandleResult::Continue;
@@ -1153,6 +1147,9 @@ impl CommonAdaptor {
                     GetLastError()
                 ));
             }
+            #[cfg(target_arch = "aarch64")]
+            self.enable_hwbp_for_context(self.hwbps(), info, enable);
+
             for _ in 0..1 {
                 let r = GetThreadContext(handle, context);
                 if r == 0 {
@@ -2129,7 +2126,7 @@ impl EventHandler for DefaultEngine {
                     cotinue_status = match record.code {
                         EXCEPTION_WX86_BREAKPOINT => {
                             if self.first_bp32_hitted {
-                                this.handle_int3_breakpoint(this, self, first, tb, cx32)
+                                this.handle_breakpoint(this, self, first, tb, cx32)
                             } else {
                                 self.first_bp32_hitted = true;
                                 this.handle_reply(this, tb.call(InitBp), &tb.record, cx32);
@@ -2138,7 +2135,7 @@ impl EventHandler for DefaultEngine {
                         }
                         EXCEPTION_BREAKPOINT => {
                             if self.first_bp_hitted {
-                                this.handle_int3_breakpoint(this, self, first, tb, cx)
+                                this.handle_breakpoint(this, self, first, tb, cx)
                             } else {
                                 self.first_bp_hitted = true;
                                 // 创建32位进程时忽略 附加32位进程时不忽略
@@ -2149,14 +2146,14 @@ impl EventHandler for DefaultEngine {
                             }
                         }
                         EXCEPTION_WX86_SINGLE_STEP => {
-                            let mut result = this.handle_step(this, self, tb, cx32);
+                            let mut result = this.handle_breakpoint(this, self, first, tb, cx);
                             if result == HandleResult::NotHandled {
                                 result = this.user_handle_exception(first, tb);
                             }
                             result
                         }
                         EXCEPTION_SINGLE_STEP => {
-                            let mut result = this.handle_step(this, self, tb, cx);
+                            let mut result = this.handle_breakpoint(this, self, first, tb, cx);
                             if result == HandleResult::NotHandled {
                                 result = this.user_handle_exception(first, tb);
                             }

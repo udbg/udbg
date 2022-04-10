@@ -194,9 +194,12 @@ pub(crate) mod test {
 
             loop_util(state, |target, event| match event {
                 UEvent::Breakpoint(bp) => {
-                    let regs = state.context().register().unwrap();
-                    assert_eq!(regs.get("_pc").unwrap().as_int(), bp.address() as _);
                     info!("entrypoint bp occured");
+                    let regs = state.context().register().unwrap();
+                    assert_eq!(
+                        regs.get_reg(regid::COMM_REG_PC).unwrap().as_int(),
+                        bp.address() as _
+                    );
                     bp.remove().unwrap();
 
                     ds.entry_hitted.set(true);
@@ -219,34 +222,48 @@ pub(crate) mod test {
             loop_util(state, |target, event| match event {
                 UEvent::Breakpoint(bp) => {
                     let regs = state.context().register().unwrap();
-                    assert_eq!(regs.get("_pc").unwrap().as_int(), bp.address());
-                    info!("CreateFile/open bp occured");
-                    ds.fopen_hitted.set(true);
+                    assert_eq!(
+                        regs.get_reg(regid::COMM_REG_PC).unwrap().as_int(),
+                        bp.address()
+                    );
                     let arg1;
+                    let argstr;
                     #[cfg(windows)]
                     {
-                        arg1 = regs.get_reg(regid::X86_REG_RCX).unwrap().as_int();
+                        arg1 = regs
+                            .get_reg(match std::env::consts::ARCH {
+                                "aarch64" => regid::ARM64_REG_X0,
+                                "x86_64" => regid::X86_REG_RCX,
+                                _ => unreachable!(),
+                            })
+                            .unwrap()
+                            .as_int();
                         let arg1 = target.read_wstring(arg1, None).unwrap_or_default();
-                        let arg1 = arg1.strip_suffix(".txt").unwrap_or(&arg1);
-                        assert_eq!(arg1, arg);
+                        argstr = arg1.strip_suffix(".txt").unwrap_or(&arg1).to_string();
                     }
                     #[cfg(unix)]
                     {
                         arg1 = regs
                             .get_reg(match std::env::consts::ARCH {
-                                "aarch64" => regid::ARM_REG_S0,
+                                "aarch64" => regid::ARM64_REG_X0,
                                 "x86_64" => regid::X86_REG_RDI,
                                 _ => unreachable!(),
                             })
                             .unwrap()
                             .as_int();
-                        assert_eq!(target.read_utf8(arg1, None).unwrap_or_default(), arg);
+                        argstr = target.read_utf8(arg1, None).unwrap_or_default();
                     }
-                    target
-                        .add_bp((arg1, HwbpType::Access).into())
-                        .expect("add hwbp");
-                    bp.remove().unwrap();
-                    true
+                    info!("fopen: 0x{arg1:x} {argstr}");
+                    if argstr == arg {
+                        ds.fopen_hitted.set(true);
+                        target
+                            .add_bp((arg1, HwbpType::Access).into())
+                            .expect("add hwbp");
+                        bp.remove().unwrap();
+                        true
+                    } else {
+                        false
+                    }
                 }
                 _ => false,
             })
