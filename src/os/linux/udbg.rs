@@ -323,7 +323,7 @@ impl CommonAdaptor {
         }
 
         if let Some(address) = temp_address {
-            this.add_bp(BpOpt::int3(address).enable(true).temp(true));
+            self.add_bp(this, &BpOpt::int3(address).enable(true).temp(true));
         }
         reply
     }

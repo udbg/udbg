@@ -210,15 +210,20 @@ impl<T> BreakpointManager for T
 where
     T: core::ops::Deref<Target = CommonAdaptor> + UDbgAdaptor,
 {
-    default fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
+    default fn add_breakpoint(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Ok(self.deref().add_bp(self, &opt)?)
     }
 
-    default fn get_bp(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+    default fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
         Some(self.deref().bp_map.read().get(&id)?.clone())
     }
 
-    default fn get_bp_list(&self) -> Vec<BpID> {
-        self.deref().get_bp_list()
+    default fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint + '_>> {
+        self.deref()
+            .bp_map
+            .read()
+            .values()
+            .map(|bp| bp.clone() as Arc<dyn UDbgBreakpoint>)
+            .collect()
     }
 }

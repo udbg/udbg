@@ -1,4 +1,3 @@
-
 use crate::{prelude::*, register::regid};
 use std::{cell::Cell, rc::Rc, sync::Arc};
 
@@ -71,7 +70,7 @@ fn debug() -> anyhow::Result<()> {
             main.data().entry_point(),
             main.data().entry,
         );
-        target.addbp(main.data().entry_point()).expect("add bp");
+        target.add_bp(main.data().entry_point()).expect("add bp");
         assert_eq!(
             &target
                 .read_value::<BpInsn>(main.data().entry_point())
@@ -92,7 +91,7 @@ fn debug() -> anyhow::Result<()> {
 
                 ds.entry_hitted.set(true);
                 target
-                    .add_bp(
+                    .add_breakpoint(
                         target
                             .get_address_by_symbol("kernel32!CreateFileW")
                             .or_else(|| target.get_address_by_symbol("libc!open"))
@@ -145,7 +144,7 @@ fn debug() -> anyhow::Result<()> {
                 if argstr == arg {
                     ds.fopen_hitted.set(true);
                     target
-                        .add_bp((arg1, HwbpType::Access).into())
+                        .add_breakpoint((arg1, HwbpType::Access).into())
                         .expect("add hwbp");
                     bp.remove().unwrap();
                     true

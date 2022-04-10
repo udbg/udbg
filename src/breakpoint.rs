@@ -369,22 +369,17 @@ impl UDbgBreakpoint for Breakpoint {
 }
 
 pub trait BreakpointManager {
-    fn add_bp(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
+    fn add_breakpoint(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Err(UDbgError::NotSupport)
     }
-    fn get_bp(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+    fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
         None
     }
     fn get_bp_by_address(&self, a: usize) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
-        self.get_bp(a as BpID)
+        self.get_breakpoint(a as BpID)
     }
-    fn get_bp_list(&self) -> Vec<BpID> {
-        vec![]
-    }
+
     fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint + '_>> {
-        self.get_bp_list()
-            .into_iter()
-            .filter_map(|id| self.get_bp(id))
-            .collect()
+        vec![]
     }
 }

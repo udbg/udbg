@@ -205,10 +205,6 @@ impl CommonBase {
     pub fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
-
-    pub fn get_bp_list(&self) -> Vec<BpID> {
-        self.bp_map.read().keys().cloned().collect()
-    }
 }
 
 /// Common thread fields
@@ -360,7 +356,7 @@ pub trait TargetControl {
 }
 
 /// Represent a debugable target, could be a process, core dump, etc.
-pub trait Target: GetProp + TargetMemory + TargetControl + BreakpointManager {
+pub trait Target: GetProp + TargetMemory + TargetControl {
     fn base(&self) -> &TargetBase;
 
     /// the process handle, if target is a process
@@ -446,11 +442,11 @@ pub trait Target: GetProp + TargetMemory + TargetControl + BreakpointManager {
     }
 }
 
-pub trait UDbgAdaptor: Send + Sync + Target + 'static {}
+pub trait UDbgAdaptor: Send + Sync + Target + BreakpointManager + 'static {}
 
 pub trait AdaptorUtil: UDbgAdaptor {
-    fn addbp(&self, opt: impl Into<BpOpt>) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
-        BreakpointManager::add_bp(self, opt.into())
+    fn add_bp(&self, opt: impl Into<BpOpt>) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
+        BreakpointManager::add_breakpoint(self, opt.into())
     }
 
     fn read_ptr(&self, a: usize) -> Option<usize> {
