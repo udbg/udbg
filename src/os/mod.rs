@@ -23,7 +23,11 @@ cfg_if! {
         pub mod windows;
         pub type pid_t = u32;
         pub use self::windows::{WinModule as OsModule, *};
-    } else {
+    }
+}
+
+cfg_if! {
+    if #[cfg(unix)] {
         pub mod unix;
         pub type pid_t = libc::pid_t;
         pub use self::unix::{NixModule as OsModule, *};
@@ -39,8 +43,8 @@ cfg_if! {
 }
 
 impl CommonAdaptor {
-    pub fn add_int3_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
-        // int3 breakpoint
+    pub fn add_soft_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
+        // software breakpoint
         if let Some(raw_byte) = this.read_value::<BpInsn>(opt.address) {
             let bp = Arc::new(Breakpoint {
                 address: opt.address,
@@ -112,7 +116,7 @@ impl CommonAdaptor {
             self.bp_map.write().insert(index, bp.clone());
             Ok(bp)
         } else {
-            self.add_int3_bp(this, opt)
+            self.add_soft_bp(this, opt)
         }?;
         let bpid = bp.get_id();
         self.bp_map.write().insert(bpid, bp.clone());

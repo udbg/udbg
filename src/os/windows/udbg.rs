@@ -898,7 +898,7 @@ impl CommonAdaptor {
             UserReply::StepOut => {
                 if let Some(address) = this.check_call(exception.address as _) {
                     context.set_step(false);
-                    self.add_int3_bp(
+                    self.add_soft_bp(
                         this,
                         &BpOpt::int3(address)
                             .temp(true)
@@ -913,7 +913,7 @@ impl CommonAdaptor {
                 }
             }
             UserReply::Goto(address) => {
-                self.add_int3_bp(this, &BpOpt::int3(address).temp(true).enable(true))
+                self.add_soft_bp(this, &BpOpt::int3(address).temp(true).enable(true))
                     .log_error("add bp");
             }
             _ => {}
