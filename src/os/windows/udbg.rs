@@ -78,6 +78,7 @@ impl HWBPRegs for CONTEXT {
     }
 }
 
+#[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
 impl HWBPRegs for CONTEXT32 {
     #[inline(always)]
     fn eflags(&mut self) -> &mut u32 {
@@ -111,29 +112,31 @@ impl HWBPRegs for CONTEXT32 {
     }
 }
 
-// TODO
 #[cfg(target_arch = "aarch64")]
 impl HWBPRegs for CONTEXT {
-    fn set_step(&mut self, step: bool) {}
-    fn set_rf(&mut self) {}
-    fn test_eflags(&self, flag: u32) -> bool {
-        false
+    fn cpsr(&mut self) -> &mut u32 {
+        &mut self.Cpsr
     }
 
-    fn l_enable(&mut self, enable: bool) {}
-    fn set_local(&mut self, idx: usize, set: bool) {}
-    fn set_rw(&mut self, idx: usize, val: u8) {}
-    fn set_len(&mut self, idx: usize, val: u8) {}
+    fn get_ctrl(&mut self, i: usize) -> &mut u32 {
+        &mut self.Wcr[i]
+    }
+    fn get_addr(&mut self, i: usize) -> &mut reg_t {
+        &mut self.Wvr[i]
+    }
+}
 
-    fn empty(&self) -> bool {
-        false
+#[cfg(target_arch = "aarch64")]
+impl HWBPRegs for CONTEXT32 {
+    fn cpsr(&mut self) -> &mut u32 {
+        unimplemented!();
     }
 
-    fn set_bp(&mut self, address: usize, idx: usize, rw: u8, len: u8) {}
-    fn unset_bp(&mut self, idx: usize) {}
-
-    fn dr6(&self) -> usize {
-        0
+    fn get_ctrl(&mut self, i: usize) -> &mut u32 {
+        unimplemented!();
+    }
+    fn get_addr(&mut self, i: usize) -> &mut reg_t {
+        unimplemented!();
     }
 }
 
@@ -953,18 +956,10 @@ impl CommonAdaptor {
         context: &mut C,
     ) -> HandleResult {
         let address = tb.record.address;
-        let dr6 = context.dr(6);
-        let id: BpID = if dr6 & 0x01 > 0 {
-            -1
-        } else if dr6 & 0x02 > 0 {
-            -2
-        } else if dr6 & 0x04 > 0 {
-            -3
-        } else if dr6 & 0x08 > 0 {
-            -4
-        } else {
-            address as BpID
-        };
+        let id: BpID = context
+            .hwbp_index(address as _)
+            .map(|i| -(i + 1))
+            .unwrap_or(address as _);
 
         if let Some(bp) = self.get_bp(id) {
             // check the address for HWBP
@@ -978,7 +973,7 @@ impl CommonAdaptor {
             if let Some(i) = bp.hard_index() {
                 if !bp.temp.get() {
                     // disable the HWBP temporarily
-                    context.set_rf();
+                    context.disable_hwbp_temporarily();
                 }
                 self.handle_bp_has_data(this, eh, bp, tb, context)
             } else {
@@ -1042,7 +1037,7 @@ impl CommonAdaptor {
                     .log_error("disable bp");
 
                 // step once and revert
-                let user_step = context.test_eflags(EFLAGS_TF);
+                let user_step = context.is_step();
                 if !user_step {
                     context.set_step(true);
                 }

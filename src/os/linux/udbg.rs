@@ -370,7 +370,7 @@ impl CommonAdaptor {
 
         #[cfg(target_arch = "x86_64")]
         if bp.is_hard() && self.get_bp(id).is_some() {
-            tb.user.set_rf();
+            tb.user.disable_hwbp_temporarily();
         }
 
         // int3 breakpoint revert

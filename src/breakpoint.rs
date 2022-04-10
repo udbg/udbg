@@ -272,7 +272,7 @@ pub struct Breakpoint {
 impl Breakpoint {
     pub fn get_hwbp_len(&self) -> Option<usize> {
         if let InnerBpType::Hard(info) = self.bp_type {
-            Some(match info.len as reg_t {
+            Some(match info.len as _ {
                 LEN_1 => 1,
                 LEN_2 => 2,
                 LEN_4 => 4,
