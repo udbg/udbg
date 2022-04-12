@@ -734,35 +734,10 @@ pub struct CommonAdaptor {
     pub protected_thread: RwLock<Vec<u32>>,
     pub context: Cell<*mut CONTEXT>,
     pub cx32: Cell<*mut CONTEXT32>,
-    pub step_tid: Cell<u32>,
     pub show_debug_string: Cell<bool>,
     pub uspy_tid: Cell<u32>,
+    pub detaching: Cell<bool>,
     hwbps: UnsafeCell<CONTEXT>,
-}
-
-impl<T> ReadMemory for T
-where
-    T: Deref<Target = CommonAdaptor>,
-{
-    default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.process.read_memory(addr, data)
-    }
-}
-
-impl<T> WriteMemory for T
-where
-    T: Deref<Target = CommonAdaptor>,
-{
-    default fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
-        match self.process.write_memory(addr, data) {
-            0 => None,
-            s => Some(s),
-        }
-    }
-
-    default fn flush_cache(&self, address: usize, len: usize) -> IoRes<()> {
-        self.process.flush_cache(address, len)
-    }
 }
 
 impl<T> GetProp for T
@@ -796,6 +771,56 @@ where
     }
 }
 
+impl<T> TargetControl for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
+    default fn detach(&self) -> Result<(), UDbgError> {
+        if self.base.is_opened() {
+            self.base.status.set(UDbgStatus::Ended);
+            return Ok(());
+        }
+        self.detaching.set(true);
+        if !self.base.is_paused() {
+            self.breakk()?
+        }
+        Ok(())
+    }
+
+    default fn breakk(&self) -> Result<(), UDbgError> {
+        self.base.check_opened()?;
+        if self.base.is_paused() {
+            return Err("already paused".into());
+        }
+        unsafe {
+            if DebugBreakProcess(*self.process.handle) > 0 {
+                Ok(())
+            } else {
+                Err(UDbgError::system())
+            }
+        }
+    }
+
+    default fn suspend(&self) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
+
+    default fn resume(&self) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
+
+    default fn kill(&self) -> Result<(), UDbgError> {
+        self.terminate_process()
+    }
+
+    default fn wait(&self) -> UDbgResult<u32> {
+        self.is_process_exited(-1i32 as _);
+        self.process
+            .get_exit_code()
+            .ok_or_else(|| UDbgError::system())
+    }
+}
+
 impl CommonAdaptor {
     pub fn new(p: Process) -> CommonAdaptor {
         let ui = udbg_ui();
@@ -813,10 +838,10 @@ impl CommonAdaptor {
             _base: base,
             show_debug_string: sds.into(),
             protected_thread: vec![].into(),
-            step_tid: Cell::new(0),
             cx32: Cell::new(null_mut()),
             context: Cell::new(null_mut()),
             uspy_tid: Cell::new(0),
+            detaching: false.into(),
             hwbps: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         };
         result.check_all_module(&result.process);
@@ -868,63 +893,20 @@ impl CommonAdaptor {
         unsafe { WAIT_TIMEOUT != WaitForSingleObject(*self.process.handle, timeout) }
     }
 
-    pub fn wait_process_exit(&self) {
-        while !self.is_process_exited(10) {
-            if !self.base.is_opened() {
-                break;
-            }
-        }
-    }
-
     #[inline(always)]
     pub fn bp_exists(&self, id: BpID) -> bool {
         self.bp_map.read().get(&id).is_some()
-    }
-
-    fn handle_reply<C: DbgContext>(
-        &self,
-        this: &dyn UDbgAdaptor,
-        reply: UserReply,
-        exception: &ExceptionRecord,
-        context: &mut C,
-    ) {
-        let tid = self.base.event_tid.get();
-        match reply {
-            UserReply::StepIn => {
-                context.set_step(true);
-                self.step_tid.set(tid);
-                // info!("step_tid: {}", tid);
-            }
-            UserReply::StepOut => {
-                if let Some(address) = this.check_call(exception.address as _) {
-                    context.set_step(false);
-                    self.add_soft_bp(
-                        this,
-                        &BpOpt::int3(address)
-                            .temp(true)
-                            .enable(true)
-                            .thread(self.base.event_tid.get()),
-                    )
-                    .log_error("add bp");
-                } else {
-                    context.set_step(true);
-                    self.step_tid.set(tid);
-                    // info!("step_tid out: {}", tid)
-                }
-            }
-            UserReply::Goto(address) => {
-                self.add_soft_bp(this, &BpOpt::int3(address).temp(true).enable(true))
-                    .log_error("add bp");
-            }
-            _ => {}
-        };
     }
 
     fn get_bp(&self, id: BpID) -> Option<Arc<Breakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
 
-    pub fn user_handle_exception(&self, first: bool, tb: &mut TraceBuf) -> HandleResult {
+    pub fn user_handle_exception<T: UDbgAdaptor>(
+        &self,
+        first: bool,
+        tb: &mut TraceBuf<T>,
+    ) -> HandleResult {
         let reply = tb.call(UEvent::Exception {
             first,
             code: tb.record.code,
@@ -936,12 +918,11 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_breakpoint<C: DbgContext>(
+    pub fn handle_breakpoint<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
         &self,
-        this: &dyn UDbgAdaptor,
-        eh: &mut dyn EventHandler,
+        eh: &mut dyn EventHandler<T>,
         first: bool,
-        tb: &mut TraceBuf,
+        tb: &mut TraceBuf<T>,
         context: &mut C,
     ) -> HandleResult {
         let address = tb.record.address;
@@ -973,27 +954,29 @@ impl CommonAdaptor {
                     context.disable_hwbp_temporarily();
                 }
             }
-            self.handle_bp_has_data(this, eh, bp, tb, context)
+            self.handle_bp_has_data(eh, bp, tb, context)
         } else {
             // breakpoint not exists, it's possible a step action from user
             let tid = self.base.event_tid.get();
             if step && self.step_tid.get() == tid {
                 self.step_tid.set(0);
-                self.handle_reply(this, tb.call(UEvent::Step), &tb.record, context);
+                self.handle_reply(tb.target.clone().as_ref(), tb.call(UEvent::Step), context);
                 return HandleResult::Continue;
             }
             HandleResult::NotHandled
         }
     }
 
-    pub fn handle_bp_has_data<C: DbgContext>(
+    pub fn handle_bp_has_data<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
         &self,
-        this: &dyn UDbgAdaptor,
-        eh: &mut dyn EventHandler,
+        eh: &mut dyn EventHandler<T>,
         bp: Arc<Breakpoint>,
-        tb: &mut TraceBuf,
+        tb: &mut TraceBuf<T>,
         context: &mut C,
     ) -> HandleResult {
+        let this = tb.target.clone();
+        let this = this.as_ref();
+
         bp.hit_count.set(bp.hit_count.get() + 1);
         if bp.temp.get() {
             self.remove_breakpoint(this, &bp);
@@ -1013,12 +996,7 @@ impl CommonAdaptor {
         let tid = self.base.event_tid.get();
         let hitted = bp.hit_tid.map(|t| t == tid).unwrap_or(true);
         if hitted {
-            self.handle_reply(
-                this,
-                tb.call(UEvent::Breakpoint(bp.clone())),
-                &tb.record,
-                context,
-            );
+            self.handle_reply(this, tb.call(UEvent::Breakpoint(bp.clone())), context);
         }
 
         let id = bp.get_id();
@@ -1039,7 +1017,7 @@ impl CommonAdaptor {
                 loop {
                     match eh.fetch(tb) {
                         Some(_) => {
-                            if core::ptr::eq(self, &tb.target._common)
+                            if core::ptr::eq(self, tb.target.deref().deref())
                                 && self.base.event_tid.get() == tid
                             {
                                 // TODO: maybe other exception?
@@ -1083,11 +1061,10 @@ impl CommonAdaptor {
         HandleResult::Continue
     }
 
-    pub fn handle_possible_table_bp<C: DbgContext>(
+    pub fn handle_possible_table_bp<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
         &self,
-        this: &dyn UDbgAdaptor,
-        eh: &mut dyn EventHandler,
-        tb: &mut TraceBuf,
+        eh: &mut dyn EventHandler<T>,
+        tb: &mut TraceBuf<T>,
         context: &mut C,
     ) -> HandleResult {
         let pc = if C::IS_32 {
@@ -1102,7 +1079,7 @@ impl CommonAdaptor {
 
         // self.get_bp(pc as BpID).map(|bp| self.handle_bp_has_data(tid, &bp, record, context)).unwrap_or(C::NOT_HANDLED)
         if let Some(bp) = self.get_bp(pc as BpID) {
-            self.handle_bp_has_data(this, eh, bp, tb, context)
+            self.handle_bp_has_data(eh, bp, tb, context)
         } else {
             HandleResult::NotHandled
         }
@@ -1557,7 +1534,6 @@ pub struct StandardAdaptor {
     pub record: UnsafeCell<ExceptionRecord>,
     pub threads: RefCell<HashMap<u32, DbgThread>>,
     pub attached: Cell<bool>, // create by attach
-    pub detaching: Cell<bool>,
 }
 
 unsafe impl Send for StandardAdaptor {}
@@ -1575,7 +1551,6 @@ impl StandardAdaptor {
             record: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             threads: HashMap::new().into(),
             attached: false.into(),
-            detaching: false.into(),
         })
     }
 
@@ -1642,7 +1617,7 @@ impl StandardAdaptor {
                 detail: None,
             }))
         } else {
-            self.open_thread(tid)
+            self._common.open_thread(tid)
         }
     }
 
@@ -1688,38 +1663,6 @@ pub fn continue_debug_event(pid: u32, tid: u32, status: u32) -> bool {
     unsafe { ContinueDebugEvent(pid, tid, status) != 0 }
 }
 
-impl TargetControl for StandardAdaptor {
-    fn detach(&self) -> Result<(), UDbgError> {
-        if self.base.is_opened() {
-            self.base.status.set(UDbgStatus::Ended);
-            return Ok(());
-        }
-        self.detaching.set(true);
-        if !self.base.is_paused() {
-            self.breakk()?
-        }
-        Ok(())
-    }
-
-    fn breakk(&self) -> Result<(), UDbgError> {
-        self.base.check_opened()?;
-        if self.base.is_paused() {
-            return Err("already paused".into());
-        }
-        unsafe {
-            if DebugBreakProcess(*self.process.handle) > 0 {
-                Ok(())
-            } else {
-                Err(UDbgError::system())
-            }
-        }
-    }
-
-    fn kill(&self) -> Result<(), UDbgError> {
-        self.terminate_process()
-    }
-}
-
 impl Target for StandardAdaptor {
     fn base(&self) -> &TargetBase {
         &self.base
@@ -1760,22 +1703,22 @@ impl Target for StandardAdaptor {
 
 impl UDbgAdaptor for StandardAdaptor {}
 
-pub struct TraceBuf<'a> {
+pub struct TraceBuf<'a, T = StandardAdaptor> {
     pub callback: *mut UDbgCallback<'a>,
-    pub target: Arc<StandardAdaptor>,
+    pub target: Arc<T>,
     pub record: ExceptionRecord,
     pub cx: *mut CONTEXT,
     pub cx32: *mut CONTEXT32,
 }
 
-impl TraceBuf<'_> {
+impl<T: UDbgAdaptor> TraceBuf<'_, T> {
     #[inline]
     pub fn call(&mut self, event: UEvent) -> UserReply {
         unsafe { (self.callback.as_mut().unwrap())(self, event) }
     }
 }
 
-impl TraceContext for TraceBuf<'_> {
+impl<T: UDbgAdaptor> TraceContext for TraceBuf<'_, T> {
     fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
         Some(unsafe { self.cx.as_mut() }?)
     }
@@ -1789,13 +1732,13 @@ impl TraceContext for TraceBuf<'_> {
     }
 }
 
-pub trait EventHandler {
+pub trait EventHandler<T = StandardAdaptor> {
     /// fetch a debug event
-    fn fetch(&mut self, buf: &mut TraceBuf) -> Option<()>;
+    fn fetch(&mut self, buf: &mut TraceBuf<T>) -> Option<()>;
     /// handle the debug event
-    fn handle(&mut self, buf: &mut TraceBuf) -> Option<HandleResult>;
+    fn handle(&mut self, buf: &mut TraceBuf<T>) -> Option<HandleResult>;
     /// continue debug event
-    fn cont(&mut self, _: HandleResult, buf: &mut TraceBuf);
+    fn cont(&mut self, _: HandleResult, buf: &mut TraceBuf<T>);
 }
 
 pub fn enum_udbg_thread<'a>(
@@ -1914,17 +1857,6 @@ impl UDbgEngine for DefaultEngine {
     }
 
     fn event_loop(&mut self, callback: &mut UDbgCallback) -> UDbgResult<()> {
-        // let wow64 = self.symgr.is_wow64.get();
-        // udbg_ui().info(format!("wow64: {}", wow64));
-
-        // if self.base.is_opened() {
-        //     if wow64 {
-        //         self.base.update_arch(ARCH_X86);
-        //     }
-        //     self.wait_process_exit();
-        //     return Ok(());
-        // }
-
         let mut cx = Align16::<CONTEXT>::new();
         let mut cx32 = unsafe { core::mem::zeroed() };
         let mut buf = TraceBuf {
@@ -2126,34 +2058,34 @@ impl EventHandler for DefaultEngine {
                     cotinue_status = match record.code {
                         EXCEPTION_WX86_BREAKPOINT => {
                             if self.first_bp32_hitted {
-                                this.handle_breakpoint(this, self, first, tb, cx32)
+                                this.handle_breakpoint(self, first, tb, cx32)
                             } else {
                                 self.first_bp32_hitted = true;
-                                this.handle_reply(this, tb.call(InitBp), &tb.record, cx32);
+                                this.handle_reply(this, tb.call(InitBp), cx32);
                                 HandleResult::NotHandled
                             }
                         }
                         EXCEPTION_BREAKPOINT => {
                             if self.first_bp_hitted {
-                                this.handle_breakpoint(this, self, first, tb, cx)
+                                this.handle_breakpoint(self, first, tb, cx)
                             } else {
                                 self.first_bp_hitted = true;
                                 // 创建32位进程时忽略 附加32位进程时不忽略
                                 if !this.symgr.is_wow64.get() || this.attached.get() {
-                                    this.handle_reply(this, tb.call(InitBp), &tb.record, cx);
+                                    this.handle_reply(this, tb.call(InitBp), cx);
                                 }
                                 HandleResult::Continue
                             }
                         }
                         EXCEPTION_WX86_SINGLE_STEP => {
-                            let mut result = this.handle_breakpoint(this, self, first, tb, cx);
+                            let mut result = this.handle_breakpoint(self, first, tb, cx);
                             if result == HandleResult::NotHandled {
                                 result = this.user_handle_exception(first, tb);
                             }
                             result
                         }
                         EXCEPTION_SINGLE_STEP => {
-                            let mut result = this.handle_breakpoint(this, self, first, tb, cx);
+                            let mut result = this.handle_breakpoint(self, first, tb, cx);
                             if result == HandleResult::NotHandled {
                                 result = this.user_handle_exception(first, tb);
                             }
@@ -2165,9 +2097,9 @@ impl EventHandler for DefaultEngine {
                             }
                             let mut result = if code == EXCEPTION_ACCESS_VIOLATION {
                                 if wow64 {
-                                    this.handle_possible_table_bp(this, self, tb, cx32)
+                                    this.handle_possible_table_bp(self, tb, cx32)
                                 } else {
-                                    this.handle_possible_table_bp(this, self, tb, cx)
+                                    this.handle_possible_table_bp(self, tb, cx)
                                 }
                             } else {
                                 HandleResult::NotHandled

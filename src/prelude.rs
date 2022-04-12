@@ -6,7 +6,7 @@ pub use crate::{
     error::*,
     event::*,
     memory::*,
-    os::Process,
+    os::{pid_t, tid_t, Process},
     register::{reg_t, UDbgRegs},
     shell::*,
     string::*,

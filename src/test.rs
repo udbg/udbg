@@ -7,9 +7,9 @@ const TARGET: &str = "notepad.exe";
 #[cfg(unix)]
 const TARGET: &str = "cat";
 
-async fn loop_util(
+async fn loop_util<'a>(
     state: &UEventState,
-    exit: impl Fn(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool,
+    mut exit: impl FnMut(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool + 'a,
 ) -> Arc<dyn UDbgAdaptor> {
     state
         .loop_util(|target, event| {
@@ -19,7 +19,7 @@ async fn loop_util(
                 target.base().event_tid.get()
             );
             match event {
-                UEvent::Exception { first, code } => {
+                UEvent::Exception { .. } | UEvent::Step | UEvent::Breakpoint(_) => {
                     let pc = state
                         .context()
                         .register()
@@ -70,7 +70,7 @@ fn debug() -> anyhow::Result<()> {
             main.data().entry_point(),
             main.data().entry,
         );
-        target.add_bp(main.data().entry_point()).expect("add bp");
+        let bp = target.add_bp(main.data().entry_point()).expect("add bp");
         assert_eq!(
             &target
                 .read_value::<BpInsn>(main.data().entry_point())
@@ -79,39 +79,56 @@ fn debug() -> anyhow::Result<()> {
         );
         info!("breakpoint added");
 
+        let mut file_bp: Option<Arc<dyn UDbgBreakpoint>> = None;
         loop_util(state, |target, event| match event {
-            UEvent::Breakpoint(bp) => {
+            UEvent::Breakpoint(_) => {
                 info!("entrypoint bp occured");
                 let regs = state.context().register().unwrap();
                 assert_eq!(
                     regs.get_reg(regid::COMM_REG_PC).unwrap().as_int(),
                     bp.address() as _
                 );
-                bp.remove().unwrap();
 
                 ds.entry_hitted.set(true);
-                target
-                    .add_breakpoint(
-                        target
-                            .get_address_by_symbol("kernel32!CreateFileW")
-                            .or_else(|| target.get_address_by_symbol("libc!open"))
-                            .or_else(|| target.get_address_by_symbol("libc!__open64"))
-                            .unwrap()
-                            .into(),
-                    )
-                    .expect("add bp");
+                file_bp.replace(
+                    target
+                        .add_breakpoint(
+                            target
+                                .get_address_by_symbol("kernel32!CreateFileW")
+                                .or_else(|| target.get_address_by_symbol("libc!open"))
+                                .or_else(|| target.get_address_by_symbol("libc!__open64"))
+                                .unwrap()
+                                .into(),
+                        )
+                        .expect("add bp"),
+                );
                 true
             }
             _ => false,
         })
         .await;
 
+        state.reply(UserReply::StepIn);
+        loop_util(state, |target, event| {
+            std::assert_matches::assert_matches!(event, UEvent::Step);
+            let pc = state
+                .context()
+                .register()
+                .unwrap()
+                .get_reg(regid::COMM_REG_PC)
+                .unwrap()
+                .as_int();
+            assert_ne!(pc, bp.address());
+            true
+        });
+
+        state.reply(UserReply::Run(true));
         loop_util(state, |target, event| match event {
-            UEvent::Breakpoint(bp) => {
+            UEvent::Breakpoint(_) => {
                 let regs = state.context().register().unwrap();
                 assert_eq!(
                     regs.get_reg(regid::COMM_REG_PC).unwrap().as_int(),
-                    bp.address()
+                    file_bp.as_ref().unwrap().address()
                 );
                 let arg1;
                 let argstr;
@@ -140,10 +157,10 @@ fn debug() -> anyhow::Result<()> {
                         .as_int();
                     argstr = target.read_utf8(arg1, None).unwrap_or_default();
                 }
-                info!("fopen: 0x{arg1:x} {argstr}");
+                info!("fopen bp occured: 0x{arg1:x} {argstr}");
                 if argstr == arg {
                     ds.fopen_hitted.set(true);
-                    target
+                    let hwbp = target
                         .add_breakpoint((arg1, HwbpType::Access).into())
                         .expect("add hwbp");
                     bp.remove().unwrap();
@@ -168,6 +185,7 @@ fn debug() -> anyhow::Result<()> {
         })
         .await;
 
+        #[cfg(windows)]
         target.kill().expect("kill");
 
         loop_util(state, |_, _| false).await;

@@ -1,9 +1,8 @@
 use super::unix::{udbg::TraceBuf, *};
-use crate::os::tid_t;
 use crate::prelude::*;
 use crate::register::*;
 use anyhow::Context;
-use libc::*;
+use libc::{pid_t, *};
 use nix::errno::Errno;
 use nix::sys::signal::Signal;
 use nix::sys::{ptrace, wait::*};
@@ -96,7 +95,80 @@ pub fn get_exception_name(code: u32) -> String {
     )
 }
 
-pub fn ptrace_write(pid: pid_t, address: usize, data: &[u8]) {
+pub fn ptrace_read(pid: pid_t, addr: usize, size: usize) -> Result<Vec<u8>, u32> {
+    let nix_pid = nix::unistd::Pid::from_raw(pid as _);
+    let mut word_buffer: Vec<u8> = Vec::new();
+
+    for n in (addr..addr + size + 16).step_by(std::mem::size_of::<c_long>()) {
+        if word_buffer.len() > size {
+            word_buffer.truncate(size);
+            break;
+        }
+
+        let word: [u8; std::mem::size_of::<c_long>()] = match ptrace::read(nix_pid, n as _) {
+            Ok(val) => (val as usize).to_ne_bytes(),
+            Err(_) => break,
+        };
+
+        word_buffer.extend(word.iter().cloned());
+    }
+
+    Ok(word_buffer)
+}
+
+pub fn ptrace_write(pid: pid_t, addr: usize, data: &[u8]) -> Result<(), u32> {
+    let nix_pid = Pid::from_raw(pid);
+    let mut index = 0;
+
+    loop {
+        if index + (std::mem::size_of::<c_long>() * 2) > data.len() {
+            let mut store =
+                ptrace_read(pid, addr + index, std::mem::size_of::<c_long>() * 2).unwrap();
+
+            let remaining = data.len() - index;
+            let left_slice = &data[index..data.len()];
+
+            if left_slice.len() > store.len() {
+                return Err(0);
+            }
+
+            for n in 0..remaining {
+                store[n] = left_slice[n]
+            }
+
+            let mut dst = [0u8; std::mem::size_of::<c_long>()];
+            dst.clone_from_slice(&store[0..std::mem::size_of::<c_long>()]);
+
+            let store1 = c_long::from_ne_bytes(dst);
+
+            dst.clone_from_slice(
+                &store[std::mem::size_of::<c_long>()..std::mem::size_of::<c_long>() * 2],
+            );
+
+            let store2 = c_long::from_ne_bytes(dst);
+            unsafe {
+                ptrace::write(nix_pid, (addr + index) as _, store1 as _).unwrap();
+                ptrace::write(
+                    nix_pid,
+                    (addr + index + std::mem::size_of::<c_long>()) as _,
+                    store2 as _,
+                )
+                .unwrap();
+            }
+            break;
+        }
+
+        let mut _word = [0u8; std::mem::size_of::<c_long>()];
+        _word.clone_from_slice(&data[index..index + std::mem::size_of::<c_long>()]);
+
+        let word = c_long::from_ne_bytes(_word);
+        unsafe { ptrace::write(nix_pid, (addr + index) as _, word as _).unwrap() }
+        index += std::mem::size_of::<c_long>();
+    }
+    Ok(())
+}
+
+pub fn ptrace_write0(pid: pid_t, address: usize, data: &[u8]) {
     const SSIZE: usize = core::mem::size_of::<usize>();
     unsafe {
         for i in (0..data.len()).step_by(SSIZE) {
@@ -187,8 +259,8 @@ mod arch_util {
     }
 
     impl HWBPRegs for libc::user {
-        fn eflags(&mut self) -> &mut u32 {
-            unsafe { core::mem::transmute(&mut self.regs.eflags) }
+        fn eflags(&mut self) -> &mut reg_t {
+            &mut self.regs.eflags
         }
 
         fn dr(&self, i: usize) -> reg_t {
@@ -369,6 +441,33 @@ mod arch_util {
     pub struct user_regs {
         pub regs: user_regs_struct,
         pub hwdebug: user_hwdebug_state,
+    }
+
+    impl AbstractRegs for user_regs {
+        fn ip(&mut self) -> &mut reg_t {
+            &mut self.regs.pc
+        }
+        fn sp(&mut self) -> &mut reg_t {
+            &mut self.regs.sp
+        }
+
+        fn lr(&mut self) -> &mut Self::REG {
+            &mut self.regs.regs[30]
+        }
+    }
+
+    impl HWBPRegs for user_regs {
+        fn cpsr(&mut self) -> &mut reg_t {
+            &mut self.regs.pstate
+        }
+
+        fn get_ctrl(&mut self, i: usize) -> &mut u32 {
+            &mut self.hwdebug.dbg_regs[i].ctrl
+        }
+
+        fn get_addr(&mut self, i: usize) -> &mut reg_t {
+            &mut self.hwdebug.dbg_regs[i].addr
+        }
     }
 
     impl TraceBuf<'_> {

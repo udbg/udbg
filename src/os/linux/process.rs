@@ -227,6 +227,13 @@ impl WriteMemory for Process {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize> {
         self.write(address, data)
     }
+
+    // fn flush_cache(&self, address: usize, len: usize) -> IoResult<()> {
+    //     match unsafe { libc::fsync(self.mem.read().as_ref().unwrap().as_raw_fd()) } {
+    //         0 => Ok(()),
+    //         err => Err(std::io::Error::last_os_error()),
+    //     }
+    // }
 }
 
 struct LineParser<'a> {

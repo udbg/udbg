@@ -1,6 +1,6 @@
 use super::*;
 use crate::elf::*;
-use crate::os::udbg::EventHandler;
+use crate::os::udbg::{EventHandler, HandleResult};
 use crate::range::RangeValue;
 
 use anyhow::Context;
@@ -301,33 +301,6 @@ impl CommonAdaptor {
         unsafe { self.hwbps.get().as_mut().unwrap() }
     }
 
-    fn handle_reply(
-        &self,
-        this: &dyn UDbgAdaptor,
-        mut reply: UserReply,
-        tb: &mut TraceBuf,
-    ) -> UserReply {
-        let mut temp_address: Option<usize> = None;
-        match reply {
-            UserReply::StepOut => {
-                temp_address = this.check_call(*tb.user.regs.ip() as usize);
-                if temp_address.is_none() {
-                    reply = UserReply::StepIn;
-                }
-            }
-            UserReply::Goto(a) => {
-                temp_address = Some(a);
-            }
-            UserReply::StepIn => {}
-            _ => {}
-        }
-
-        if let Some(address) = temp_address {
-            self.add_bp(this, &BpOpt::int3(address).enable(true).temp(true));
-        }
-        reply
-    }
-
     pub fn get_bp_(&self, id: BpID) -> Option<Arc<Breakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
@@ -337,21 +310,33 @@ impl CommonAdaptor {
         this: &dyn UDbgAdaptor,
         eh: &mut dyn EventHandler,
         tb: &mut TraceBuf,
-    ) -> UDbgResult<()> {
+    ) -> UDbgResult<HandleResult> {
         // correct the pc register
-        let ip = *tb.user.regs.ip();
-        let address = if IS_X86 && tb.si.si_signo == SIGTRAP && ip > 0 {
-            ip - 1
-        } else {
-            ip
-        };
+        let mut address = *tb.user.regs.ip();
+        let is_step = tb.si.si_code == TRAP_TRACE;
+        if IS_X86 && tb.si.si_signo == SIGTRAP {
+            if is_step || tb.si.si_code == TRAP_HWBKPT {
+                address = unsafe { tb.si.si_addr() as _ };
+            } else {
+                address -= 1;
+            }
+        }
         *tb.user.regs.ip() = address;
 
         let tid = self.base.event_tid.get();
-        let bp = self
+        let bp = match self
             .get_bp_(address as _)
             .or_else(|| self.get_hwbp(tb))
-            .ok_or(UDbgError::NotFound)?;
+            .ok_or(UDbgError::NotFound)
+        {
+            Ok(bp) => bp,
+            Err(_) if is_step => {
+                tb.user.set_step(false);
+                self.handle_reply(this, tb.call(UEvent::Step), &mut tb.user);
+                return Ok(None);
+            }
+            Err(err) => return Err(err),
+        };
 
         bp.hit_count.set(bp.hit_count.get() + 1);
         if bp.temp.get() {
@@ -360,12 +345,10 @@ impl CommonAdaptor {
 
         // handle by user
         let hitted = bp.hit_tid.map(|t| t == tid).unwrap_or(true);
-        let mut reply = UserReply::Run(true);
         if hitted {
-            reply = self.handle_reply(this, tb.call(UEvent::Breakpoint(bp.clone())), tb);
+            self.handle_reply(this, tb.call(UEvent::Breakpoint(bp.clone())), &mut tb.user);
         }
 
-        let mut user_step = reply == UserReply::StepIn;
         let id = bp.get_id();
 
         #[cfg(target_arch = "x86_64")]
@@ -380,10 +363,14 @@ impl CommonAdaptor {
                 // disabled temporarily, in order to be able to continue
                 self.enable_breadpoint(this, &bp, false)
                     .log_error("disable bp");
+                assert_ne!(&this.read_value::<BpInsn>(bp.address()).unwrap(), BP_INSN);
+
+                let user_step = tb.user.is_step();
 
                 // step once and revert
+                tb.user.set_step(true);
                 loop {
-                    ptrace::step(Pid::from_raw(tid), None);
+                    eh.cont(None, tb);
                     match eh.fetch(tb) {
                         Some(_) => {
                             if core::ptr::eq(self, &tb.target.0) && self.base.event_tid.get() == tid
@@ -392,25 +379,26 @@ impl CommonAdaptor {
                             } else if let Some(s) = eh.handle(tb) {
                                 eh.cont(s, tb);
                             } else {
-                                return Ok(());
+                                return Ok(None);
                             }
                         }
-                        None => return Ok(()),
+                        None => return Ok(None),
                     }
                 }
 
                 self.enable_breadpoint(this, &bp, true)
                     .log_error("enable bp");
+                return if user_step {
+                    Ok(eh.handle(tb).unwrap_or(None))
+                } else {
+                    tb.user.set_step(false);
+                    // tb.regs_dirty = false;
+                    Ok(None)
+                };
             }
         }
 
-        while user_step {
-            ptrace::step(Pid::from_raw(tid), None);
-            reply = self.handle_reply(this, tb.call(UEvent::Step), tb);
-            user_step = reply == UserReply::StepIn;
-        }
-
-        Ok(())
+        Ok(None)
     }
 
     fn enum_module<'a>(
@@ -724,15 +712,11 @@ impl StandardAdaptor {
     }
 }
 
-impl ReadMemory for StandardAdaptor {
-    fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.process.read(addr, data)
-    }
-}
-
 impl WriteMemory for StandardAdaptor {
     fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
         self.process.write(addr, data)
+        // ptrace_write(self.pid.get(), addr, data);
+        // Some(data.len())
     }
 }
 

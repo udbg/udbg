@@ -400,7 +400,7 @@ impl UnicodeUtil for UNICODE_STRING {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Default, Clone, Copy)]
 #[repr(C)]
 pub struct ExceptionRecord {
     pub code: u32,

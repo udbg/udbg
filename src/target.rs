@@ -141,6 +141,7 @@ pub struct CommonBase {
     #[deref_mut]
     pub base: TargetBase,
     pub process: Process,
+    pub step_tid: Cell<tid_t>,
     pub symgr: SymbolManager<OsModule>,
     pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
     pub dbg_reg: [Cell<usize>; 4],
@@ -154,6 +155,7 @@ impl CommonBase {
         Self {
             base,
             process: ps,
+            step_tid: Cell::new(0),
             symgr: Default::default(),
             dbg_reg: Default::default(),
             bp_map: RwLock::new(HashMap::new()),
@@ -353,6 +355,10 @@ pub trait TargetControl {
     fn resume(&self) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
+    /// wait for target to exit
+    fn wait(&self) -> UDbgResult<u32> {
+        Err(UDbgError::NotSupport)
+    }
 }
 
 /// Represent a debugable target, could be a process, core dump, etc.
@@ -464,44 +470,6 @@ pub trait AdaptorUtil: UDbgAdaptor {
             self.write_value(a, &(p as u64))
         }
     }
-
-    // fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
-    //     self.get_registers()?
-    //         .get_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?)
-    //         .ok_or(UDbgError::InvalidRegister)
-    // }
-
-    // fn set_reg(&self, r: &str, val: CpuReg) -> UDbgResult<()> {
-    //     self.get_registers()?
-    //         .set_reg(get_regid(r).ok_or(UDbgError::InvalidRegister)?, val);
-    //     Ok(())
-    // }
-
-    // fn parse_address(&self, symbol: &str) -> Option<usize> {
-    //     let (mut left, right) = match symbol.find('+') {
-    //         Some(pos) => ((&symbol[..pos]).trim(), Some((&symbol[pos + 1..]).trim())),
-    //         None => (symbol.trim(), None),
-    //     };
-
-    //     let mut val = if let Ok(val) = self.get_reg(left) {
-    //         val.as_int()
-    //     } else {
-    //         if left.starts_with("0x") || left.starts_with("0X") {
-    //             left = &left[2..];
-    //         }
-    //         if let Ok(address) = usize::from_str_radix(left, 16) {
-    //             address
-    //         } else {
-    //             self.get_address_by_symbol(left)?
-    //         }
-    //     };
-
-    //     if let Some(right) = right {
-    //         val += self.parse_address(right)?;
-    //     }
-
-    //     Some(val)
-    // }
 
     fn get_symbol_(&self, addr: usize, o: Option<usize>) -> Option<SymbolInfo> {
         Target::get_symbol(self, addr, o.unwrap_or(0x100))

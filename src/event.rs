@@ -9,8 +9,8 @@ use crate::{
     symbol::UDbgModule,
     target::{TraceContext, UDbgAdaptor},
 };
-use core::marker::Unpin;
 use core::pin::Pin;
+use core::{fmt, marker::Unpin};
 use core::{
     future::Future,
     task::{Context, Poll},
@@ -71,9 +71,9 @@ impl UEventState {
         *self.reply.lock() = reply;
     }
 
-    pub async fn loop_util<F: Fn(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool>(
+    pub async fn loop_util<F: FnMut(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool>(
         &self,
-        exit: F,
+        mut exit: F,
     ) -> Arc<dyn UDbgAdaptor> {
         loop {
             let event = self.cont().await;
@@ -131,6 +131,12 @@ pub enum UEvent {
 }
 
 impl Unpin for UEvent {}
+
+impl fmt::Debug for UEvent {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, f)
+    }
+}
 
 /// An asynchronous procedure for handling debug event
 /// CANNOT mix it with other asynchronous runtime

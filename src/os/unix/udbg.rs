@@ -60,6 +60,12 @@ impl TraceBuf<'_> {
         unsafe { (self.callback.as_mut().unwrap())(self, event) }
     }
 
+    pub fn update_siginfo(&mut self, tid: pid_t) {
+        ptrace::getsiginfo(Pid::from_raw(tid))
+            .log_error("siginfo")
+            .map(|si| self.si = si);
+    }
+
     // pub fn set_regs(&self) -> UDbgResult<()> {
     //     ptrace::setregs(Pid::from_raw(self.base.event_tid.get()), unsafe {
     //         *self.regs.get()
@@ -124,6 +130,20 @@ impl DefaultEngine {
             .map(|p| p.as_raw() as tid_t)
             .unwrap_or_default();
 
+        if matches!(
+            self.status,
+            WaitStatus::Stopped(_, _) //  | WaitStatus::Signaled(_, _, _)
+        ) {
+            buf.update_regs(self.tid);
+            buf.update_siginfo(self.tid);
+            // info!(
+            //     "si: {:?}, address: {:p}, ip: {:x}",
+            //     buf.si,
+            //     unsafe { buf.si.si_addr() },
+            //     *crate::register::AbstractRegs::ip(&mut buf.user)
+            // );
+        }
+
         let target = self
             .targets
             .iter()
@@ -166,10 +186,6 @@ impl EventHandler for DefaultEngine {
 
         Some(match status {
             WaitStatus::Stopped(_, sig) => loop {
-                buf.update_regs(tid);
-                ptrace::getsiginfo(Pid::from_raw(tid))
-                    .log_error("siginfo")
-                    .map(|si| buf.si = si);
                 match sig {
                     // maybe thread created (by ptrace_attach or ptrace_interrupt) (in PTRACE_EVENT_CLONE)
                     // maybe kill by SIGSTOP
@@ -191,22 +207,26 @@ impl EventHandler for DefaultEngine {
                         }
                     }
                     #[cfg(any(target_os = "linux", target_os = "android"))]
-                    Signal::SIGTRAP | Signal::SIGILL => {
-                        if this
+                    Signal::SIGTRAP => {
+                        if let Some(result) = this
                             .handle_breakpoint(this.as_ref(), self, buf)
                             .log_error("handle trap")
-                            .is_some()
                         {
-                            break None;
+                            break result;
                         }
                     }
                     _ => {}
                 }
-                buf.call(UEvent::Exception {
+                break match buf.call(UEvent::Exception {
                     first: true,
                     code: sig as _,
-                });
-                break Some(sig);
+                }) {
+                    UserReply::Run(true) => Some(sig),
+                    reply => {
+                        this.handle_reply(this.as_ref(), reply, &mut buf.user);
+                        None
+                    }
+                };
             },
             #[cfg(any(target_os = "linux", target_os = "android"))]
             WaitStatus::PtraceEvent(_, sig, code) => {

@@ -11,6 +11,11 @@ pub type reg_t = u64;
 #[cfg(target_pointer_width = "32")]
 pub type reg_t = u32;
 
+#[cfg(windows)]
+pub type state_t = u32;
+#[cfg(unix)]
+pub type state_t = reg_t;
+
 #[repr(C)]
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct X64Regs {
@@ -1596,8 +1601,8 @@ mod arch {
     pub const LEN_4: reg_t = 3;
     pub const LEN_8: reg_t = 2;
 
-    pub const EFLAGS_TF: u32 = 0x100;
-    pub const EFLAGS_RF: u32 = 0x10000;
+    pub const EFLAGS_TF: state_t = 0x100;
+    pub const EFLAGS_RF: state_t = 0x10000;
 
     const L0: usize = 0;
     const G0: usize = 1;
@@ -1619,7 +1624,7 @@ mod arch {
     const LEN3: usize = 30;
 
     pub trait HWBPRegs: AbstractRegs {
-        fn eflags(&mut self) -> &mut u32;
+        fn eflags(&mut self) -> &mut state_t;
 
         fn set_step(&mut self, step: bool) {
             let flags = *self.eflags();
@@ -1654,7 +1659,7 @@ mod arch {
         }
 
         #[inline(always)]
-        fn test_eflags(&mut self, flag: u32) -> bool {
+        fn test_eflags(&mut self, flag: state_t) -> bool {
             *self.eflags() & flag > 0
         }
 
@@ -1803,7 +1808,7 @@ mod arch {
     use super::*;
 
     // https://stackoverflow.com/questions/69484476/analog-of-setting-trap-flag-in-event-flags-in-thread-context-for-arm64
-    pub const CPSR_STEP: u32 = 0x200000;
+    pub const CPSR_STEP: state_t = 0x200000;
 
     pub const LEN_1: u32 = 0x01;
     pub const LEN_2: u32 = 0x03;
@@ -1821,7 +1826,7 @@ mod arch {
     }
 
     pub trait HWBPRegs: AbstractRegs {
-        fn cpsr(&mut self) -> &mut u32;
+        fn cpsr(&mut self) -> &mut state_t;
 
         fn set_step(&mut self, step: bool) {
             let flags = *self.cpsr();

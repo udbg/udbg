@@ -1,8 +1,12 @@
 //! OS-specific functionality
 
+use core::ops::Deref;
 use std::{cell::Cell, sync::Arc};
 
-use crate::prelude::*;
+use crate::{
+    prelude::*,
+    register::{FromUsize, HWBPRegs},
+};
 
 cfg_if! {
     if #[cfg(any(target_os="linux", target_os="android"))] {
@@ -204,6 +208,44 @@ impl CommonAdaptor {
         // delete table breakpoint
         table_index.map(|i| self.bp_map.write().remove(&i));
     }
+
+    pub fn handle_reply<C: HWBPRegs>(
+        &self,
+        this: &dyn UDbgAdaptor,
+        reply: UserReply,
+        context: &mut C,
+    ) {
+        let tid = self.base.event_tid.get();
+        match reply {
+            UserReply::StepIn => {
+                context.set_step(true);
+                self.step_tid.set(tid);
+                // info!("step_tid: {}", tid);
+            }
+            UserReply::StepOut => {
+                if let Some(address) = this.check_call(context.ip().to_usize()) {
+                    context.set_step(false);
+                    self.add_soft_bp(
+                        this,
+                        &BpOpt::int3(address)
+                            .temp(true)
+                            .enable(true)
+                            .thread(self.base.event_tid.get()),
+                    )
+                    .log_error("add bp");
+                } else {
+                    context.set_step(true);
+                    self.step_tid.set(tid);
+                    // info!("step_tid out: {}", tid)
+                }
+            }
+            UserReply::Goto(address) => {
+                self.add_soft_bp(this, &BpOpt::int3(address).temp(true).enable(true))
+                    .log_error("add bp");
+            }
+            _ => {}
+        };
+    }
 }
 
 impl<T> BreakpointManager for T
@@ -225,5 +267,27 @@ where
             .values()
             .map(|bp| bp.clone() as Arc<dyn UDbgBreakpoint>)
             .collect()
+    }
+}
+
+impl<T> ReadMemory for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
+    default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        self.process.read_memory(addr, data)
+    }
+}
+
+impl<T> WriteMemory for T
+where
+    T: Deref<Target = CommonAdaptor>,
+{
+    default fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
+        WriteMemory::write_memory(&self.process, addr, data)
+    }
+
+    default fn flush_cache(&self, address: usize, len: usize) -> std::io::Result<()> {
+        self.process.flush_cache(address, len)
     }
 }
