@@ -460,13 +460,13 @@ pub fn get_selector_entry_wow64(th: HANDLE, s: u32) -> u32 {
 }
 
 #[inline]
-fn map_or_open(file: HANDLE, path: &str) -> Option<memmap::Mmap> {
+fn map_or_open(file: HANDLE, path: &str) -> Option<memmap2::Mmap> {
     if file.is_null() {
         Utils::mapfile(path)
     } else {
         unsafe {
             let f = File::from_raw_handle(file);
-            memmap::Mmap::map(&f).ok()
+            memmap2::Mmap::map(&f).ok()
         }
     }
 }
