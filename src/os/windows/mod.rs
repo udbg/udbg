@@ -763,24 +763,13 @@ pub trait ReadMemUtilsWin: ReadMemoryUtils {
         Some(r.to_unicode().to_utf8())
     }
 
+    // read a C string, if it is not a valid utf8 string, try convert from ANSI encoding
     fn read_utf8_or_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         let r = self.read_cstring(address, max)?;
-        match core::str::from_utf8(&r) {
-            Ok(_) => String::from_utf8(r).ok(),
-            Err(_) => Some(r.to_unicode().to_utf8()),
+        match String::from_utf8(r) {
+            Ok(res) => Some(res),
+            Err(err) => Some(err.as_bytes().to_unicode().to_utf8()),
         }
-    }
-
-    fn read_wstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
-        let result = self.read_util(
-            address,
-            |&x| x < b' ' as u16 && x != 9 && x != 10 && x != 13,
-            max.into().unwrap_or(1000),
-        );
-        if result.len() == 0 {
-            return None;
-        }
-        Some(result.to_utf8())
     }
 
     fn read_unicode_string(&self, address: usize) -> Option<String> {
@@ -789,11 +778,11 @@ pub trait ReadMemUtilsWin: ReadMemoryUtils {
     }
 
     fn read_nt_header(&self, mod_base: usize) -> Option<(IMAGE_NT_HEADERS, usize)> {
-        let dos: IMAGE_DOS_HEADER = self.read_value(mod_base)?;
+        let dos = self.read_value::<IMAGE_DOS_HEADER>(mod_base)?;
         if dos.e_magic != IMAGE_DOS_SIGNATURE {
             return None;
         }
-        let nt: IMAGE_NT_HEADERS = self.read_value(mod_base + dos.e_lfanew as usize)?;
+        let nt = self.read_value::<IMAGE_NT_HEADERS>(mod_base + dos.e_lfanew as usize)?;
         if nt.Signature != IMAGE_NT_SIGNATURE {
             return None;
         }

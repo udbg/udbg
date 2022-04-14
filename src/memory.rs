@@ -18,6 +18,19 @@ pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
 }
 
+pub trait ReadValue: Sized {
+    type Output = Self;
+
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self::Output>;
+}
+
+impl<T: Copy> ReadValue for T {
+    #[inline(always)]
+    default fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self> {
+        r.read_copy(address)
+    }
+}
+
 pub trait ReadMemoryUtils: ReadMemory {
     /// read continuous values until the conditions are met
     fn read_util<T: PartialEq + Copy>(
@@ -94,8 +107,26 @@ pub trait ReadMemoryUtils: ReadMemory {
         String::from_utf8(self.read_cstring(address, max)?).ok()
     }
 
-    fn read_array<T>(&self, addr: usize, count: usize) -> Vec<Option<T>> {
-        let mut result = Vec::<Option<T>>::with_capacity(count);
+    #[inline(always)]
+    fn read_copy<T: Copy>(&self, address: usize) -> Option<T> {
+        unsafe {
+            let mut val: T = zeroed();
+            self.read_memory(
+                address,
+                from_raw_parts_mut(transmute::<_, *mut u8>(&mut val), size_of::<T>()),
+            )
+            .and_then(|buf| {
+                if buf.len() == size_of::<T>() {
+                    Some(val)
+                } else {
+                    None
+                }
+            })
+        }
+    }
+
+    fn read_array<T: ReadValue>(&self, addr: usize, count: usize) -> Vec<Option<T::Output>> {
+        let mut result = Vec::with_capacity(count);
         for i in 0..count {
             result.push(self.read_value::<T>(addr + size_of::<T>() * i));
         }
@@ -113,21 +144,8 @@ pub trait ReadMemoryUtils: ReadMemory {
     }
 
     /// read any typed value
-    fn read_value<T>(&self, address: usize) -> Option<T> {
-        unsafe {
-            let mut val: T = zeroed();
-            self.read_memory(
-                address,
-                from_raw_parts_mut(transmute::<_, *mut u8>(&mut val), size_of::<T>()),
-            )
-            .and_then(|buf| {
-                if buf.len() == size_of::<T>() {
-                    Some(val)
-                } else {
-                    None
-                }
-            })
-        }
+    fn read_value<T: ReadValue>(&self, address: usize) -> Option<T::Output> {
+        T::read_value(self, address)
     }
 
     /// read some values into existing array data
@@ -142,20 +160,33 @@ pub trait ReadMemoryUtils: ReadMemory {
         }
     }
 
+    // read wide-string (utf16)
+    fn read_wstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
+        let result = self.read_util(
+            address,
+            |&x| x < b' ' as u16 && x != 9 && x != 10 && x != 13,
+            max.into().unwrap_or(1000),
+        );
+        if result.len() == 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&result))
+    }
+
     /// read multiple-level pointer
-    fn read_multilevel<T>(&self, address: usize, offset: &[usize]) -> Option<T> {
+    fn read_multilevel<T: ReadValue>(&self, address: usize, offset: &[usize]) -> Option<T::Output> {
         let mut p = address;
         for o in offset.iter() {
             if p == 0 {
                 return None;
             }
-            if let Some(v) = self.read_value(p + *o) {
+            if let Some(v) = self.read_value::<usize>(p + *o) {
                 p = v;
             } else {
                 return None;
             }
         }
-        self.read_value(p)
+        self.read_value::<T>(p)
     }
 }
 
