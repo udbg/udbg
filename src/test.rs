@@ -9,8 +9,8 @@ const TARGET: &str = "cat";
 
 async fn loop_util<'a>(
     state: &UEventState,
-    mut exit: impl FnMut(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool + 'a,
-) -> Arc<dyn UDbgAdaptor> {
+    mut exit: impl FnMut(&Arc<dyn UDbgTarget>, &UEvent) -> bool + 'a,
+) -> Arc<dyn UDbgTarget> {
     state
         .loop_util(|target, event| {
             info!(

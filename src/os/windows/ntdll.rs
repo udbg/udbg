@@ -1,3 +1,5 @@
+//! Practical wrappers for functions/structs in ntdll
+
 pub use super::ffi::*;
 use super::util::BufferType;
 pub use ntapi::ntexapi::*;

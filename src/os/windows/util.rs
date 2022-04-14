@@ -106,17 +106,6 @@ pub fn call_with_timeout<T>(
     result
 }
 
-pub fn msgbox<T: AsRef<str>>(msg: T) {
-    unsafe {
-        MessageBoxW(
-            null_mut(),
-            msg.as_ref().to_unicode().as_ptr(),
-            "\0\0".as_ptr() as *const u16,
-            0u32,
-        );
-    }
-}
-
 pub fn to_dos_path(path: &mut [u16]) -> Option<&[u16]> {
     use winapi::um::fileapi::QueryDosDeviceW;
 
@@ -239,19 +228,6 @@ pub fn init_object_attributes(name: PUNICODE_STRING, attr: u32) -> OBJECT_ATTRIB
         let mut result = mem::zeroed();
         InitializeObjectAttributes(&mut result, name, attr, null_mut(), null_mut());
         result
-    }
-}
-
-pub fn get_window(pid: u32) -> Option<HWND> {
-    let mut w = null_mut();
-    enum_process_window(pid, |hwnd| {
-        w = hwnd;
-        !w.is_visible()
-    });
-    if w.is_null() {
-        None
-    } else {
-        Some(w)
     }
 }
 

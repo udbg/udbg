@@ -1,3 +1,5 @@
+//! Practical string utilities on Windows
+
 use core::marker::PhantomData;
 use core::{mem, ptr};
 

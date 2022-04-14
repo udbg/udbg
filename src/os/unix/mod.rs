@@ -32,10 +32,10 @@ pub struct MemoryPage {
 impl fmt::Debug for MemoryPage {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("MemoryPage")
-            .field("base", &format!("0x{:x}", self.base))
-            .field("size", &format!("0x{:x}", self.size))
+            .field("base", &self.base)
+            .field("size", &self.size)
             .field("prot", &unsafe {
-                String::from_utf8_unchecked(self.prot.to_vec())
+                core::str::from_utf8_unchecked(&self.prot)
             })
             .field("usage", &self.usage)
             .finish()
@@ -100,16 +100,13 @@ impl MemoryPage {
     }
 }
 
-pub struct NixModule {
-    /// 模块基本信息
+pub struct Module {
     pub data: ModuleData,
-    /// 模块符号信息
     pub syms: SymbolsData,
-    /// 是否已尝试过加载模块符号
     pub loaded: Cell<bool>,
 }
 
-impl NixModule {
+impl Module {
     // fn check_loaded(&self) {
     //     if self.loaded.get() { return; }
     //     let mut s = self.syms.write();
@@ -124,13 +121,13 @@ impl NixModule {
     // }
 }
 
-impl GetProp for NixModule {
+impl GetProp for Module {
     fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
         Ok(serde_value::Value::Unit)
     }
 }
 
-impl UDbgModule for NixModule {
+impl UDbgModule for Module {
     fn data(&self) -> &ModuleData {
         &self.data
     }
@@ -161,8 +158,10 @@ impl UDbgModule for NixModule {
     fn get_exports(&self) -> Option<Vec<Symbol>> {
         Some(self.syms.exports.iter().map(|i| i.1.clone()).collect())
     }
+
+    // TODO: dwarf
     // fn load_symbol_file(&self, path: &str) -> UDbgResult<()> {
     //     // self.syms.write().load_from_pdb(path)?; Ok(())
-    //     Ok(())  // TODO:
+    //     Ok(())
     // }
 }

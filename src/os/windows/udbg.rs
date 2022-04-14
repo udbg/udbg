@@ -30,8 +30,6 @@ use serde_value::Value as SerdeVal;
 use super::ntdll::*;
 use crate::{pdbfile::*, pe::PeHelper, range::*, register::*, shell::udbg_ui};
 
-pub trait DbgReg {}
-
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq)]
 pub enum HandleResult {
@@ -465,27 +463,22 @@ fn map_or_open(file: HANDLE, path: &str) -> Option<memmap2::Mmap> {
         Utils::mapfile(path)
     } else {
         unsafe {
-            let f = File::from_raw_handle(file);
+            let f = File::from_raw_handle(file.cast());
             memmap2::Mmap::map(&f).ok()
         }
     }
 }
 
-// type WinModule = ModuleSymbol<WinModLoader>;
-pub struct WinModule {
-    /// 模块基本信息
+pub struct Module {
     pub data: ModuleData,
-    /// 模块符号信息
     pub syms: SymbolsData,
-    /// x64用于栈回溯的函数表，x86下为空
     pub funcs: Vec<RUNTIME_FUNCTION>,
-    /// 模块文件句柄，可能是NULL
     file: HANDLE,
 }
 
-impl WinModule {}
+impl Module {}
 
-impl GetProp for WinModule {
+impl GetProp for Module {
     fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
         Ok(SerdeVal::String(match key {
             "pdb_sig" => self.syms.pdb_sig.to_string(),
@@ -502,7 +495,7 @@ impl GetProp for WinModule {
     }
 }
 
-impl UDbgModule for WinModule {
+impl UDbgModule for Module {
     fn data(&self) -> &ModuleData {
         &self.data
     }
@@ -559,7 +552,7 @@ fn system_root() -> &'static str {
     }
 }
 
-impl TargetSymbol for SymbolManager<WinModule> {
+impl TargetSymbol for SymbolManager<Module> {
     fn check_load_module(
         &self,
         read: &dyn ReadMemory,
@@ -717,7 +710,7 @@ impl TargetSymbol for SymbolManager<WinModule> {
                 pdb_sig: pdb_sig.into(),
             }
         };
-        symgr.add(WinModule {
+        symgr.add(Module {
             data,
             funcs,
             syms: syms.into(),
@@ -756,7 +749,7 @@ where
 
 impl<T> TargetMemory for T
 where
-    T: Deref<Target = CommonAdaptor> + UDbgAdaptor,
+    T: Deref<Target = CommonAdaptor> + UDbgTarget,
 {
     default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
         self.deref().enum_memory()
@@ -902,7 +895,7 @@ impl CommonAdaptor {
         Some(self.bp_map.read().get(&id)?.clone())
     }
 
-    pub fn user_handle_exception<T: UDbgAdaptor>(
+    pub fn user_handle_exception<T: UDbgTarget>(
         &self,
         first: bool,
         tb: &mut TraceBuf<T>,
@@ -918,7 +911,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_breakpoint<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
+    pub fn handle_breakpoint<C: DbgContext, T: Deref<Target = Self> + UDbgTarget>(
         &self,
         eh: &mut dyn EventHandler<T>,
         first: bool,
@@ -967,7 +960,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn handle_bp_has_data<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
+    pub fn handle_bp_has_data<C: DbgContext, T: Deref<Target = Self> + UDbgTarget>(
         &self,
         eh: &mut dyn EventHandler<T>,
         bp: Arc<Breakpoint>,
@@ -1061,7 +1054,7 @@ impl CommonAdaptor {
         HandleResult::Continue
     }
 
-    pub fn handle_possible_table_bp<C: DbgContext, T: Deref<Target = Self> + UDbgAdaptor>(
+    pub fn handle_possible_table_bp<C: DbgContext, T: Deref<Target = Self> + UDbgTarget>(
         &self,
         eh: &mut dyn EventHandler<T>,
         tb: &mut TraceBuf<T>,
@@ -1162,7 +1155,7 @@ impl CommonAdaptor {
 
     pub fn enable_hwbp(
         &self,
-        dbg: &dyn UDbgAdaptor,
+        dbg: &dyn UDbgTarget,
         bp: &Breakpoint,
         info: HwbpInfo,
         enable: bool,
@@ -1278,7 +1271,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn output_debug_string(&self, dbg: &dyn UDbgAdaptor, address: usize, count: usize) {
+    pub fn output_debug_string(&self, dbg: &dyn UDbgTarget, address: usize, count: usize) {
         if self.base.flags.get().contains(UDbgFlags::SHOW_OUTPUT) {
             if let Some(s) = dbg.read_utf8_or_ansi(address, count) {
                 udbg_ui().debug(&s);
@@ -1286,7 +1279,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn output_debug_string_wide(&self, dbg: &dyn UDbgAdaptor, address: usize, count: usize) {
+    pub fn output_debug_string_wide(&self, dbg: &dyn UDbgTarget, address: usize, count: usize) {
         if self.base.flags.get().contains(UDbgFlags::SHOW_OUTPUT) {
             if let Some(s) = dbg.read_wstring(address, count) {
                 udbg_ui().debug(&s);
@@ -1320,7 +1313,7 @@ impl NtHeader for IMAGE_NT_HEADERS {
     }
 }
 
-pub fn collect_memory_info(p: &Process, this: &dyn UDbgAdaptor) -> Vec<MemoryPageInfo> {
+pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPageInfo> {
     const PAGE_SIZE: usize = 0x1000;
     const MAX_HEAPS: usize = 1000;
 
@@ -1559,7 +1552,7 @@ impl StandardAdaptor {
         // https://docs.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-getfinalpathnamebyhandlew
         use winapi::um::fileapi::GetFinalPathNameByHandleW;
 
-        let this: &dyn UDbgAdaptor = self;
+        let this: &dyn UDbgTarget = self;
         let mut path = this.read_ptr(pname).and_then(|a| {
             if unicode {
                 self.process.read_wstring(a, MAX_PATH)
@@ -1701,7 +1694,7 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {}
+impl UDbgTarget for StandardAdaptor {}
 
 pub struct TraceBuf<'a, T = StandardAdaptor> {
     pub callback: *mut UDbgCallback<'a>,
@@ -1711,19 +1704,19 @@ pub struct TraceBuf<'a, T = StandardAdaptor> {
     pub cx32: *mut CONTEXT32,
 }
 
-impl<T: UDbgAdaptor> TraceBuf<'_, T> {
+impl<T: UDbgTarget> TraceBuf<'_, T> {
     #[inline]
     pub fn call(&mut self, event: UEvent) -> UserReply {
         unsafe { (self.callback.as_mut().unwrap())(self, event) }
     }
 }
 
-impl<T: UDbgAdaptor> TraceContext for TraceBuf<'_, T> {
+impl<T: UDbgTarget> TraceContext for TraceBuf<'_, T> {
     fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
         Some(unsafe { self.cx.as_mut() }?)
     }
 
-    fn target(&self) -> Arc<dyn UDbgAdaptor> {
+    fn target(&self) -> Arc<dyn UDbgTarget> {
         self.target.clone()
     }
 
@@ -1826,13 +1819,13 @@ impl DefaultEngine {
 }
 
 impl UDbgEngine for DefaultEngine {
-    fn open(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let result = StandardAdaptor::open(pid)?;
         self.targets.push(result.clone());
         Ok(result)
     }
 
-    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         unsafe {
             DebugActiveProcess(pid).check_last()?;
             let result = StandardAdaptor::open(pid)?;
@@ -1848,7 +1841,7 @@ impl UDbgEngine for DefaultEngine {
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    ) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
         let ppid = udbg_ui().get_config("ppid");
         let result = StandardAdaptor::new(create_debug_process(path, cwd, args, &mut pi, ppid)?);

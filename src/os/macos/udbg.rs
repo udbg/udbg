@@ -128,7 +128,7 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {}
+impl UDbgTarget for StandardAdaptor {}
 
 impl StandardAdaptor {
     pub fn open(pid: pid_t) -> UDbgResult<Arc<Self>> {

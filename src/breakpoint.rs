@@ -7,7 +7,7 @@ use std::{
     sync::{Arc, Weak},
 };
 
-use crate::{error::*, os::tid_t, register::*, target::UDbgAdaptor};
+use crate::{error::*, os::tid_t, register::*, target::UDbgTarget};
 use cfg_if::*;
 
 pub type BpID = isize;
@@ -265,7 +265,7 @@ pub struct Breakpoint {
     pub hit_count: Cell<usize>,
     pub hit_tid: Option<tid_t>,
 
-    pub target: Weak<dyn UDbgAdaptor>,
+    pub target: Weak<dyn UDbgTarget>,
     pub common: *const crate::os::CommonAdaptor,
 }
 

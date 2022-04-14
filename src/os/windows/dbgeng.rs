@@ -242,10 +242,10 @@ impl DebugEngine {
     }
 }
 
-impl UDbgAdaptor for DebugTarget {}
+impl UDbgTarget for DebugTarget {}
 
 impl UDbgEngine for DebugEngine {
-    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         unsafe {
             self.client
                 .AttachProcess(0, pid, DEBUG_ATTACH_DEFAULT)
@@ -259,7 +259,7 @@ impl UDbgEngine for DebugEngine {
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    ) -> UDbgResult<Arc<dyn UDbgTarget>> {
         unsafe {
             // let mut ty = WDbgType::Normal;
             if path.ends_with(".dmp") || path.ends_with(".DMP") {

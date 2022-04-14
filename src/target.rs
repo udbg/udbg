@@ -2,19 +2,14 @@
 //! Traits && types for debugger target, such as memory page, module, thread, process, etc., and their iterators.
 //!
 
+use crate::{os::Module, prelude::*, register::*};
+
 use core::ops::Deref;
+use parking_lot::RwLock;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Result as IoResult};
 use std::sync::Arc;
-
-use parking_lot::RwLock;
-
-use crate::{
-    os::{pid_t, tid_t, OsModule},
-    prelude::*,
-    register::*,
-};
 
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub enum UDbgStatus {
@@ -142,7 +137,7 @@ pub struct CommonBase {
     pub base: TargetBase,
     pub process: Process,
     pub step_tid: Cell<tid_t>,
-    pub symgr: SymbolManager<OsModule>,
+    pub symgr: SymbolManager<Module>,
     pub bp_map: RwLock<HashMap<BpID, Arc<Breakpoint>>>,
     pub dbg_reg: [Cell<usize>; 4],
 }
@@ -195,7 +190,7 @@ impl CommonBase {
     }
 
     #[inline(always)]
-    pub fn find_module(&self, address: usize) -> Option<Arc<OsModule>> {
+    pub fn find_module(&self, address: usize) -> Option<Arc<Module>> {
         self.symgr.find_module(address)
     }
 
@@ -232,23 +227,33 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
         "".into()
     }
 
-    /// see https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
+    /// get thread's priority, see https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
     #[cfg(windows)]
     fn priority(&self) -> Option<i32> {
         None
     }
 
+    /// get thread's priority
     #[cfg(not(windows))]
     fn priority(&self) -> Arc<str> {
         "".into()
     }
 
+    /// suspend the thread, and return the suspend count if success
     fn suspend(&self) -> IoResult<i32> {
         Err(ErrorKind::Unsupported.into())
     }
+
+    /// resume the thread, and return the suspend count if success
     fn resume(&self) -> IoResult<u32> {
         Err(ErrorKind::Unsupported.into())
     }
+
+    /// get thread's suspend count
+    fn suspend_count(&self) -> usize {
+        0
+    }
+
     #[cfg(windows)]
     fn get_context(&self, cx: &mut ThreadContext) -> IoResult<()> {
         Err(ErrorKind::Unsupported.into())
@@ -279,6 +284,20 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
 }
 
+impl core::fmt::Debug for dyn UDbgThread {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let mut ds = f.debug_struct("UDbgThread");
+        ds.field("tid", &self.tid)
+            .field("name", &self.name())
+            .field("status", &self.status())
+            .field("priority", &self.priority())
+            .field("suspend_count", &self.suspend_count());
+        #[cfg(windows)]
+        ds.field("entry", &self.entry()).field("teb", &self.teb());
+        ds.finish()
+    }
+}
+
 /// Debugger Engine
 pub trait UDbgEngine {
     fn enum_process(&self) -> Box<dyn Iterator<Item = ProcessInfo>> {
@@ -286,16 +305,16 @@ pub trait UDbgEngine {
     }
 
     /// open a process, only open, not attach
-    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         Err(UDbgError::NotSupport)
     }
 
-    fn open_self(&mut self) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open_self(&mut self) -> UDbgResult<Arc<dyn UDbgTarget>> {
         self.open(std::process::id() as _)
     }
 
     /// attach to a active process
-    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>>;
 
     /// create and debug a process
     fn create(
@@ -303,7 +322,7 @@ pub trait UDbgEngine {
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>>;
+    ) -> UDbgResult<Arc<dyn UDbgTarget>>;
 
     fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
@@ -448,11 +467,23 @@ pub trait Target: GetProp + TargetMemory + TargetControl {
     }
 }
 
-pub trait UDbgAdaptor: Send + Sync + Target + BreakpointManager + 'static {}
+/// Represent a debugable target, which is used in udbg
+pub trait UDbgTarget: Send + Sync + Target + BreakpointManager + 'static {}
 
-pub trait AdaptorUtil: UDbgAdaptor {
+impl core::fmt::Debug for dyn UDbgTarget {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        let base = self.base();
+        f.debug_struct("UDbgTarget")
+            .field("pid", &base.pid.get())
+            .field("image_path", &base.image_path)
+            .finish()
+    }
+}
+
+/// Practical functions based on UDbgTarget
+pub trait TargetUtil: UDbgTarget {
     fn add_bp(&self, opt: impl Into<BpOpt>) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
-        BreakpointManager::add_breakpoint(self, opt.into())
+        self.add_breakpoint(opt.into())
     }
 
     fn read_ptr(&self, a: usize) -> Option<usize> {
@@ -574,10 +605,10 @@ pub trait AdaptorUtil: UDbgAdaptor {
         self.base().pid.get()
     }
 }
-impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorUtil for T {}
+impl<'a, T: UDbgTarget + ?Sized + 'a> TargetUtil for T {}
 
 #[cfg(any(target_arch = "x86", target_arch = "x86_64"))]
-pub trait AdaptorArchUtil: UDbgAdaptor {
+pub trait TargetArchUtil: UDbgTarget {
     fn disasm(&self, address: usize) -> Option<iced_x86::Instruction> {
         use iced_x86::{Decoder, DecoderOptions, Instruction};
 
@@ -611,20 +642,21 @@ pub trait AdaptorArchUtil: UDbgAdaptor {
 }
 
 #[cfg(any(target_arch = "arm", target_arch = "aarch64"))]
-pub trait AdaptorArchUtil: UDbgAdaptor {
+pub trait TargetArchUtil: UDbgTarget {
     #[inline(always)]
     fn check_call(&self, address: usize) -> Option<usize> {
         todo!();
     }
 }
 
-impl<'a, T: UDbgAdaptor + ?Sized + 'a> AdaptorArchUtil for T {}
+impl<'a, T: UDbgTarget + ?Sized + 'a> TargetArchUtil for T {}
 
+/// Context information during the debugging target interruption
 pub trait TraceContext {
-    /// registers when debugger pauses
+    /// registers of debugging thread
     fn register(&mut self) -> Option<&mut dyn UDbgRegs>;
-    /// current tracee
-    fn target(&self) -> Arc<dyn UDbgAdaptor>;
+    /// interruptted debugging target
+    fn target(&self) -> Arc<dyn UDbgTarget>;
     /// parameter of exception
     fn exception_param(&self, i: usize) -> Option<usize> {
         None

@@ -259,7 +259,7 @@ impl CommonAdaptor {
 
             let base = m.base;
             let path = m.path.clone();
-            self.symgr.base.write().add(NixModule {
+            self.symgr.base.write().add(Module {
                 data: ModuleData {
                     base,
                     size: m.size,
@@ -307,7 +307,7 @@ impl CommonAdaptor {
 
     pub fn handle_breakpoint(
         &self,
-        this: &dyn UDbgAdaptor,
+        this: &dyn UDbgTarget,
         eh: &mut dyn EventHandler,
         tb: &mut TraceBuf,
     ) -> UDbgResult<HandleResult> {
@@ -479,7 +479,7 @@ impl CommonAdaptor {
 
     pub fn enable_hwbp(
         &self,
-        dbg: &dyn UDbgAdaptor,
+        dbg: &dyn UDbgTarget,
         bp: &Breakpoint,
         info: HwbpInfo,
         enable: bool,
@@ -840,4 +840,4 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgAdaptor for StandardAdaptor {}
+impl UDbgTarget for StandardAdaptor {}

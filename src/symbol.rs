@@ -225,12 +225,12 @@ pub fn get_symbol(symbols: &Syms, name: &str) -> Option<Symbol> {
         .map(|(_, v)| v.clone())
 }
 
-/// 代表一个模块内的符号数据
-/// * 三种符号来源：导出表、符号文件、用户自定义
-/// * 可动态添加自定义符号
+/// Represents the symbols in a module
 #[derive(Default)]
 pub struct SymbolsData {
+    /// symbols user added
     pub user_syms: RwLock<Syms>,
+    /// symbols from module export
     pub exports: Syms,
     /// PDB Signature
     pub pdb_sig: Box<str>,

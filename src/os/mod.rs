@@ -26,7 +26,7 @@ cfg_if! {
     if #[cfg(windows)] {
         pub mod windows;
         pub type pid_t = u32;
-        pub use self::windows::{WinModule as OsModule, *};
+        pub use self::windows::*;
     }
 }
 
@@ -34,7 +34,7 @@ cfg_if! {
     if #[cfg(unix)] {
         pub mod unix;
         pub type pid_t = libc::pid_t;
-        pub use self::unix::{NixModule as OsModule, *};
+        pub use self::unix::*;
     }
 }
 
@@ -47,7 +47,7 @@ cfg_if! {
 }
 
 impl CommonAdaptor {
-    pub fn add_soft_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
+    pub fn add_soft_bp(&self, this: &dyn UDbgTarget, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
         // software breakpoint
         if let Some(raw_byte) = this.read_value::<BpInsn>(opt.address) {
             let bp = Arc::new(Breakpoint {
@@ -71,7 +71,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn add_bp(&self, this: &dyn UDbgAdaptor, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
+    pub fn add_bp(&self, this: &dyn UDbgTarget, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
         self.base.check_opened()?;
         if self.bp_exists(opt.address as BpID) {
             return Err(UDbgError::BpExists);
@@ -134,7 +134,7 @@ impl CommonAdaptor {
 
     pub fn enable_breadpoint(
         &self,
-        dbg: &dyn UDbgAdaptor,
+        dbg: &dyn UDbgTarget,
         bp: &Breakpoint,
         enable: bool,
     ) -> UDbgResult<bool> {
@@ -173,7 +173,7 @@ impl CommonAdaptor {
 
     pub fn enable_bp(
         &self,
-        dbg: &dyn UDbgAdaptor,
+        dbg: &dyn UDbgTarget,
         id: BpID,
         enable: bool,
     ) -> Result<bool, UDbgError> {
@@ -184,7 +184,7 @@ impl CommonAdaptor {
         }
     }
 
-    pub fn remove_breakpoint(&self, this: &dyn UDbgAdaptor, bp: &Breakpoint) {
+    pub fn remove_breakpoint(&self, this: &dyn UDbgTarget, bp: &Breakpoint) {
         let mut hard_id = 0;
         let mut table_index = None;
         self.enable_breadpoint(this, &bp, false)
@@ -211,7 +211,7 @@ impl CommonAdaptor {
 
     pub fn handle_reply<C: HWBPRegs>(
         &self,
-        this: &dyn UDbgAdaptor,
+        this: &dyn UDbgTarget,
         reply: UserReply,
         context: &mut C,
     ) {
@@ -250,7 +250,7 @@ impl CommonAdaptor {
 
 impl<T> BreakpointManager for T
 where
-    T: core::ops::Deref<Target = CommonAdaptor> + UDbgAdaptor,
+    T: core::ops::Deref<Target = CommonAdaptor> + UDbgTarget,
 {
     default fn add_breakpoint(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Ok(self.deref().add_bp(self, &opt)?)

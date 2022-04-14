@@ -1,30 +1,25 @@
 mod ffi;
+mod udbg;
 mod util;
-mod window;
 
 #[cfg(feature = "dbgeng")]
 pub mod dbgeng;
 pub mod ntdll;
 pub mod string;
 pub mod symbol;
-pub mod udbg;
-
-pub use self::util::*;
-pub use self::window::*;
 
 pub use self::udbg::*;
+pub use self::util::*;
 
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::mem::{size_of, size_of_val, transmute, zeroed};
 use core::ops::Deref;
 use core::ptr::{null, null_mut};
-use core::slice::{from_raw_parts, from_raw_parts_mut};
 
 use ntapi::ntpsapi::PROCESS_BASIC_INFORMATION;
 use winapi::shared::minwindef::*;
 use winapi::shared::ntdef::UNICODE_STRING;
-use winapi::shared::windef::*;
 use winapi::um::handleapi::*;
 use winapi::um::memoryapi::*;
 use winapi::um::processthreadsapi::*;
@@ -32,7 +27,6 @@ use winapi::um::psapi::*;
 use winapi::um::tlhelp32::*;
 use winapi::um::winbase::*;
 use winapi::um::winnt::*;
-use winapi::um::winuser::*;
 
 use anyhow::{Error, Result};
 use std::io::{Error as IoError, Result as IoResult};
@@ -153,7 +147,7 @@ impl<T: Copy> Iterator for ToolHelperIter<T> {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryPage {
     pub base: usize,
     pub alloc_base: usize,
@@ -258,19 +252,6 @@ pub impl THREADENTRY32 {
     }
 }
 
-pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
-    unsafe {
-        let mut te32: THREADENTRY32 = zeroed();
-        te32.dwSize = size_of_val(&te32) as u32;
-        ToolHelperIter::new(
-            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).into(),
-            te32,
-            Thread32First,
-            Thread32Next,
-        )
-    }
-}
-
 #[extend::ext(name = ModuleInfo)]
 pub impl MODULEENTRY32W {
     #[inline(always)]
@@ -355,48 +336,16 @@ pub fn enum_module(pid: u32) -> ToolHelperIter<MODULEENTRY32W> {
     }
 }
 
-pub trait UnicodeUtil {
-    fn size(&self) -> u16;
-    fn max_size(&self) -> u16;
-    fn to_string(&self) -> String;
-    fn as_slice(&self) -> Option<&[u16]>;
-    fn as_mut_slice(&mut self) -> Option<&mut [u16]>;
-    fn as_slice_with_null(&self) -> Option<&[u16]>;
-}
-
-impl UnicodeUtil for UNICODE_STRING {
-    fn size(&self) -> u16 {
-        self.Length
-    }
-    fn max_size(&self) -> u16 {
-        self.MaximumLength
-    }
-
-    fn to_string(&self) -> String {
-        unsafe { from_raw_parts(self.Buffer, self.Length as usize).to_utf8() }
-    }
-
-    fn as_mut_slice(&mut self) -> Option<&mut [u16]> {
-        unsafe {
-            if self.Buffer.is_null() {
-                return None;
-            }
-            Some(from_raw_parts_mut(self.Buffer, self.size() as usize))
-        }
-    }
-
-    fn as_slice(&self) -> Option<&[u16]> {
-        if self.Buffer.is_null() {
-            return None;
-        }
-        Some(unsafe { from_raw_parts(self.Buffer, self.size() as usize) })
-    }
-
-    fn as_slice_with_null(&self) -> Option<&[u16]> {
-        if self.Buffer.is_null() {
-            return None;
-        }
-        Some(unsafe { from_raw_parts(self.Buffer, self.size() as usize + 1) })
+pub fn enum_thread() -> ToolHelperIter<THREADENTRY32> {
+    unsafe {
+        let mut te32: THREADENTRY32 = zeroed();
+        te32.dwSize = size_of_val(&te32) as u32;
+        ToolHelperIter::new(
+            CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0).into(),
+            te32,
+            Thread32First,
+            Thread32Next,
+        )
     }
 }
 
@@ -971,7 +920,6 @@ impl ProcessInfo {
                 pid,
                 name: p.name(),
                 wow64: false,
-                // window: get_window(pid).map(|w| w.get_text()).unwrap_or(String::new()),
                 path: String::new(),
                 cmdline: String::new(),
             };

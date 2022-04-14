@@ -13,7 +13,7 @@ struct ShellArg {
 
 #[cfg(windows)]
 fn main() {
-    use ::udbg::os::{ntdll::*, windows::UnicodeUtil, *};
+    use ::udbg::os::{ntdll::*, string::UnicodeUtil, *};
     use std::collections::HashMap;
     use std::time::Duration;
 

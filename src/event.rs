@@ -7,7 +7,7 @@ use crate::{
     os::tid_t,
     shell::*,
     symbol::UDbgModule,
-    target::{TraceContext, UDbgAdaptor},
+    target::{TraceContext, UDbgTarget},
 };
 use core::pin::Pin;
 use core::{fmt, marker::Unpin};
@@ -71,10 +71,10 @@ impl UEventState {
         *self.reply.lock() = reply;
     }
 
-    pub async fn loop_util<F: FnMut(&Arc<dyn UDbgAdaptor>, &UEvent) -> bool>(
+    pub async fn loop_util<F: FnMut(&Arc<dyn UDbgTarget>, &UEvent) -> bool>(
         &self,
         mut exit: F,
-    ) -> Arc<dyn UDbgAdaptor> {
+    ) -> Arc<dyn UDbgTarget> {
         loop {
             let event = self.cont().await;
             let target = self.context().target();

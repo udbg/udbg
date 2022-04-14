@@ -86,7 +86,7 @@ impl TraceContext for TraceBuf<'_> {
     //     Some(&mut self.user)
     // }
 
-    fn target(&self) -> Arc<dyn UDbgAdaptor> {
+    fn target(&self) -> Arc<dyn UDbgTarget> {
         self.target.clone()
     }
 }
@@ -326,12 +326,12 @@ impl EventHandler for DefaultEngine {
 }
 
 impl UDbgEngine for DefaultEngine {
-    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         Ok(StandardAdaptor::open(pid)?)
     }
 
     #[cfg(any(target_os = "linux", target_os = "android"))]
-    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads
         for tid in this.process.enum_thread() {
@@ -344,7 +344,7 @@ impl UDbgEngine for DefaultEngine {
     }
 
     #[cfg(target_os = "macos")]
-    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         Err(UDbgError::NotSupport)
     }
 
@@ -353,7 +353,7 @@ impl UDbgEngine for DefaultEngine {
         path: &str,
         cwd: Option<&str>,
         args: &[&str],
-    ) -> UDbgResult<Arc<dyn UDbgAdaptor>> {
+    ) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let result = StandardAdaptor::create(path, args)?;
         self.targets.push(result.clone());
         self.tid = result.pid();

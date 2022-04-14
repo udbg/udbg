@@ -23,7 +23,6 @@ pub const TRAP_BRANCH: i32 = 3;
 pub const TRAP_HWBKPT: i32 = 4;
 pub const TRAP_UNK: i32 = 5;
 
-// pub mod comm;
 mod process;
 mod udbg;
 pub mod util;
