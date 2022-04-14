@@ -1,4 +1,6 @@
 mod ffi;
+#[cfg(test)]
+mod test;
 mod udbg;
 mod util;
 
@@ -672,7 +674,7 @@ impl Process {
                 self.read_value::<usize>(peb as usize + FIELD_OFFSET!(PEB, ProcessParameters))
             })
             .and_then(|p| {
-                self.read_unicode_string(
+                self.read_value::<UNICODE_STRING>(
                     p + FIELD_OFFSET!(RTL_USER_PROCESS_PARAMETERS, CommandLine),
                 )
             })
@@ -757,6 +759,33 @@ impl Process {
     }
 }
 
+impl ReadValue<String> for UNICODE_STRING {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<String> {
+        r.read_copy::<UNICODE_STRING>(address)
+            .and_then(|u| r.read_wstring(u.Buffer as usize, u.Length as usize / 2))
+    }
+}
+
+impl ReadValue for IMAGE_DOS_HEADER {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self> {
+        let dos = r.read_copy::<Self>(address)?;
+        if dos.e_magic != IMAGE_DOS_SIGNATURE {
+            return None;
+        }
+        Some(dos)
+    }
+}
+
+impl ReadValue for IMAGE_NT_HEADERS {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self> {
+        let nt = r.read_copy::<Self>(address)?;
+        if nt.Signature != IMAGE_NT_SIGNATURE {
+            return None;
+        }
+        Some(nt)
+    }
+}
+
 pub trait ReadMemUtilsWin: ReadMemoryUtils {
     fn read_ansi(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
         let r = self.read_cstring(address, max)?;
@@ -772,20 +801,9 @@ pub trait ReadMemUtilsWin: ReadMemoryUtils {
         }
     }
 
-    fn read_unicode_string(&self, address: usize) -> Option<String> {
-        self.read_value::<UNICODE_STRING>(address)
-            .and_then(|u| self.read_wstring(u.Buffer as usize, u.Length as usize / 2))
-    }
-
     fn read_nt_header(&self, mod_base: usize) -> Option<(IMAGE_NT_HEADERS, usize)> {
         let dos = self.read_value::<IMAGE_DOS_HEADER>(mod_base)?;
-        if dos.e_magic != IMAGE_DOS_SIGNATURE {
-            return None;
-        }
         let nt = self.read_value::<IMAGE_NT_HEADERS>(mod_base + dos.e_lfanew as usize)?;
-        if nt.Signature != IMAGE_NT_SIGNATURE {
-            return None;
-        }
         Some((nt, dos.e_lfanew as usize))
     }
 }

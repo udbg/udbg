@@ -18,19 +18,18 @@ pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
 }
 
-pub trait ReadValue: Sized {
-    type Output = Self;
-
-    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self::Output>;
+pub trait ReadValue<O = Self>: Sized {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<O>;
 }
 
 impl<T: Copy> ReadValue for T {
     #[inline(always)]
-    default fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Self> {
+    default fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<T> {
         r.read_copy(address)
     }
 }
 
+#[allow(invalid_type_param_default)]
 pub trait ReadMemoryUtils: ReadMemory {
     /// read continuous values until the conditions are met
     fn read_util<T: PartialEq + Copy>(
@@ -125,7 +124,7 @@ pub trait ReadMemoryUtils: ReadMemory {
         }
     }
 
-    fn read_array<T: ReadValue>(&self, addr: usize, count: usize) -> Vec<Option<T::Output>> {
+    fn read_array<T: ReadValue<O>, O = T>(&self, addr: usize, count: usize) -> Vec<Option<O>> {
         let mut result = Vec::with_capacity(count);
         for i in 0..count {
             result.push(self.read_value::<T>(addr + size_of::<T>() * i));
@@ -144,7 +143,7 @@ pub trait ReadMemoryUtils: ReadMemory {
     }
 
     /// read any typed value
-    fn read_value<T: ReadValue>(&self, address: usize) -> Option<T::Output> {
+    fn read_value<T: ReadValue<O>, O = T>(&self, address: usize) -> Option<O> {
         T::read_value(self, address)
     }
 
@@ -174,7 +173,11 @@ pub trait ReadMemoryUtils: ReadMemory {
     }
 
     /// read multiple-level pointer
-    fn read_multilevel<T: ReadValue>(&self, address: usize, offset: &[usize]) -> Option<T::Output> {
+    fn read_multilevel<T: ReadValue<O>, O = T>(
+        &self,
+        address: usize,
+        offset: &[usize],
+    ) -> Option<O> {
         let mut p = address;
         for o in offset.iter() {
             if p == 0 {
