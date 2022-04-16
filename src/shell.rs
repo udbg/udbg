@@ -32,7 +32,7 @@ pub struct ThreadInfo {
 
 /// Handle/FD information
 #[repr(C)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct HandleInfo {
     pub ty: u32,
     pub handle: usize,

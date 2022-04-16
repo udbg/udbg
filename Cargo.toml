@@ -75,7 +75,6 @@ errno = '0.2'
 procfs = '0.12'
 
 [target.'cfg(target_os="macos")'.dependencies]
-mach = '0.3'
 mach2 = '0.4'
 libproc = '0.10'
 mach_o_sys = '0.1'

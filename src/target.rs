@@ -2,7 +2,8 @@
 //! Traits && types for debugger target, such as memory page, module, thread, process, etc., and their iterators.
 //!
 
-use crate::{os::Module, prelude::*, register::*};
+use crate::os::{priority_t, Module};
+use crate::{prelude::*, register::*};
 
 use core::ops::Deref;
 use parking_lot::RwLock;
@@ -211,7 +212,7 @@ pub struct ThreadData {
     #[cfg(windows)]
     pub handle: crate::os::windows::Handle,
     #[cfg(target_os = "macos")]
-    pub handle: crate::os::process::ThreadAct,
+    pub handle: crate::os::macos::ThreadAct,
 }
 
 #[cfg(windows)]
@@ -227,16 +228,9 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
         "".into()
     }
 
-    /// get thread's priority, see https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
-    #[cfg(windows)]
-    fn priority(&self) -> Option<i32> {
-        None
-    }
-
     /// get thread's priority
-    #[cfg(not(windows))]
-    fn priority(&self) -> Arc<str> {
-        "".into()
+    fn priority(&self) -> Option<priority_t> {
+        None
     }
 
     /// suspend the thread, and return the suspend count if success

@@ -1,9 +1,11 @@
 use crate::prelude::*;
+
 use core::{cell::Cell, fmt};
 use std::sync::Arc;
 
 pub mod udbg;
-pub use self::udbg::DefaultEngine;
+
+pub use libc::pid_t;
 
 impl Symbol {
     pub fn undecorate(sym: &str, flags: UDbgFlags) -> Option<String> {

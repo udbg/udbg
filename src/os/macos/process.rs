@@ -1,26 +1,19 @@
-use libc::{task_info, *};
-use mach::mach_types::thread_act_t;
-use mach::task::*;
-use mach::task_info::task_dyld_info;
-use mach::task_info::TASK_DYLD_INFO;
-use mach::thread_act::thread_resume;
-use mach::thread_act::thread_suspend;
-use mach::vm::*;
-use mach::*;
-use vm_region::*;
-
-pub use libc::__darwin_arm_thread_state64;
-pub use libc::pid_t;
+use super::ffi::*;
+use super::*;
 
 use crate::os::tid_t;
-use crate::prelude::*;
 
-use super::ffi::*;
 use core::mem::size_of;
-use std::ffi::CStr;
+use mach2::mach_types::thread_act_t;
+use mach2::task::{task_resume, task_suspend, task_threads};
+use mach2::task_info::*;
+use mach2::thread_act::{thread_resume, thread_suspend};
+use mach2::vm::*;
+use mach2::vm_region::*;
+use mach2::vm_types::mach_vm_size_t;
+use nix::errno::Errno;
 use std::io::Error as IoErr;
 use std::io::Result as IoResult;
-use std::ops::Deref;
 use std::sync::Arc;
 
 pub struct Process {
@@ -48,27 +41,11 @@ impl ReadMemory for Process {
     }
 }
 
-impl<T> ReadMemory for T
-where
-    T: AsRef<Process>,
-{
-    fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.as_ref().read_memory(addr, data)
-    }
-}
-
-impl<T> WriteMemory for T
-where
-    T: AsRef<Process>,
-{
+impl WriteMemory for Process {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize> {
         unsafe {
-            if mach_vm_write(
-                self.as_ref().task,
-                address as _,
-                data.as_ptr() as _,
-                data.len() as _,
-            ) == KERN_SUCCESS
+            if mach_vm_write(self.task, address as _, data.as_ptr() as _, data.len() as _)
+                == KERN_SUCCESS
             {
                 Some(data.len())
             } else {
@@ -78,21 +55,18 @@ where
     }
 }
 
-impl<T> TargetMemory for T
-where
-    T: AsRef<Process>,
-{
-    default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
-        Ok(Box::new(self.as_ref().enum_memory()))
+impl TargetMemory for Process {
+    fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
+        Ok(Box::new(Process::enum_memory(self)))
     }
 
-    default fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
-        self.as_ref().virtual_query(address as _)
+    fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
+        Process::virtual_query(self, address as _)
     }
 
-    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
-        self.as_ref()
-            .enum_memory()
+    fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+        // mach_vm_region_recurse(target_task, address, size, nesting_depth, info, infoCnt)
+        self.enum_memory()
             .map(|m| MemoryPageInfo {
                 base: m.base,
                 size: m.size,
@@ -102,6 +76,23 @@ where
                 usage: m.usage.into(),
             })
             .collect()
+    }
+}
+
+impl<T> TargetMemory for T
+where
+    T: AsRef<Process> + ReadMemory + WriteMemory,
+{
+    default fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + '_>> {
+        TargetMemory::enum_memory(self.as_ref())
+    }
+
+    default fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
+        TargetMemory::virtual_query(self.as_ref(), address)
+    }
+
+    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+        self.as_ref().collect_memory_info()
     }
 }
 
@@ -137,6 +128,26 @@ where
 }
 
 impl Process {
+    pub fn enum_pid() -> impl Iterator<Item = pid_t> {
+        unsafe {
+            let count = libc::proc_listallpids(::std::ptr::null_mut(), 0);
+            if count < 1 {
+                return vec![].into_iter();
+            }
+            let mut pids: Vec<pid_t> = Vec::with_capacity(count as usize);
+            pids.set_len(count as usize);
+            let count = count * core::mem::size_of::<pid_t>() as i32;
+            let x = libc::proc_listallpids(pids.as_mut_ptr().cast(), count);
+
+            if x < 1 || x as usize >= pids.len() {
+                return vec![].into_iter();
+            } else {
+                pids.set_len(x as usize);
+                pids.into_iter()
+            }
+        }
+    }
+
     pub fn current() -> Self {
         Self::from_pid(std::process::id() as _).unwrap()
     }
@@ -151,17 +162,186 @@ impl Process {
         }
     }
 
+    pub fn pid(&self) -> pid_t {
+        self.pid
+    }
+
+    pub fn image_path(&self) -> nix::Result<String> {
+        Self::pid_path(self.pid)
+    }
+
+    pub fn pid_path(pid: pid_t) -> nix::Result<String> {
+        unsafe {
+            let mut buffer: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as _);
+            let len = Errno::result(libc::proc_pidpath(
+                pid,
+                buffer.as_mut_ptr() as *mut _,
+                libc::PROC_PIDPATHINFO_MAXSIZE as _,
+            ))?;
+            buffer.set_len(len as _);
+            Ok(String::from_utf8_lossy(&buffer).into())
+        }
+    }
+
+    pub fn pid_name(pid: pid_t) -> nix::Result<String> {
+        unsafe {
+            let mut buffer: Vec<u8> =
+                Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as usize / 2);
+            let len = Errno::result(libc::proc_name(
+                pid,
+                buffer.as_mut_ptr() as *mut _,
+                buffer.capacity() as _,
+            ))?;
+            buffer.set_len(len as _);
+            Ok(String::from_utf8_lossy(&buffer).into())
+        }
+    }
+
+    pub fn regionfilename(pid: i32, address: u64) -> nix::Result<String> {
+        let mut buf: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as usize - 1);
+        let buffer_size = buf.capacity() as u32;
+        let ret: i32;
+
+        unsafe {
+            Errno::result(proc_regionfilename(
+                pid,
+                address,
+                buf.as_mut_ptr().cast(),
+                buffer_size,
+            ))?;
+            Ok(String::from_utf8_lossy(&buf).into())
+        }
+    }
+
+    pub fn pid_cmdline(pid: pid_t) -> Vec<String> {
+        let mut size = get_arg_max();
+        let mut proc_args = Vec::with_capacity(size);
+        unsafe {
+            let ptr: *mut u8 = proc_args.as_mut_slice().as_mut_ptr();
+            let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as _];
+            /*
+             * /---------------\ 0x00000000
+             * | ::::::::::::: |
+             * |---------------| <-- Beginning of data returned by sysctl() is here.
+             * | argc          |
+             * |---------------|
+             * | exec_path     |
+             * |---------------|
+             * | 0             |
+             * |---------------|
+             * | arg[0]        |
+             * |---------------|
+             * | 0             |
+             * |---------------|
+             * | arg[n]        |
+             * |---------------|
+             * | 0             |
+             * |---------------|
+             * | env[0]        |
+             * |---------------|
+             * | 0             |
+             * |---------------|
+             * | env[n]        |
+             * |---------------|
+             * | ::::::::::::: |
+             * |---------------| <-- Top of stack.
+             * :               :
+             * :               :
+             * \---------------/ 0xffffffff
+             */
+            if libc::sysctl(
+                mib.as_mut_ptr(),
+                mib.len() as _,
+                ptr.cast(),
+                &mut size,
+                std::ptr::null_mut(),
+                0,
+            ) == -1
+            {
+                return vec![];
+            }
+            let argc = *ptr.cast::<c_int>();
+            let intsize = core::mem::size_of::<c_int>();
+            let buf = core::slice::from_raw_parts(ptr.add(intsize), size - intsize);
+            buf.split(|&b| b == b'\0')
+                .skip(1)
+                .take(argc as _)
+                .map(|x| String::from_utf8_unchecked(x.to_vec()))
+                .collect()
+        }
+    }
+
+    pub fn pid_fds(pid: pid_t) -> UDbgResult<impl Iterator<Item = HandleInfo>> {
+        use ::libproc::libproc::bsd_info::BSDInfo;
+        use ::libproc::libproc::file_info::*;
+        use ::libproc::libproc::net_info::*;
+        use ::libproc::libproc::proc_pid::*;
+
+        impl Default for vnode_fdinfowithpath {
+            fn default() -> Self {
+                unsafe { core::mem::zeroed() }
+            }
+        }
+
+        impl PIDFDInfo for vnode_fdinfowithpath {
+            fn flavor() -> PIDFDInfoFlavor {
+                PIDFDInfoFlavor::VNodePathInfo
+            }
+        }
+
+        // help: https://github.com/aosm/lsof/blob/master/lsof/dialects/darwin/libproc/dfile.c
+        let info = pidinfo::<BSDInfo>(pid, 0)?;
+        let fds = listpidinfo::<ListFDs>(pid, info.pbi_nfiles as usize)?;
+        Ok(fds.into_iter().map(move |fd| {
+            let ty = fd.proc_fdtype.into();
+            let type_name = format!("{ty:?}");
+            let name = match ty {
+                ProcFDType::Socket => {
+                    let socket =
+                        pidfdinfo::<SocketFDInfo>(pid, fd.proc_fd).expect("pidfdinfo() failed");
+                    let proto = match socket.psi.soi_protocol {
+                        libc::IPPROTO_TCP => "tcp",
+                        libc::IPPROTO_UDP => "udp",
+                        libc::IPPROTO_IP => "ip",
+                        libc::IPPROTO_IPV6 => "ipv6",
+                        libc::IPPROTO_ICMP => "icmp",
+                        libc::IPPROTO_ICMPV6 => "icmpv6",
+                        _ => "unk",
+                    };
+                    // let info = socket.psi.soi_proto.pri_tcp;
+                    format!("[socket] {proto}")
+                }
+                // pipe_fdinfo, ...
+                // https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.8.sdk/usr/include/sys/proc_info.h
+                // ProcFDType::Pipe => {}
+                ProcFDType::VNode => {
+                    let fdp = pidfdinfo::<vnode_fdinfowithpath>(pid, fd.proc_fd).unwrap();
+                    let s = fdp.pvip.vip_path.split(|&x| x == 0).next().unwrap();
+                    let s = unsafe { std::str::from_utf8_unchecked(core::mem::transmute(s)) };
+                    s.to_string()
+                }
+                fdt => format!("[{fdt:?}]"),
+            };
+            HandleInfo {
+                ty: fd.proc_fdtype,
+                handle: fd.proc_fd as _,
+                type_name,
+                name,
+            }
+        }))
+    }
+
     pub fn virtual_query(&self, mut address: u64) -> Option<MemoryPage> {
         let mut size: mach_vm_size_t = 0;
         unsafe {
-            let mut info: vm_region_basic_info = core::mem::zeroed();
-            let mut count = core::mem::size_of::<vm_region_basic_info_data_64_t>() as u32;
+            let mut info: vm_region_basic_info_64 = core::mem::zeroed();
+            let mut count = core::mem::size_of::<vm_region_basic_info_64>() as u32;
             let mut object_name: mach_port_t = 0;
-            if vm::mach_vm_region(
+            if mach_vm_region(
                 self.task,
                 &mut address,
                 &mut size,
-                VM_REGION_BASIC_INFO,
+                VM_REGION_BASIC_INFO_64,
                 &mut info as *mut _ as _,
                 &mut count,
                 &mut object_name as _,
@@ -174,7 +354,7 @@ impl Process {
                 base: address as _,
                 size: size as _,
                 prot: protection_bits_to_rwx(&info),
-                usage: regionfilename(self.pid, address as _)
+                usage: Self::regionfilename(self.pid, address as _)
                     .unwrap_or_default()
                     .into(),
             })
@@ -249,54 +429,49 @@ impl Process {
         })
     }
 
-    pub fn suspend(&self) {
+    pub fn suspend(&self) -> nix::Result<()> {
         unsafe {
-            task_suspend(self.task);
+            Errno::result(task_suspend(self.task))?;
+            Ok(())
         }
     }
 
-    pub fn resume(&self) {
+    pub fn resume(&self) -> nix::Result<()> {
         unsafe {
-            task_resume(self.task);
+            Errno::result(task_resume(self.task))?;
+            Ok(())
         }
     }
 
-    pub fn list_thread(&self) -> UDbgResult<ProcessMemory<'_, thread_act_t>> {
+    pub fn list_thread(&self) -> UDbgResult<VmMemory<'_, thread_act_t>> {
         unsafe {
-            let mut threads = core::ptr::null_mut();
-            let mut count = 0;
-            let err = task_threads(self.task, &mut threads, &mut count);
+            let mut arr = FFIArray::default();
+            let err = task_threads(self.task, &mut arr.ptr, &mut arr.cnt);
             UDbgError::from_kern_return(err)?;
-            Ok(ProcessMemory {
-                ps: self,
-                ptr: threads,
-                count: count as _,
-            })
+            Ok(VmMemory { ps: self, arr })
         }
     }
 }
 
-pub struct ProcessMemory<'a, T> {
-    ps: &'a Process,
-    ptr: *const T,
-    count: usize,
+#[derive(Deref, DerefMut)]
+pub struct VmMemory<'a, T> {
+    pub ps: &'a Process,
+    #[deref]
+    #[deref_mut]
+    arr: FFIArray<T, u32>,
 }
 
-impl<T> Deref for ProcessMemory<'_, T> {
-    type Target = [T];
-
-    fn deref(&self) -> &Self::Target {
-        unsafe { core::slice::from_raw_parts(self.ptr, self.count) }
-    }
-}
-
-impl<T> Drop for ProcessMemory<'_, T> {
+impl<T> Drop for VmMemory<'_, T> {
+    #[inline]
     fn drop(&mut self) {
+        if self.ptr.is_null() {
+            return;
+        }
         unsafe {
             vm_deallocate(
                 self.ps.task,
                 self.ptr as _,
-                core::mem::size_of_val(&*self.ptr) * self.count,
+                core::mem::size_of_val(&*self.ptr) * self.cnt as usize,
             );
         }
     }
@@ -399,15 +574,10 @@ impl UDbgThread for MacThread {
         self.handle
             .extended_info()
             .map(|info| unsafe {
-                CStr::from_bytes_with_nul_unchecked(
-                    // core::mem::transmute(info.pth_name.strslice())
-                    // TODO:
-                    core::mem::transmute(&info.pth_name[..]),
-                )
-                .to_string_lossy()
+                let name = info.pth_name[..].strslice();
+                String::from_utf8_lossy(core::mem::transmute(name)).into()
             })
-            .unwrap_or_default()
-            .into()
+            .unwrap_or_else(|_| "".into())
     }
 
     fn status(&self) -> Arc<str> {
@@ -418,12 +588,11 @@ impl UDbgThread for MacThread {
             .into()
     }
 
-    fn priority(&self) -> Arc<str> {
+    fn priority(&self) -> Option<i32> {
         self.handle
             .extended_info()
-            .map(|info| info.pth_priority.to_string())
-            .unwrap_or_default()
-            .into()
+            .map(|info| info.pth_priority)
+            .ok()
     }
 
     fn suspend(&self) -> IoResult<i32> {
@@ -440,12 +609,15 @@ impl UDbgThread for MacThread {
             .map_err(IoErr::from_raw_os_error)
     }
 
-    fn last_error(&self) -> Option<u32> {
-        None
+    fn suspend_count(&self) -> usize {
+        self.handle
+            .basic_info()
+            .map(|info| info.suspend_count as usize)
+            .unwrap_or_default()
     }
 }
 
-fn protection_bits_to_rwx(info: &vm_region_basic_info) -> [u8; 4] {
+fn protection_bits_to_rwx(info: &vm_region_basic_info_64) -> [u8; 4] {
     let p = info.protection;
     [
         if p & VM_PROT_READ > 0 { b'r' } else { b'-' },
@@ -453,95 +625,6 @@ fn protection_bits_to_rwx(info: &vm_region_basic_info) -> [u8; 4] {
         if p & VM_PROT_EXECUTE > 0 { b'x' } else { b'-' },
         if info.shared > 0 { b'-' } else { b'p' },
     ]
-}
-
-pub fn get_errno_with_message(return_code: i32) -> String {
-    let e = errno::errno();
-    let code = e.0 as i32;
-    format!(
-        "return code = {}, errno = {}, message = '{}'",
-        return_code, code, e
-    )
-}
-
-pub fn check_errno(ret: i32, buf: &mut Vec<u8>) -> Result<String, String> {
-    if ret <= 0 {
-        Err(get_errno_with_message(ret))
-    } else {
-        unsafe {
-            buf.set_len(ret as usize);
-        }
-
-        match String::from_utf8(buf.to_vec()) {
-            Ok(return_value) => Ok(return_value),
-            Err(e) => Err(format!("Invalid UTF-8 sequence: {}", e)),
-        }
-    }
-}
-
-pub fn regionfilename(pid: i32, address: u64) -> Result<String, String> {
-    let mut buf: Vec<u8> = Vec::with_capacity(PROC_PIDPATHINFO_MAXSIZE as usize - 1);
-    let buffer_ptr = buf.as_mut_ptr() as *mut c_void;
-    let buffer_size = buf.capacity() as u32;
-    let ret: i32;
-
-    unsafe {
-        ret = proc_regionfilename(pid, address, buffer_ptr, buffer_size);
-    };
-
-    check_errno(ret, &mut buf)
-}
-
-pub fn enum_pid() -> impl Iterator<Item = pid_t> {
-    unsafe {
-        let count = libc::proc_listallpids(::std::ptr::null_mut(), 0);
-        if count < 1 {
-            return vec![].into_iter();
-        }
-        let mut pids: Vec<pid_t> = Vec::with_capacity(count as usize);
-        pids.set_len(count as usize);
-        let count = count * core::mem::size_of::<pid_t>() as i32;
-        let x = libc::proc_listallpids(pids.as_mut_ptr() as *mut c_void, count);
-
-        if x < 1 || x as usize >= pids.len() {
-            return vec![].into_iter();
-        } else {
-            pids.set_len(x as usize);
-            pids.into_iter()
-        }
-    }
-}
-
-pub fn process_name(pid: pid_t) -> Option<String> {
-    unsafe {
-        let mut buffer: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as usize / 2);
-        match libc::proc_name(pid, buffer.as_mut_ptr() as *mut _, buffer.capacity() as _) {
-            x if x > 0 => {
-                buffer.set_len(x as _);
-                let tmp = String::from_utf8_unchecked(buffer);
-                Some(tmp)
-            }
-            _ => None,
-        }
-    }
-}
-
-pub fn process_path(pid: pid_t) -> Option<String> {
-    unsafe {
-        let mut buffer: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as _);
-        match libc::proc_pidpath(
-            pid,
-            buffer.as_mut_ptr() as *mut _,
-            libc::PROC_PIDPATHINFO_MAXSIZE as _,
-        ) {
-            x if x > 0 => {
-                buffer.set_len(x as _);
-                let tmp = String::from_utf8_unchecked(buffer);
-                Some(tmp)
-            }
-            _ => None,
-        }
-    }
 }
 
 fn get_arg_max() -> usize {
@@ -565,160 +648,14 @@ fn get_arg_max() -> usize {
     }
 }
 
-unsafe fn get_unchecked_str(cp: *mut u8, start: *mut u8) -> String {
-    let len = cp as usize - start as usize;
-    let part = Vec::from_raw_parts(start, len, len);
-    let tmp = String::from_utf8_unchecked(part.clone());
-    core::mem::forget(part);
-    tmp
-}
-
-pub fn process_cmdline(pid: pid_t) -> Vec<String> {
-    let mut size = get_arg_max();
-    let mut proc_args = Vec::with_capacity(size);
-    unsafe {
-        let ptr: *mut u8 = proc_args.as_mut_slice().as_mut_ptr();
-        let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as _];
-        /*
-         * /---------------\ 0x00000000
-         * | ::::::::::::: |
-         * |---------------| <-- Beginning of data returned by sysctl() is here.
-         * | argc          |
-         * |---------------|
-         * | exec_path     |
-         * |---------------|
-         * | 0             |
-         * |---------------|
-         * | arg[0]        |
-         * |---------------|
-         * | 0             |
-         * |---------------|
-         * | arg[n]        |
-         * |---------------|
-         * | 0             |
-         * |---------------|
-         * | env[0]        |
-         * |---------------|
-         * | 0             |
-         * |---------------|
-         * | env[n]        |
-         * |---------------|
-         * | ::::::::::::: |
-         * |---------------| <-- Top of stack.
-         * :               :
-         * :               :
-         * \---------------/ 0xffffffff
-         */
-        if libc::sysctl(
-            mib.as_mut_ptr(),
-            mib.len() as _,
-            ptr as *mut c_void,
-            &mut size,
-            std::ptr::null_mut(),
-            0,
-        ) == -1
-        {
-            return vec![];
-        }
-        let argc = *ptr.cast::<c_int>();
-        let intsize = core::mem::size_of::<c_int>();
-        let buf = core::slice::from_raw_parts(ptr.add(intsize), size - intsize);
-        buf.split(|&b| b == b'\0')
-            .skip(1)
-            .take(argc as _)
-            .map(|x| String::from_utf8_unchecked(x.to_vec()))
-            .collect()
-    }
-}
-
-pub fn process_fds(pid: pid_t) -> impl Iterator<Item = HandleInfo> {
-    use ::libproc::libproc::bsd_info::BSDInfo;
-    use ::libproc::libproc::file_info::*;
-    use ::libproc::libproc::proc_pid::*;
-    // use ::libproc::libproc::net_info::*;
-
-    impl Default for vnode_fdinfowithpath {
-        fn default() -> Self {
-            unsafe { core::mem::zeroed() }
-        }
-    }
-
-    impl PIDFDInfo for vnode_fdinfowithpath {
-        fn flavor() -> PIDFDInfoFlavor {
-            PIDFDInfoFlavor::VNodePathInfo
-        }
-    }
-
-    let info = pidinfo::<BSDInfo>(pid, 0).expect("pidinfo() failed");
-    let fds = listpidinfo::<ListFDs>(pid, info.pbi_nfiles as usize).expect("listpidinfo() failed");
-    fds.into_iter().map(move |fd| {
-        let ty = fd.proc_fdtype.into();
-        let type_name = format!("{ty:?}");
-        let name = match ty {
-            ProcFDType::Socket => {
-                // let socket = pidfdinfo::<SocketFDInfo>(pid, fd.proc_fd).expect("pidfdinfo() failed");
-                // if let SocketInfoKind::Tcp = socket.psi.soi_kind.into() {
-                //     unsafe {
-                //         let info = socket.psi.soi_proto.pri_tcp;
-                //         assert_eq!(socket.psi.soi_protocol, libc::IPPROTO_TCP);
-                //         assert_eq!(info.tcpsi_ini.insi_lport as u32, 65535);
-                //     }
-                // }
-                format!("[socket]")
-            }
-            // ProcFDType::Pipe => {}
-            ProcFDType::VNode => {
-                let fdp = pidfdinfo::<vnode_fdinfowithpath>(pid, fd.proc_fd).unwrap();
-                let s = fdp.pvip.vip_path.split(|&x| x == 0).next().unwrap();
-                let s = unsafe { std::str::from_utf8_unchecked(core::mem::transmute(s)) };
-                s.to_string()
-            }
-            _ => "".into(),
-        };
-        HandleInfo {
-            ty: fd.proc_fdtype,
-            handle: fd.proc_fd as _,
-            type_name,
-            name,
-        }
-    })
-}
-
 impl ProcessInfo {
     pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
-        Box::new(enum_pid().map(|pid| Self {
+        Box::new(Process::enum_pid().map(|pid| Self {
             pid,
             wow64: false,
-            name: process_name(pid).unwrap_or_default(),
-            path: process_path(pid).unwrap_or_default(),
-            cmdline: process_cmdline(pid).join(" "),
+            name: Process::pid_name(pid).unwrap_or_default(),
+            path: Process::pid_path(pid).unwrap_or_default(),
+            cmdline: Process::pid_cmdline(pid).join(" "),
         }))
-    }
-}
-
-mod test {
-    use super::*;
-
-    #[test]
-    fn process() {
-        for pid in enum_pid() {
-            let ps = match Process::from_pid(pid) {
-                Ok(r) => r,
-                Err(_) => continue,
-            };
-
-            println!(
-                "{pid} {:?} {:?}",
-                process_name(pid),
-                process_path(pid),
-                // process_cmdline(pid)
-            );
-
-            for i in ps.list_module() {
-                println!("  {:x} 0x{:x} {:?}", i.base, i.size, i.path);
-            }
-
-            // process_fds(pid);
-        }
     }
 }

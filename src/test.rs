@@ -196,3 +196,29 @@ fn debug() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[test]
+fn target() {
+    let mut engine = crate::os::DefaultEngine::default();
+    let target = engine.open_self().unwrap();
+
+    println!("Modules:");
+    for m in target.enum_module().unwrap() {
+        println!("  {:x?}", m.data());
+    }
+
+    println!("Memory:");
+    for m in target.collect_memory_info() {
+        println!("  {:x?}", m);
+    }
+
+    println!("Threads:");
+    for th in target.enum_thread(true).unwrap() {
+        println!("  {:?}", th);
+    }
+
+    println!("Handles:");
+    for h in target.enum_handle().unwrap() {
+        println!("  {h:x?}");
+    }
+}

@@ -92,7 +92,9 @@ pub struct ArmRegs {
 #[repr(C)]
 #[derive(Copy, Clone, Serialize, Deserialize)]
 pub struct Arm64Regs {
-    pub regs: [reg_t; 31],
+    pub regs: [reg_t; 29],
+    pub fp: reg_t,
+    pub lr: reg_t,
     pub sp: reg_t,
     pub pc: reg_t,
     pub pstate: reg_t,

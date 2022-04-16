@@ -259,7 +259,7 @@ pub const MF_HEAP: u32 = 1 << 5;
 pub const MF_PEB: u32 = 1 << 6;
 
 #[repr(C)]
-#[derive(Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryPageInfo {
     pub base: usize,
     pub size: usize,

@@ -13,6 +13,10 @@ pub mod symbol;
 pub use self::udbg::*;
 pub use self::util::*;
 
+// see https://docs.microsoft.com/en-us/windows/win32/api/processthreadsapi/nf-processthreadsapi-getthreadpriority#return-value
+pub type priority_t = i32;
+pub type pid_t = u32;
+
 use alloc::string::String;
 use alloc::sync::Arc;
 use core::mem::{size_of, size_of_val, transmute, zeroed};

@@ -25,7 +25,6 @@ cfg_if! {
 cfg_if! {
     if #[cfg(windows)] {
         pub mod windows;
-        pub type pid_t = u32;
         pub use self::windows::*;
     }
 }
@@ -33,7 +32,6 @@ cfg_if! {
 cfg_if! {
     if #[cfg(unix)] {
         pub mod unix;
-        pub type pid_t = libc::pid_t;
         pub use self::unix::*;
     }
 }

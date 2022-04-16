@@ -17,6 +17,8 @@ use std::sync::Arc;
 
 pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
 
+pub type priority_t = i64;
+
 pub const TRAP_BRKPT: i32 = 1;
 pub const TRAP_TRACE: i32 = 2;
 pub const TRAP_BRANCH: i32 = 3;
@@ -218,6 +220,14 @@ pub fn ptrace_peekuser(pid: i32, offset: usize) -> nix::Result<c_long> {
 
 pub fn ptrace_pokeuser(pid: i32, offset: usize, val: c_long) -> nix::Result<c_long> {
     Errno::result(unsafe { libc::ptrace(PTRACE_POKEUSER, Pid::from_raw(pid), offset, val) })
+}
+
+impl TraceBuf<'_> {
+    pub fn update_siginfo(&mut self, tid: pid_t) {
+        ptrace::getsiginfo(Pid::from_raw(tid))
+            .log_error("siginfo")
+            .map(|si| self.si = si);
+    }
 }
 
 #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
