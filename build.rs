@@ -1,8 +1,7 @@
-#![cfg(target_os = "macos")]
+#[cfg(target_os = "macos")]
+fn make_ipc_code() {
+    use std::{env, path::Path, process::Command};
 
-use std::{env, path::Path, process::Command};
-
-fn main() {
     let defs = Path::new("src/os/macos/exc.defs").canonicalize().unwrap();
     let out = env::var("OUT_DIR").unwrap();
     let outdir = Path::new(&out);
@@ -21,4 +20,9 @@ fn main() {
         .file("mach_excServer.c")
         .file("mach_excUser.c")
         .compile("exc");
+}
+
+fn main() {
+    #[cfg(target_os = "macos")]
+    make_ipc_code();
 }
