@@ -22,6 +22,7 @@ spin = '0.9'
 ctor = '0.1'
 regex = '1.5'
 pdb = '0.7'
+llua = '0.1.0'
 extend = '1.1'
 bitflags = '1.2'
 anyhow = '1.0'
@@ -38,6 +39,10 @@ cpp_demangle = {version = '0.3'}
 memoffset = {version = '0.6.5', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
+
+[[bin]]
+name = 'tracee'
+path = 'src/tracee/main.rs'
 
 [target.'cfg(windows)'.dependencies]
 winapi = {version = '0.3.9', features = [
@@ -84,5 +89,6 @@ cc = '1'
 
 [dev-dependencies]
 rustyline = '9'
-structopt = '0.3.8'
 flexi_logger = '0.22'
+clap = {version = "3.1.9", features = ["derive"]}
+llua = {version = '0.1.0', features = ['vendored']}

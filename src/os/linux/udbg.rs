@@ -691,40 +691,14 @@ impl StandardAdaptor {
         Ok(Arc::new(Self(CommonAdaptor::new(ps))))
     }
 
-    pub fn create(path: &str, args: &[&str]) -> UDbgResult<Arc<Self>> {
-        match unsafe { libc::fork() } {
-            0 => unsafe {
-                use std::ffi::CString;
-                ptrace::traceme();
-                let path = CString::new(path).unwrap();
-                let args = args
-                    .iter()
-                    .map(|&arg| CString::new(arg).unwrap())
-                    .collect::<Vec<_>>();
-                let mut argv = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
-                argv.insert(0, path.as_ptr());
-                argv.push(core::ptr::null());
-                libc::execvp(path.as_ptr().cast(), argv.as_ptr());
-                unreachable!();
-            },
-            -1 => Err(UDbgError::system()),
-            pid => {
-                waitpid(None, Some(WAIT_PID_FLAG())).context("waitpid")?;
-                let ps = Process::from_pid(pid).context("open")?;
-                let this = Self(CommonAdaptor::new(ps));
-                this.base().status.set(UDbgStatus::Attached);
-                this.insert_thread(pid as _);
-                this.base().event_tid.set(pid as _);
-                Ok(Arc::new(this))
-            }
-        }
-    }
-
-    pub fn insert_thread(&self, tid: tid_t) {
+    pub fn insert_thread(&self, tid: tid_t) -> bool {
         if self.threads.write().insert(tid) {
             if let Err(err) = ptrace::setoptions(Pid::from_raw(tid), self.trace_opts) {
                 udbg_ui().error(format!("ptrace_setopt {tid} {err:?}",));
             }
+            true
+        } else {
+            false
         }
     }
 
@@ -873,9 +847,15 @@ impl UDbgTarget for StandardAdaptor {}
 
 impl EventHandler for DefaultEngine {
     fn fetch(&mut self, buf: &mut TraceBuf) -> Option<()> {
-        self.status = waitpid(None, Some(WAIT_PID_FLAG())).ok()?;
-        // info!("[status] {:?}", self.status);
-        self.fetch_target(buf);
+        loop {
+            self.status = waitpid(None, Some(WaitPidFlag::__WALL)).ok()?;
+            // info!("[status] {:?}", self.status);
+            if self.fetch_target(buf) {
+                break;
+            } else {
+                ptrace::cont(self.status.pid().unwrap(), None);
+            }
+        }
         Some(())
     }
 
@@ -886,49 +866,25 @@ impl EventHandler for DefaultEngine {
 
         Some(match status {
             WaitStatus::Stopped(_, sig) => loop {
-                match sig {
-                    // maybe thread created (by ptrace_attach or ptrace_interrupt) (in PTRACE_EVENT_CLONE)
-                    // maybe kill by SIGSTOP
-                    Signal::SIGSTOP => {
-                        if matches!(
-                            this.base().status.get(),
-                            UDbgStatus::Idle | UDbgStatus::Opened
-                        ) {
-                            this.base().status.set(UDbgStatus::Attached);
-                        }
-                        if this.threads.read().get(&tid).is_none() {
-                            buf.call(UEvent::ThreadCreate(tid));
-                            this.insert_thread(tid);
-                            break None;
-                        }
-                        if self.cloned_tids.remove(&tid) {
-                            buf.call(UEvent::ThreadCreate(tid));
-                            break None;
-                        }
+                if sig == Signal::SIGTRAP {
+                    if let Some(result) = this
+                        .handle_breakpoint(this.as_ref(), self, buf)
+                        .log_error("handle trap")
+                    {
+                        break result;
                     }
-                    #[cfg(any(target_os = "linux", target_os = "android"))]
-                    Signal::SIGTRAP => {
-                        if let Some(result) = this
-                            .handle_breakpoint(this.as_ref(), self, buf)
-                            .log_error("handle trap")
-                        {
-                            break result;
-                        }
-                    }
-                    _ => {}
                 }
                 break match buf.call(UEvent::Exception {
                     first: true,
                     code: sig as _,
                 }) {
-                    UserReply::Run(true) => Some(sig),
+                    UserReply::Run(false) => Some(sig),
                     reply => {
                         this.handle_reply(this.as_ref(), reply, &mut buf.user);
                         None
                     }
                 };
             },
-            #[cfg(any(target_os = "linux", target_os = "android"))]
             WaitStatus::PtraceEvent(_, sig, code) => {
                 match code {
                     PTRACE_EVENT_STOP => {
@@ -940,37 +896,23 @@ impl EventHandler for DefaultEngine {
                         buf.call(UEvent::ThreadCreate(new_tid));
                         // trace new thread
                         ptrace::attach(Pid::from_raw(new_tid));
-                        // set trace options for new thread
-                        this.insert_thread(new_tid);
-
-                        self.cloned_tids.insert(new_tid);
                     }
                     PTRACE_EVENT_FORK | PTRACE_EVENT_VFORK => {
                         let new_pid =
                             ptrace::getevent(Pid::from_raw(tid)).unwrap_or_default() as pid_t;
                         // info!("forked new pid: {new_pid}");
-                        let newpid = Pid::from_raw(new_pid);
-                        waitpid(newpid, None)
-                            .log_error_with(|e| format!("wait new pid {new_pid}: {e:#?}"))
-                            .map(|ws| {
-                                StandardAdaptor::open(new_pid)
-                                    .log_error("open child")
-                                    .map(|t| self.targets.push(t));
-                                let tid = self.tid;
-                                assert_eq!(ws.pid(), Some(newpid));
-                                self.status = ws;
-                                self.fetch_target(buf);
-                                buf.call(UEvent::ProcessCreate);
-                                buf.target.insert_thread(new_pid);
-                                buf.call(UEvent::ThreadCreate(new_pid));
-                                ptrace::cont(newpid, None);
-                                self.tid = tid;
-                            });
+                        // let newpid = Pid::from_raw(new_pid);
+                        // ptrace::detach(newpid, None);
+                        // ptrace::cont(newpid, None);
+                        StandardAdaptor::open(new_pid)
+                            .log_error("open child")
+                            .map(|t| self.targets.push(t));
                     }
                     PTRACE_EVENT_EXEC => {
                         // let new_pid =
                         //     ptrace::getevent(Pid::from_raw(tid)).unwrap_or_default() as pid_t;
                         // info!("execed new pid: {new_pid}");
+                        info!("PTRACE_EVENT_EXEC: {:?}", this.process.image_path());
                         // buf.call(UEvent::ProcessCreate);
                     }
                     _ => {}
@@ -1046,7 +988,7 @@ impl Default for DefaultEngine {
 }
 
 impl DefaultEngine {
-    pub fn fetch_target(&mut self, buf: &mut TraceBuf) {
+    pub fn fetch_target(&mut self, buf: &mut TraceBuf) -> bool {
         self.tid = self
             .status
             .pid()
@@ -1071,26 +1013,33 @@ impl DefaultEngine {
             .targets
             .iter()
             .find(|&t| self.tid == t.pid() as tid_t || t.threads.read().contains(&self.tid))
-            .cloned();
+            .cloned()
+            .or_else(|| {
+                self.targets
+                    .iter()
+                    .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
+                    .cloned()
+            });
 
-        #[cfg(any(target_os = "linux", target_os = "android"))]
-        {
-            buf.target = target
-                .or_else(|| {
-                    self.targets
-                        .iter()
-                        .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
-                        .cloned()
-                })
-                .with_context(|| format!("{} is not traced", self.tid))
-                .unwrap();
-        }
-        #[cfg(any(target_os = "macos"))]
-        {
-            buf.target = target.expect("not traced target");
-        }
+        if let Some(target) = target {
+            buf.target = target.clone();
+            buf.target.base.event_tid.set(self.tid as _);
 
-        buf.target.base.event_tid.set(self.tid as _);
+            if target.base.status.get() < UDbgStatus::Attached {
+                target.base.status.set(UDbgStatus::Attached);
+                buf.call(UEvent::ProcessCreate);
+            }
+
+            // set trace options for new thread
+            if buf.target.insert_thread(self.tid) {
+                buf.call(UEvent::ThreadCreate(self.tid));
+                return false;
+            }
+            true
+        } else {
+            udbg_ui().warn(format!("{} is not traced", self.tid));
+            false
+        }
     }
 }
 
@@ -1103,10 +1052,11 @@ impl UDbgEngine for DefaultEngine {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads
         for tid in this.process.enum_thread() {
-            ptrace::attach(Pid::from_raw(tid)).context("attach")?;
-            // this.threads.write().insert(tid);
-            this.insert_thread(tid);
+            ptrace::attach(Pid::from_raw(tid)).with_context(|| format!("attach {tid}"))?;
         }
+        // wait main thread
+        waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED))
+            .with_context(|| format!("waitpid({pid})"))?;
         self.targets.push(this.clone());
         Ok(this)
     }
@@ -1117,10 +1067,31 @@ impl UDbgEngine for DefaultEngine {
         cwd: Option<&str>,
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        let result = StandardAdaptor::create(path, args)?;
-        self.targets.push(result.clone());
-        self.tid = result.pid() as _;
-        Ok(result)
+        match unsafe { libc::fork() } {
+            0 => unsafe {
+                use std::ffi::CString;
+                ptrace::traceme();
+                let path = CString::new(path).unwrap();
+                let args = args
+                    .iter()
+                    .map(|&arg| CString::new(arg).unwrap())
+                    .collect::<Vec<_>>();
+                let mut argv = args.iter().map(|arg| arg.as_ptr()).collect::<Vec<_>>();
+                argv.insert(0, path.as_ptr());
+                argv.push(core::ptr::null());
+                libc::execvp(path.as_ptr().cast(), argv.as_ptr());
+                unreachable!();
+            },
+            -1 => Err(UDbgError::system()),
+            pid => {
+                waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED))
+                    .with_context(|| format!("waitpid({pid})"))?;
+                let ps = Process::from_pid(pid).context("open")?;
+                let this = Arc::new(StandardAdaptor(CommonAdaptor::new(ps)));
+                self.targets.push(this.clone());
+                Ok(this)
+            }
+        }
     }
 
     fn event_loop<'a>(&mut self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
@@ -1129,24 +1100,32 @@ impl UDbgEngine for DefaultEngine {
             t.update_memory_page();
         });
 
-        let mut buf = TraceBuf {
+        let target = self
+            .targets
+            .iter()
+            .next()
+            .map(Clone::clone)
+            .context("no attached target")?;
+
+        self.tid = target.process.pid;
+        target.base.event_tid.set(self.tid);
+        target.base.status.set(UDbgStatus::Attached);
+
+        let buf = &mut TraceBuf {
             callback,
             user: unsafe { core::mem::zeroed() },
             si: unsafe { core::mem::zeroed() },
             regs_dirty: false,
-            target: self
-                .targets
-                .iter()
-                .next()
-                .map(Clone::clone)
-                .context("no attached target")?,
+            target,
         };
-
         buf.call(UEvent::InitBp);
-        self.cont(None, &mut buf);
+        buf.call(UEvent::ProcessCreate);
+        buf.target.insert_thread(self.tid);
+        buf.call(UEvent::ThreadCreate(self.tid));
+        ptrace::cont(Pid::from_raw(self.tid), None);
 
-        while let Some(s) = self.fetch(&mut buf).and_then(|_| self.handle(&mut buf)) {
-            self.cont(s, &mut buf);
+        while let Some(s) = self.fetch(buf).and_then(|_| self.handle(buf)) {
+            self.cont(s, buf);
         }
 
         Ok(())

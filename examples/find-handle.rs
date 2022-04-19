@@ -1,7 +1,7 @@
-use structopt::StructOpt;
+use clap::Parser;
 
-#[derive(StructOpt)]
-#[structopt(
+#[derive(Parser)]
+#[clap(
     name = "find-handle",
     author = "metaworm",
     about = "find handles or dlls"
@@ -30,7 +30,7 @@ fn main() {
     }
 
     let mut type_cache = HashMap::<u32, String>::new();
-    let args = ShellArg::from_args();
+    let args = ShellArg::parse();
     let pattern = regex::Regex::new(&args.name).expect("Regular expression pattern");
 
     system_handle_information().for_each(|h| {

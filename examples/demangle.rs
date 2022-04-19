@@ -1,8 +1,8 @@
-use structopt::StructOpt;
+use clap::Parser;
 use udbg::{prelude::Symbol, shell::UDbgFlags};
 
-#[derive(StructOpt)]
-#[structopt(
+#[derive(Parser)]
+#[clap(
     name = "demangle",
     author = "metaworm",
     about = "demangle the cpp name"
@@ -12,7 +12,7 @@ struct ShellArg {
 }
 
 fn main() {
-    let args = ShellArg::from_args();
+    let args = ShellArg::parse();
     println!(
         "{}",
         Symbol::undecorate(&args.name, UDbgFlags::UNDEC_TYPE | UDbgFlags::UNDEC_RETN)

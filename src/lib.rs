@@ -2,7 +2,6 @@
 #![doc(html_logo_url = "https://avatars.githubusercontent.com/u/61437564?s=200&v=4")]
 #![feature(trait_alias)]
 #![feature(once_cell)]
-#![feature(assert_matches)]
 #![feature(min_specialization)]
 #![feature(stmt_expr_attributes)]
 #![feature(const_ptr_offset_from)]
@@ -34,6 +33,7 @@ pub mod breakpoint;
 pub mod elf;
 pub mod error;
 pub mod event;
+pub mod lua;
 pub mod memory;
 pub mod os;
 pub mod pdbfile;
@@ -109,6 +109,3 @@ pub mod util {
         }
     }
 }
-
-#[cfg(test)]
-pub(crate) mod test;

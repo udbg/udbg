@@ -1,5 +1,8 @@
-use crate::{prelude::*, register::regid};
+#![feature(assert_matches)]
+
+use log::info;
 use std::{cell::Cell, rc::Rc, sync::Arc};
+use udbg::{prelude::*, register::regid};
 
 #[cfg(windows)]
 const TARGET: &str = "notepad.exe";
@@ -18,17 +21,17 @@ async fn loop_util<'a>(
                 target.pid(),
                 target.base().event_tid.get()
             );
+            let pc = state
+                .context()
+                .register()
+                .unwrap()
+                .get("_pc")
+                .unwrap()
+                .as_int();
+            info!("  PC: {pc:x} {:?}", target.get_symbol_string(pc));
             match event {
-                UEvent::Exception { .. } | UEvent::Step | UEvent::Breakpoint(_) => {
-                    let pc = state
-                        .context()
-                        .register()
-                        .unwrap()
-                        .get("_pc")
-                        .unwrap()
-                        .as_int();
-                    info!("  PC: {pc:x} {:?}", target.get_symbol_string(pc));
-                }
+                // UEvent::Exception { .. } | UEvent::Step | UEvent::Breakpoint(_) => {
+                // }
                 UEvent::ProcessCreate => {
                     info!("  {}", target.base().image_path);
                 }
@@ -46,7 +49,7 @@ fn debug() -> anyhow::Result<()> {
         .start()?;
 
     let arg = "!!!---";
-    let mut engine = crate::os::DefaultEngine::default();
+    let mut engine = udbg::os::DefaultEngine::default();
     engine.create(TARGET, None, &[arg]).expect("create target");
 
     #[derive(Default)]
@@ -120,7 +123,8 @@ fn debug() -> anyhow::Result<()> {
                 .as_int();
             assert_ne!(pc, bp.address());
             true
-        });
+        })
+        .await;
 
         state.reply(UserReply::Run(true));
         loop_util(state, |target, event| match event {
@@ -199,7 +203,7 @@ fn debug() -> anyhow::Result<()> {
 
 #[test]
 fn target() {
-    let mut engine = crate::os::DefaultEngine::default();
+    let mut engine = udbg::os::DefaultEngine::default();
     let target = engine.open_self().unwrap();
 
     println!("Modules:");
@@ -221,4 +225,53 @@ fn target() {
     for h in target.enum_handle().unwrap() {
         println!("  {h:x?}");
     }
+}
+
+#[test]
+fn tracee() -> anyhow::Result<()> {
+    use std::cell::RefCell;
+
+    let tracee = env!("CARGO_BIN_EXE_tracee");
+    flexi_logger::Logger::try_with_env_or_str("info")?
+        .use_utc()
+        .start()?;
+
+    let mut engine = udbg::os::DefaultEngine::default();
+    engine.create(tracee, None, &[]).expect("create target");
+
+    #[derive(Default)]
+    struct State {
+        thread_count: RefCell<usize>,
+        child_count: RefCell<usize>,
+    }
+    let st = Rc::new(State::default());
+    let ds = st.clone();
+    engine.event_loop(&mut |ctx, event| {
+        let target = ctx.target();
+        info!(
+            "[event]~{}:{} {event}",
+            target.pid(),
+            target.base().event_tid.get()
+        );
+        match event {
+            UEvent::ThreadCreate(tid) => {
+                *ds.thread_count.borrow_mut() += 1;
+            }
+            UEvent::ProcessCreate => {
+                println!("  {}", target.base().image_path);
+                *ds.child_count.borrow_mut() += 1;
+            }
+            // UEvent::ProcessExit(code) => assert_eq!(code, 0),
+            UEvent::Exception { .. } => {
+                let pc = ctx.register().unwrap().get("_pc").unwrap().as_int();
+                info!("  PC: {pc:x} {:?}", target.get_symbol_string(pc));
+            }
+            _ => {}
+        };
+        UserReply::Run(false)
+    })?;
+    assert!(*st.thread_count.borrow() > 1);
+    assert!(*st.child_count.borrow() > 1);
+
+    Ok(())
 }

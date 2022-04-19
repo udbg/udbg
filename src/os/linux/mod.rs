@@ -15,8 +15,6 @@ use std::io::Result as IoResult;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-pub const WAIT_PID_FLAG: fn() -> WaitPidFlag = || WaitPidFlag::__WALL | WaitPidFlag::WUNTRACED;
-
 pub type priority_t = i64;
 
 pub const TRAP_BRKPT: i32 = 1;

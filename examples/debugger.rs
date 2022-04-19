@@ -1,5 +1,5 @@
+use clap::Parser;
 use rustyline::Editor;
-use structopt::StructOpt;
 use udbg::prelude::*;
 
 #[cfg(windows)]
@@ -8,11 +8,13 @@ const TARGET: &str = "notepad.exe";
 #[cfg(unix)]
 const TARGET: &str = "ls";
 
-#[derive(StructOpt)]
-#[structopt(name = "debugger", author = "metaworm", about = "debugger demo")]
+#[derive(Parser)]
+#[clap(name = "debugger", author = "metaworm", about = "debugger demo")]
 struct ShellArg {
-    #[structopt(default_value = TARGET)]
+    #[clap(default_value = TARGET)]
     target: String,
+    #[clap(short, long)]
+    attach: Option<pid_t>,
 }
 
 fn main() -> anyhow::Result<()> {
@@ -20,11 +22,15 @@ fn main() -> anyhow::Result<()> {
         .use_utc()
         .start()?;
 
-    let args = ShellArg::from_args();
+    let args = ShellArg::parse();
     let mut engine = udbg::os::DefaultEngine::default();
-    engine
-        .create(&args.target, None, &[])
-        .expect("create target");
+
+    if let Some(pid) = args.attach {
+        engine.attach(pid)
+    } else {
+        engine.create(&args.target, None, &[])
+    }
+    .expect("create/attach target");
 
     let mut rl = Editor::<()>::new();
 

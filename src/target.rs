@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::io::{ErrorKind, Result as IoResult};
 use std::sync::Arc;
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
 pub enum UDbgStatus {
     Idle,
     Opened,
