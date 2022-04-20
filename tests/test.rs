@@ -2,13 +2,23 @@
 
 use log::info;
 use std::{cell::Cell, rc::Rc, sync::Arc};
-use udbg::{prelude::*, register::regid};
+use udbg::{
+    prelude::*,
+    register::{regid, CallingConv},
+};
 
-#[cfg(windows)]
-const TARGET: &str = "notepad.exe";
+fn set_logger() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
 
-#[cfg(unix)]
-const TARGET: &str = "cat";
+    ONCE.call_once(|| {
+        flexi_logger::Logger::try_with_env_or_str("info")
+            .expect("flexi_logger")
+            .use_utc()
+            .start()
+            .expect("flexi_logger");
+    });
+}
 
 async fn loop_util<'a>(
     state: &UEventState,
@@ -42,16 +52,11 @@ async fn loop_util<'a>(
         .await
 }
 
-#[test]
-fn debug() -> anyhow::Result<()> {
-    flexi_logger::Logger::try_with_env_or_str("info")?
-        .use_utc()
-        .start()
-        .log_error("logger");
+const ARG: &str = "!!!---";
 
-    let arg = "!!!---";
+fn test_debug(path: &str, args: &[&str]) -> anyhow::Result<()> {
     let mut engine = udbg::os::DefaultEngine::default();
-    engine.create(TARGET, None, &[arg]).expect("create target");
+    engine.create(path, None, args).expect("create target");
 
     #[derive(Default)]
     struct State {
@@ -63,7 +68,7 @@ fn debug() -> anyhow::Result<()> {
     let ds = st.clone();
     engine.task_loop(DebugTask::from(|state: UEventState| async move {
         let state = &state;
-        let target = loop_util(state, |_, e| matches!(e, UEvent::InitBp)).await;
+        let mut target = loop_util(state, |_, e| matches!(e, UEvent::InitBp)).await;
         info!("target path: {:?}", target.image_path());
 
         info!("initbp occured");
@@ -82,9 +87,10 @@ fn debug() -> anyhow::Result<()> {
             BP_INSN
         );
         info!("breakpoint added");
+        core::mem::drop(main);
 
         let mut file_bp: Option<Arc<dyn UDbgBreakpoint>> = None;
-        loop_util(state, |target, event| match event {
+        target = loop_util(state, |target, event| match event {
             UEvent::Breakpoint(_) => {
                 info!("entrypoint bp occured");
                 let regs = state.context().register().unwrap();
@@ -94,18 +100,15 @@ fn debug() -> anyhow::Result<()> {
                 );
 
                 ds.entry_hitted.set(true);
-                file_bp.replace(
-                    target
-                        .add_breakpoint(
-                            target
-                                .get_address_by_symbol("kernel32!CreateFileW")
-                                .or_else(|| target.get_address_by_symbol("libc!open"))
-                                .or_else(|| target.get_address_by_symbol("libc!__open64"))
-                                .unwrap()
-                                .into(),
-                        )
-                        .expect("add bp"),
-                );
+                #[cfg(windows)]
+                let a = target
+                    .get_address_by_symbol("kernelbase!CreateFileW")
+                    .or_else(|| target.get_address_by_symbol("kernel32!CreateFileW"));
+                #[cfg(unix)]
+                let a = target
+                    .get_address_by_symbol("libc!open")
+                    .or_else(|| target.get_address_by_symbol("libc!__open64"));
+                file_bp.replace(target.add_breakpoint(a.unwrap().into()).expect("add bp"));
                 true
             }
             _ => false,
@@ -113,7 +116,7 @@ fn debug() -> anyhow::Result<()> {
         .await;
 
         state.reply(UserReply::StepIn);
-        loop_util(state, |target, event| {
+        target = loop_util(state, |target, event| {
             std::assert_matches::assert_matches!(event, UEvent::Step);
             let pc = state
                 .context()
@@ -128,42 +131,31 @@ fn debug() -> anyhow::Result<()> {
         .await;
 
         state.reply(UserReply::Run(true));
-        loop_util(state, |target, event| match event {
+        target = loop_util(state, |target, event| match event {
             UEvent::Breakpoint(_) => {
                 let regs = state.context().register().unwrap();
                 assert_eq!(
                     regs.get_reg(regid::COMM_REG_PC).unwrap().as_int(),
                     file_bp.as_ref().unwrap().address()
                 );
-                let arg1;
+                let cc = if state.context().arch() == ARCH_X86 {
+                    Some(CallingConv::StdCall)
+                } else {
+                    None
+                };
+                let arg1 = target.read_argument(regs, 1, cc).unwrap();
                 let argstr;
                 #[cfg(windows)]
                 {
-                    arg1 = regs
-                        .get_reg(match std::env::consts::ARCH {
-                            "aarch64" => regid::ARM64_REG_X0,
-                            "x86_64" => regid::X86_REG_RCX,
-                            _ => unreachable!(),
-                        })
-                        .unwrap()
-                        .as_int();
                     let arg1 = target.read_wstring(arg1, None).unwrap_or_default();
                     argstr = arg1.strip_suffix(".txt").unwrap_or(&arg1).to_string();
                 }
                 #[cfg(unix)]
                 {
-                    arg1 = regs
-                        .get_reg(match std::env::consts::ARCH {
-                            "aarch64" => regid::ARM64_REG_X0,
-                            "x86_64" => regid::X86_REG_RDI,
-                            _ => unreachable!(),
-                        })
-                        .unwrap()
-                        .as_int();
                     argstr = target.read_utf8(arg1, None).unwrap_or_default();
                 }
                 info!("fopen bp occured: 0x{arg1:x} {argstr}");
-                if argstr == arg {
+                if argstr == ARG {
                     ds.fopen_hitted.set(true);
                     let hwbp = target
                         .add_breakpoint((arg1, HwbpType::Access).into())
@@ -178,7 +170,7 @@ fn debug() -> anyhow::Result<()> {
         })
         .await;
 
-        loop_util(state, |_, event| match event {
+        target = loop_util(state, |_, event| match event {
             UEvent::Breakpoint(bp) => {
                 assert!(bp.get_type().is_hard());
                 ds.hwbp_hitted.set(true);
@@ -190,8 +182,8 @@ fn debug() -> anyhow::Result<()> {
         })
         .await;
 
-        #[cfg(windows)]
-        target.kill().expect("kill");
+        // #[cfg(windows)]
+        // target.kill().expect("kill");
 
         loop_util(state, |_, _| false).await;
     }))?;
@@ -200,6 +192,26 @@ fn debug() -> anyhow::Result<()> {
     assert!(st.hwbp_hitted.get());
 
     Ok(())
+}
+
+#[test]
+fn debug() -> anyhow::Result<()> {
+    set_logger();
+
+    #[cfg(windows)]
+    test_debug(r"C:\Windows\System32\cmd.exe", &["/c", "type", ARG])?;
+    #[cfg(unix)]
+    test_debug("cat", &ARG)?;
+
+    Ok(())
+}
+
+#[cfg(all(windows, target_arch = "x86_64"))]
+#[test]
+fn debug_wow64() -> anyhow::Result<()> {
+    set_logger();
+
+    test_debug(r"C:\Windows\SysWOW64\cmd.exe", &["/c", "type", ARG])
 }
 
 #[test]
@@ -233,10 +245,7 @@ fn tracee() -> anyhow::Result<()> {
     use std::cell::RefCell;
 
     let tracee = env!("CARGO_BIN_EXE_tracee");
-    flexi_logger::Logger::try_with_env_or_str("info")?
-        .use_utc()
-        .start()
-        .log_error("logger");
+    set_logger();
 
     let mut engine = udbg::os::DefaultEngine::default();
     engine.create(tracee, None, &[]).expect("create target");

@@ -1567,18 +1567,76 @@ pub enum RegType {
     Arm64(Arm64Regs),
 }
 
+#[derive(Copy, Clone)]
+pub enum CallingConv {
+    X86_64,
+    Cdecl,
+    StdCall,
+    ThisCall,
+    AArch64,
+    SystemV,
+}
+
 pub trait UDbgRegs: crate::memory::AsByteArray {
+    /// Get register value by id
     fn get_reg(&self, id: u32) -> Option<CpuReg>;
+
+    /// Set register value by id
     fn set_reg(&mut self, id: u32, val: CpuReg);
 
+    /// Get register value by name
     fn get(&self, name: &str) -> Option<CpuReg> {
         get_regid(name).and_then(|id| self.get_reg(id))
     }
+
+    /// Set register value by name
     fn set(&mut self, name: &str, val: CpuReg) {
         get_regid(name).map(|id| self.set_reg(id, val));
     }
 
     fn to_regs(&self) -> RegType;
+
+    /// Get argument with default or specific calling convention
+    /// * Ok(regid) => register id
+    /// * Err(offset) => offset on stack, pointer size as unit
+    fn argument(&self, i: usize, convention: Option<CallingConv>) -> Result<u32, usize> {
+        use regid::*;
+        use CallingConv::*;
+
+        match convention {
+            Some(X86_64) => Ok(match i {
+                1 => X86_REG_RCX,
+                2 => X86_REG_RDX,
+                3 => X86_REG_R8,
+                4 => X86_REG_R9,
+                _ => return Err(i),
+            }),
+            Some(SystemV) => Ok(match i {
+                1 => X86_REG_RDI,
+                2 => X86_REG_RSI,
+                3 => X86_REG_RDX,
+                4 => X86_REG_RCX,
+                5 => X86_REG_R8,
+                6 => X86_REG_R9,
+                _ => return Err(i - 6),
+            }),
+            Some(Cdecl | StdCall) => Err(i),
+            Some(ThisCall) => Ok(match i {
+                1 => X86_REG_ECX,
+                _ => return Err(i - 1),
+            }),
+            Some(AArch64) => Ok(match i {
+                1..=8 => ARM64_REG_X0 + i as u32,
+                _ => return Err(i - 8),
+            }),
+            #[cfg(all(windows, target_arch = "x86_64"))]
+            None => self.argument(i, Some(X86_64)),
+            #[cfg(all(windows, target_arch = "x86"))]
+            None => self.argument(i, Some(StdCall)),
+            #[cfg(all(unix, target_arch = "x86_64"))]
+            None => self.argument(i, Some(SystemV)),
+        }
+    }
 
     #[cfg(windows)]
     fn as_raw(&self) -> Option<&CONTEXT> {

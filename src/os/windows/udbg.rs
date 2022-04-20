@@ -1694,6 +1694,7 @@ pub struct TraceBuf<'a, T = StandardAdaptor> {
     pub callback: *mut UDbgCallback<'a>,
     pub target: Arc<T>,
     pub record: ExceptionRecord,
+    pub wow64: bool,
     pub cx: *mut CONTEXT,
     pub cx32: *mut CONTEXT32,
 }
@@ -1701,13 +1702,18 @@ pub struct TraceBuf<'a, T = StandardAdaptor> {
 impl<T: UDbgTarget> TraceBuf<'_, T> {
     #[inline]
     pub fn call(&mut self, event: UEvent) -> UserReply {
+        self.target.base().context_arch.set(self.arch());
         unsafe { (self.callback.as_mut().unwrap())(self, event) }
     }
 }
 
 impl<T: UDbgTarget> TraceContext for TraceBuf<'_, T> {
     fn register(&mut self) -> Option<&mut dyn UDbgRegs> {
-        Some(unsafe { self.cx.as_mut() }?)
+        if self.wow64 {
+            Some(unsafe { self.cx32.as_mut() }?)
+        } else {
+            Some(unsafe { self.cx.as_mut() }?)
+        }
     }
 
     fn target(&self) -> Arc<dyn UDbgTarget> {
@@ -1719,10 +1725,10 @@ impl<T: UDbgTarget> TraceContext for TraceBuf<'_, T> {
     }
 
     fn arch(&self) -> u32 {
-        if self.cx32.is_null() {
-            UDBG_ARCH
-        } else {
+        if self.wow64 {
             ARCH_X86
+        } else {
+            UDBG_ARCH
         }
     }
 }
@@ -1786,7 +1792,6 @@ pub fn enum_udbg_thread<'a>(
 pub struct DefaultEngine {
     targets: Vec<Arc<StandardAdaptor>>,
     event: DEBUG_EVENT,
-    wow64: bool,
     first_bp_hitted: bool,
     first_bp32_hitted: bool,
 }
@@ -1796,7 +1801,6 @@ impl Default for DefaultEngine {
         Self {
             targets: vec![],
             event: unsafe { core::mem::zeroed() },
-            wow64: false,
             first_bp_hitted: false,
             first_bp32_hitted: false,
         }
@@ -1855,6 +1859,7 @@ impl UDbgEngine for DefaultEngine {
         let mut cx32 = unsafe { core::mem::zeroed() };
         let mut buf = TraceBuf {
             callback,
+            wow64: false,
             target: self
                 .targets
                 .iter()
@@ -2027,7 +2032,7 @@ impl EventHandler for DefaultEngine {
                     let cx32 = tb.cx32.as_mut().unwrap();
 
                     let record = this.record();
-                    let wow64 = self.wow64
+                    let wow64 = this.symgr.is_wow64.get()
                         && match record.code as i32 {
                             STATUS_WX86_BREAKPOINT
                             | STATUS_WX86_SINGLE_STEP
@@ -2040,6 +2045,7 @@ impl EventHandler for DefaultEngine {
                             _ => false,
                         };
                     // println!("record.code: {:x} wow64: {}", record.code, wow64);
+                    tb.wow64 = wow64;
                     if wow64 {
                         this.get_context(tid, cx32);
                         *cx32.ip() = u32::from_usize(this.record().address as usize);

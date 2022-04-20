@@ -458,6 +458,20 @@ pub trait TargetUtil: UDbgTarget {
         }
     }
 
+    fn read_argument(
+        &self,
+        reg: &dyn UDbgRegs,
+        i: usize,
+        cc: Option<CallingConv>,
+    ) -> Option<usize> {
+        match reg.argument(i, cc) {
+            Ok(id) => Some(reg.get_reg(id)?.as_int()),
+            Err(n) => self.read_ptr(
+                reg.get_reg(regid::COMM_REG_SP)?.as_int() + n * self.base().pointer_size(),
+            ),
+        }
+    }
+
     fn get_symbol_(&self, addr: usize, o: Option<usize>) -> Option<SymbolInfo> {
         Target::get_symbol(self, addr, o.unwrap_or(0x100))
     }
