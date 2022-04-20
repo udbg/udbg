@@ -10,9 +10,9 @@ use nix::unistd::Pid;
 use parking_lot::RwLock;
 use std::collections::HashMap;
 use std::convert::TryFrom;
-use std::fs::{read_dir, read_link, File};
+use std::fs::{read_link, File};
 use std::io::Result as IoResult;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 pub type priority_t = i64;
@@ -27,47 +27,15 @@ mod process;
 mod udbg;
 pub mod util;
 
-// pub use self::comm::*;
 pub use self::process::*;
 pub use self::udbg::*;
 
-// #[cfg(target_arch = "arm")]
-// #[derive(Copy, Clone)]
-// pub struct user_regs_struct {
-//     // pt_regs: https://android.googlesource.com/platform/external/kernel-headers/+/froyo/original/asm-arm/ptrace.h
-//     pub regs: [reg_t; 18],
-// }
-
-// #[cfg(target_arch = "aarch64")]
-// use std::fmt;
-
-// #[cfg(target_arch = "aarch64")]
-// #[derive(Copy, Clone)]
-// pub struct user_regs_struct {
-//     // user_pt_regs
-//     pub regs: [reg_t; 31],
-//     pub sp: reg_t,
-//     pub pc: reg_t,
-//     pub pstate: reg_t,
-// }
-
-// #[cfg(target_arch = "aarch64")]
-// impl fmt::Display for user_regs_struct {
-//     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-//         write!(f, "{{\n");
-//         for i in 0..self.regs.len() {
-//             write!(f, "  r{}\t{:x}\n", i, self.regs[i]);
-//         }
-//         write!(f, "}}")
-//     }
-// }
-
-pub struct PidIter(Option<std::fs::ReadDir>);
+pub struct PidIter(std::fs::ReadDir);
 
 impl Iterator for PidIter {
     type Item = pid_t;
     fn next(&mut self) -> Option<pid_t> {
-        while let Some(e) = self.0.as_mut()?.next() {
+        while let Some(e) = self.0.next() {
             let e = match e {
                 Ok(e) => e,
                 Err(_) => continue,
@@ -80,8 +48,18 @@ impl Iterator for PidIter {
     }
 }
 
-pub fn enum_pid() -> PidIter {
-    PidIter(std::fs::read_dir("/proc").ok())
+impl PidIter {
+    pub fn proc() -> IoResult<Self> {
+        std::fs::read_dir("/proc").map(PidIter)
+    }
+
+    pub fn proc_task(pid: pid_t) -> IoResult<Self> {
+        std::fs::read_dir(format!("/proc/{}/task", pid)).map(PidIter)
+    }
+
+    pub fn proc_fd(pid: pid_t) -> IoResult<Self> {
+        std::fs::read_dir(format!("/proc/{}/fd", pid)).map(PidIter)
+    }
 }
 
 pub fn get_exception_name(code: u32) -> String {
@@ -201,13 +179,13 @@ pub fn ptrace_attach_wait(tid: pid_t, opt: c_int) -> nix::Result<WaitStatus> {
 }
 
 impl ProcessInfo {
-    pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
-        Box::new(enum_pid().map(|pid| Self {
+    pub fn enumerate() -> IoResult<impl Iterator<Item = Self>> {
+        Ok(PidIter::proc()?.map(|pid| Self {
             pid,
             wow64: false,
-            name: process_name(pid).unwrap_or(String::new()),
-            path: process_path(pid).unwrap_or(String::new()),
-            cmdline: process_cmdline(pid).join(" "),
+            name: Process::pid_name(pid).unwrap_or_default(),
+            path: Process::pid_path(pid).unwrap_or_default(),
+            cmdline: Process::pid_cmdline(pid).join(" "),
         }))
     }
 }

@@ -33,7 +33,7 @@ async fn loop_util<'a>(
                 // UEvent::Exception { .. } | UEvent::Step | UEvent::Breakpoint(_) => {
                 // }
                 UEvent::ProcessCreate => {
-                    info!("  {}", target.base().image_path);
+                    info!("  {:?}", target.image_path());
                 }
                 _ => {}
             }
@@ -46,7 +46,8 @@ async fn loop_util<'a>(
 fn debug() -> anyhow::Result<()> {
     flexi_logger::Logger::try_with_env_or_str("info")?
         .use_utc()
-        .start()?;
+        .start()
+        .log_error("logger");
 
     let arg = "!!!---";
     let mut engine = udbg::os::DefaultEngine::default();
@@ -63,7 +64,7 @@ fn debug() -> anyhow::Result<()> {
     engine.task_loop(DebugTask::from(|state: UEventState| async move {
         let state = &state;
         let target = loop_util(state, |_, e| matches!(e, UEvent::InitBp)).await;
-        info!("target path: {}", target.base().image_path);
+        info!("target path: {:?}", target.image_path());
 
         info!("initbp occured");
         let main = target.get_main_module().unwrap();
@@ -234,7 +235,8 @@ fn tracee() -> anyhow::Result<()> {
     let tracee = env!("CARGO_BIN_EXE_tracee");
     flexi_logger::Logger::try_with_env_or_str("info")?
         .use_utc()
-        .start()?;
+        .start()
+        .log_error("logger");
 
     let mut engine = udbg::os::DefaultEngine::default();
     engine.create(tracee, None, &[]).expect("create target");
@@ -258,7 +260,7 @@ fn tracee() -> anyhow::Result<()> {
                 *ds.thread_count.borrow_mut() += 1;
             }
             UEvent::ProcessCreate => {
-                println!("  {}", target.base().image_path);
+                println!("  {:?}", target.image_path());
                 *ds.child_count.borrow_mut() += 1;
             }
             // UEvent::ProcessExit(code) => assert_eq!(code, 0),

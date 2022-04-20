@@ -769,22 +769,12 @@ where
     T: Deref<Target = CommonAdaptor>,
 {
     default fn detach(&self) -> Result<(), UDbgError> {
-        if self.base.is_opened() {
-            self.base.status.set(UDbgStatus::Ended);
-            return Ok(());
-        }
         self.detaching.set(true);
-        if !self.base.is_paused() {
-            self.breakk()?
-        }
         Ok(())
     }
 
     default fn breakk(&self) -> Result<(), UDbgError> {
-        self.base.check_opened()?;
-        if self.base.is_paused() {
-            return Err("already paused".into());
-        }
+        self.base.check_attached()?;
         unsafe {
             if DebugBreakProcess(*self.process.handle) > 0 {
                 Ok(())
@@ -1661,6 +1651,10 @@ impl Target for StandardAdaptor {
         &self.base
     }
 
+    fn process(&self) -> Option<&Process> {
+        Some(&self.process)
+    }
+
     fn handle(&self) -> HANDLE {
         *self.process.handle
     }
@@ -1672,7 +1666,7 @@ impl Target for StandardAdaptor {
     fn enum_module<'a>(
         &'a self,
     ) -> UDbgResult<Box<dyn Iterator<Item = Arc<dyn UDbgModule + 'a>> + 'a>> {
-        if self.base.is_opened() {
+        if self.base.check_attached().is_err() {
             self.check_all_module(self);
         }
         Ok(self.symgr.enum_module())
@@ -1722,6 +1716,14 @@ impl<T: UDbgTarget> TraceContext for TraceBuf<'_, T> {
 
     fn exception_param(&self, i: usize) -> Option<usize> {
         self.record.params.get(i).map(|v| *v as usize)
+    }
+
+    fn arch(&self) -> u32 {
+        if self.cx32.is_null() {
+            UDBG_ARCH
+        } else {
+            ARCH_X86
+        }
     }
 }
 
@@ -1806,7 +1808,6 @@ impl DefaultEngine {
         let this = tb.target.clone();
         let cx = unsafe { tb.cx.as_mut().unwrap() };
         if this.get_context(self.event.dwThreadId, cx) {
-            this.base.event_pc.set(*AbstractRegs::ip(cx) as usize);
             this.context.set(cx);
         } else {
             warn!(
@@ -1907,7 +1908,6 @@ impl EventHandler for DefaultEngine {
             tb.record
                 .copy(unsafe { &self.event.u.Exception().ExceptionRecord });
             *this.record() = tb.record;
-            base.event_pc.set(tb.record.address as usize);
         }
         Some(())
     }
@@ -2044,9 +2044,6 @@ impl EventHandler for DefaultEngine {
                         this.get_context(tid, cx32);
                         *cx32.ip() = u32::from_usize(this.record().address as usize);
                         this.cx32.set(cx32);
-                        base.update_arch(ARCH_X86);
-                    } else {
-                        base.update_arch(ARCH_X64);
                     }
                     cotinue_status = match record.code {
                         EXCEPTION_WX86_BREAKPOINT => {

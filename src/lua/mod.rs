@@ -662,8 +662,14 @@ impl UserData for ArcTarget {
             "read_pack",
             |s: &State, this: &Self, a: usize, pack: &[u8]| {
                 let top = s.get_top();
-                read_pack(s, this.0.as_ref(), a, pack, this.base().ptrsize().into())
-                    .map(|_| Pushed(s.get_top() - top))
+                read_pack(
+                    s,
+                    this.0.as_ref(),
+                    a,
+                    pack,
+                    this.base().pointer_size().into(),
+                )
+                .map(|_| Pushed(s.get_top() - top))
             },
         )
         .register(
@@ -841,6 +847,12 @@ impl UserData for ArcTarget {
     }
 }
 
+impl ToLua for ProcessInfo {
+    fn to_lua(self, s: &State) {
+        ToLua::to_lua(SerdeValue(self), s)
+    }
+}
+
 #[derive(Deref, DerefMut)]
 pub struct BoxEngine(pub Box<dyn UDbgEngine>);
 
@@ -849,8 +861,7 @@ impl UserData for BoxEngine {
 
     fn methods(mt: &ValRef) {
         mt.register("enum_process", |this: &Self| {
-            let iter = this.enum_process();
-            BoxIter(Box::new(iter.map(SerdeValue)))
+            this.enum_process().map(BoxIter)
         })
         .register("open", |this: &mut Self, pid: pid_t| {
             this.open(pid).map(|d| {

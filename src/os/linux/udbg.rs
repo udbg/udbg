@@ -59,6 +59,20 @@ pub struct NixThread {
     stat: ThreadStat,
 }
 
+impl TryFrom<Task> for NixThread {
+    type Error = procfs::ProcError;
+
+    fn try_from(task: Task) -> Result<Self, Self::Error> {
+        Ok(NixThread {
+            base: ThreadData {
+                tid: task.tid,
+                wow64: false,
+            },
+            stat: task.stat()?,
+        })
+    }
+}
+
 impl GetProp for NixThread {}
 
 impl UDbgThread for NixThread {
@@ -152,7 +166,14 @@ impl CommonAdaptor {
     pub fn new(ps: Process) -> Self {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
-        let base = CommonBase::new(ps);
+        let mut base = CommonBase::new(ps);
+        let image_path = base.process.image_path().unwrap_or_default();
+        base.process
+            .enum_module()
+            .ok()
+            .and_then(|mut iter| iter.find(|m| m.path.as_ref() == &image_path))
+            .map(|m| base.image_base = m.base);
+
         let trace_opts = Options::PTRACE_O_EXITKILL
             | Options::PTRACE_O_TRACECLONE
             | Options::PTRACE_O_TRACEEXEC
@@ -436,14 +457,17 @@ impl CommonAdaptor {
             .collect::<Vec<_>>()
     }
 
-    fn enum_handle<'a>(&'a self) -> Result<Box<dyn Iterator<Item = HandleInfo> + 'a>, UDbgError> {
+    fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
         use std::os::unix::fs::FileTypeExt;
 
+        let pid = self.process.pid;
         Ok(Box::new(
-            process_fd(self.process.pid)
-                .ok_or(UDbgError::system())?
+            PidIter::proc_fd(pid)?
+                .filter_map(move |id| {
+                    Some((id, read_link(format!("/proc/{}/fd/{}", pid, id)).ok()?))
+                })
                 .map(|(id, path)| {
-                    let ps = path.to_str().unwrap_or("");
+                    let ps = &path.to_string_lossy();
                     let ts = path
                         .metadata()
                         .map(|m| {
@@ -469,7 +493,7 @@ impl CommonAdaptor {
                         });
                     HandleInfo {
                         ty: 0,
-                        handle: id,
+                        handle: id as _,
                         type_name: ts.to_string(),
                         name: ps.to_string(),
                     }
@@ -717,7 +741,7 @@ impl StandardAdaptor {
 
 impl WriteMemory for StandardAdaptor {
     fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
-        self.process.write(addr, data)
+        self.process.write_memory(addr, data)
         // ptrace_write(self.pid.get(), addr, data);
         // Some(data.len())
     }
@@ -751,10 +775,6 @@ impl GetProp for StandardAdaptor {
 
 impl TargetControl for StandardAdaptor {
     fn detach(&self) -> UDbgResult<()> {
-        if self.base.is_opened() {
-            self.base.status.set(UDbgStatus::Ended);
-            return Ok(());
-        }
         self.detaching.set(true);
         if self.waiting.get() {
             self.breakk()
@@ -773,7 +793,7 @@ impl TargetControl for StandardAdaptor {
     }
 
     fn breakk(&self) -> UDbgResult<()> {
-        self.base.check_opened()?;
+        self.base.check_attached()?;
         // for tid in self.enum_thread()? {
         //     if ptrace_interrupt(tid) {
         //         return Ok(());
@@ -795,6 +815,10 @@ impl TargetControl for StandardAdaptor {
 impl Target for StandardAdaptor {
     fn base(&self) -> &TargetBase {
         &self._base
+    }
+
+    fn process(&self) -> Option<&Process> {
+        Some(&self.process)
     }
 
     fn enum_module<'a>(
@@ -837,8 +861,12 @@ impl Target for StandardAdaptor {
     ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
         Ok(Box::new(
             self.process
-                .enum_thread()
-                .filter_map(|tid| self.open_thread(tid).ok()),
+                .tasks()?
+                .filter_map(Result::ok)
+                .filter_map(|task| {
+                    Some(Box::new(NixThread::try_from(task).log_error("task stat")?)
+                        as Box<dyn UDbgThread>)
+                }),
         ))
     }
 }
@@ -1051,7 +1079,7 @@ impl UDbgEngine for DefaultEngine {
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let this = StandardAdaptor::open(pid)?;
         // attach each of threads
-        for tid in this.process.enum_thread() {
+        for tid in this.process.tasks()?.filter_map(|t| t.ok().map(|t| t.tid)) {
             ptrace::attach(Pid::from_raw(tid)).with_context(|| format!("attach {tid}"))?;
         }
         // wait main thread

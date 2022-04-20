@@ -8,6 +8,7 @@ pub enum UDbgError {
     NotSupport,
     BpExists,
     NotFound,
+    NotAttached,
     NoTarget,
     TimeOut,
     InvalidAddress,

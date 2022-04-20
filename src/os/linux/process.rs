@@ -1,88 +1,41 @@
 use super::*;
 
+use procfs::{process::Process as ProcPs, ProcError};
 use std::os::unix::prelude::AsRawFd;
 use std::sync::Arc;
 
-pub fn process_name(pid: pid_t) -> Option<String> {
-    Utils::file_lines(format!("/proc/{}/comm", pid))
-        .ok()?
-        .next()
-}
-
-pub fn process_cmdline(pid: pid_t) -> Vec<String> {
-    let data = std::fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or(vec![]);
-    let mut result = data
-        .split(|b| *b == 0u8)
-        .map(|b| unsafe { String::from_utf8_unchecked(b.to_vec()) })
-        .collect::<Vec<_>>();
-    while result.last().map(String::is_empty).unwrap_or(false) {
-        result.pop();
-    }
-    result
-}
-
-pub fn process_path(pid: pid_t) -> Option<String> {
-    read_link(format!("/proc/{}/exe", pid))
-        .ok()?
-        .to_str()
-        .map(|path| path.to_string())
-}
-
-pub fn process_tasks(pid: pid_t) -> PidIter {
-    PidIter(read_dir(format!("/proc/{}/task", pid)).ok())
-}
-
-pub fn process_fd(pid: pid_t) -> Option<impl Iterator<Item = (usize, PathBuf)>> {
-    Some(
-        PidIter(Some(read_dir(format!("/proc/{}/fd", pid)).ok()?)).filter_map(move |id| {
-            Some((
-                id as usize,
-                read_link(format!("/proc/{}/fd/{}", pid, id)).ok()?,
-            ))
-        }),
-    )
-}
-
-pub fn process_environ(pid: pid_t) -> HashMap<String, String> {
-    let data = std::fs::read(format!("/proc/{}/environ", pid)).unwrap_or(vec![]);
-    let mut result = HashMap::new();
-    data.split(|b| *b == 0u8).map(|b| unsafe {
-        let item = std::str::from_utf8_unchecked(b);
-        let mut i = item.split("=");
-        if let Some(name) = i.next() {
-            result.insert(name.to_string(), i.next().unwrap().into());
-        }
-    });
-    result
-}
-
+#[derive(Deref)]
 pub struct Process {
-    pub pid: pid_t,
+    #[deref]
+    pub _proc: ProcPs,
     mem: RwLock<Option<Box<File>>>,
+}
+
+impl From<ProcError> for UDbgError {
+    fn from(err: ProcError) -> Self {
+        Self::Other(err.into())
+    }
 }
 
 impl Process {
     pub fn from_pid(pid: pid_t) -> UDbgResult<Self> {
-        if Path::new(&format!("/proc/{}", pid)).exists() {
-            Ok(Self {
-                pid,
-                mem: RwLock::new(None),
-            })
-        } else {
-            Err(UDbgError::NotFound)
-        }
+        let _proc = ProcPs::new(pid)?;
+        Ok(Self {
+            _proc,
+            mem: RwLock::new(None),
+        })
     }
 
     pub fn from_comm(name: &str) -> UDbgResult<Self> {
-        enum_pid()
-            .find(|&pid| process_name(pid).as_ref().map(String::as_str) == Some(name))
+        PidIter::proc()?
+            .find(|&pid| Self::pid_name(pid).as_ref().map(String::as_str) == Some(name))
             .ok_or(UDbgError::NotFound)
             .and_then(Process::from_pid)
     }
 
     pub fn from_name(name: &str) -> UDbgResult<Self> {
-        enum_pid()
-            .find(|&pid| process_cmdline(pid).get(0).map(String::as_str) == Some(name))
+        PidIter::proc()?
+            .find(|&pid| Self::pid_cmdline(pid).get(0).map(String::as_str) == Some(name))
             .ok_or(UDbgError::NotFound)
             .and_then(Process::from_pid)
     }
@@ -91,28 +44,63 @@ impl Process {
         unsafe { Self::from_pid(getpid()).unwrap() }
     }
 
+    pub fn pid_name(pid: pid_t) -> Option<String> {
+        Utils::file_lines(format!("/proc/{}/comm", pid))
+            .ok()?
+            .next()
+    }
+
+    pub fn pid_cmdline(pid: pid_t) -> Vec<String> {
+        let data = std::fs::read(format!("/proc/{}/cmdline", pid)).unwrap_or(vec![]);
+        let mut result = data
+            .split(|b| *b == 0u8)
+            .map(|b| unsafe { String::from_utf8_unchecked(b.to_vec()) })
+            .collect::<Vec<_>>();
+        while result.last().map(String::is_empty).unwrap_or(false) {
+            result.pop();
+        }
+        result
+    }
+
+    pub fn pid_path(pid: pid_t) -> IoResult<String> {
+        read_link(format!("/proc/{}/exe", pid)).map(|p| p.to_string_lossy().into())
+    }
+
+    pub fn pid_environ(pid: pid_t) -> IoResult<HashMap<String, String>> {
+        let data = std::fs::read(format!("/proc/{}/environ", pid))?;
+        let mut result = HashMap::new();
+        data.split(|b| *b == 0u8).map(|b| unsafe {
+            let item = std::str::from_utf8_unchecked(b);
+            let mut i = item.split("=");
+            if let Some(name) = i.next() {
+                result.insert(name.to_string(), i.next().unwrap().into());
+            }
+        });
+        Ok(result)
+    }
+
     pub fn pid(&self) -> pid_t {
         self.pid
     }
 
     #[inline]
     pub fn name(&self) -> Option<String> {
-        process_name(self.pid)
+        Self::pid_name(self.pid)
     }
 
     #[inline]
     pub fn cmdline(&self) -> Vec<String> {
-        process_cmdline(self.pid)
+        Self::pid_cmdline(self.pid)
     }
 
     #[inline]
-    pub fn image_path(&self) -> Option<String> {
-        process_path(self.pid)
+    pub fn image_path(&self) -> IoResult<String> {
+        Self::pid_path(self.pid)
     }
 
     #[inline]
-    pub fn environ(&self) -> HashMap<String, String> {
-        process_environ(self.pid)
+    pub fn environ(&self) -> IoResult<HashMap<String, String>> {
+        Self::pid_environ(self.pid)
     }
 
     pub fn read_mem(mem: &File, address: usize, buf: &mut [u8]) -> usize {
@@ -145,30 +133,6 @@ impl Process {
         Some(())
     }
 
-    pub fn read<'a>(&self, address: usize, buf: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.open_mem()?;
-        self.mem.read().as_ref().and_then(move |f| {
-            let result = Self::read_mem(f, address, buf);
-            if result > 0 {
-                Some(&mut buf[..result])
-            } else {
-                None
-            }
-        })
-    }
-
-    pub fn write(&self, address: usize, buf: &[u8]) -> Option<usize> {
-        self.open_mem()?;
-        self.mem.read().as_ref().and_then(move |f| unsafe {
-            let n = pwrite64(f.as_raw_fd(), buf.as_ptr().cast(), buf.len(), address as _);
-            if n == -1 {
-                None
-            } else {
-                Some(n as _)
-            }
-        })
-    }
-
     pub fn enum_memory(&self) -> IoResult<impl Iterator<Item = MemoryPage>> {
         let mut iter = Utils::file_lines(format!("/proc/{}/maps", self.pid))?;
         Ok(core::iter::from_fn(move || {
@@ -196,11 +160,6 @@ impl Process {
         }))
     }
 
-    #[inline]
-    pub fn enum_thread(&self) -> impl Iterator<Item = pid_t> {
-        process_tasks(self.pid)
-    }
-
     pub fn enum_module(&self) -> IoResult<impl Iterator<Item = Module> + '_> {
         Ok(ModuleIter {
             f: Utils::file_lines(format!("/proc/{}/maps", self.pid))?,
@@ -219,13 +178,34 @@ impl Process {
 
 impl ReadMemory for Process {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        self.read(addr, data)
+        self.open_mem()?;
+        self.mem.read().as_ref().and_then(move |f| {
+            let result = Self::read_mem(f, addr, data);
+            if result > 0 {
+                Some(&mut data[..result])
+            } else {
+                None
+            }
+        })
     }
 }
 
 impl WriteMemory for Process {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize> {
-        self.write(address, data)
+        self.open_mem()?;
+        self.mem.read().as_ref().and_then(move |f| unsafe {
+            let n = pwrite64(
+                f.as_raw_fd(),
+                data.as_ptr().cast(),
+                data.len(),
+                address as _,
+            );
+            if n == -1 {
+                None
+            } else {
+                Some(n as _)
+            }
+        })
     }
 
     // fn flush_cache(&self, address: usize, len: usize) -> IoResult<()> {
@@ -316,7 +296,9 @@ impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
             }
 
             let mut sig = [0u8; 4];
-            if self.usage.len() > 0 && self.p.read(self.base, &mut sig).is_some() && ELF_SIG == sig
+            if self.usage.len() > 0
+                && self.p.read_memory(self.base, &mut sig).is_some()
+                && ELF_SIG == sig
             {
                 // Moudle Begin
                 let base = self.base;

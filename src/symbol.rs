@@ -527,7 +527,6 @@ impl<T: UDbgModule> ModuleManager<T> {
                     });
                 }
                 let symbol = s.name.clone();
-                // let symbol = crate::undec_sym(symbol.as_ref()).map(|v| v.into()).unwrap_or(symbol);
                 Some(SymbolInfo {
                     mod_base: m.base,
                     offset,

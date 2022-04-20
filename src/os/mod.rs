@@ -70,7 +70,7 @@ impl CommonAdaptor {
     }
 
     pub fn add_bp(&self, this: &dyn UDbgTarget, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
-        self.base.check_opened()?;
+        self.base.check_attached()?;
         if self.bp_exists(opt.address as BpID) {
             return Err(UDbgError::BpExists);
         }

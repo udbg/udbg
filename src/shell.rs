@@ -86,8 +86,6 @@ pub trait UDbgShell: AsRef<ShellData> {
 
     fn register_engine(&self, name: &str, engine: Box<dyn UDbgEngine>) {}
 
-    fn update_arch(&self, arch: u32) {}
-
     fn log_level(&self, level: log::Level, msg: &str) {
         match level {
             Level::Debug => debug!("[udbg] {msg}"),

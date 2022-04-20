@@ -657,14 +657,14 @@ impl Process {
     }
 
     /// Wrapper of QueryFullProcessImageNameW
-    pub fn image_path(&self) -> Option<String> {
+    pub fn image_path(&self) -> UDbgResult<String> {
         unsafe {
             let mut path = [0 as u16; MAX_PATH];
             let mut size = path.len() as u32;
             if QueryFullProcessImageNameW(*self.handle, 0, path.as_mut_ptr(), &mut size) > 0 {
-                Some(path.as_ref().to_utf8())
+                Ok(path.as_ref().to_utf8())
             } else {
-                None
+                Err(UDbgError::system())
             }
         }
     }
@@ -922,10 +922,10 @@ pub fn create_debug_process(
 }
 
 impl ProcessInfo {
-    pub fn enumerate() -> Box<dyn Iterator<Item = ProcessInfo>> {
+    pub fn enumerate() -> UDbgResult<impl Iterator<Item = ProcessInfo>> {
         use winapi::um::winnt::*;
 
-        Box::new(enum_process().map(|p| {
+        Ok(enum_process().map(|p| {
             let pid = p.pid();
             let mut result = ProcessInfo {
                 pid,
