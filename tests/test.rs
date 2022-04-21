@@ -1,7 +1,7 @@
 #![feature(assert_matches)]
 
 use log::info;
-use std::{cell::Cell, rc::Rc, sync::Arc};
+use std::{cell::Cell, path::Path, rc::Rc, sync::Arc};
 use udbg::{
     prelude::*,
     register::{regid, CallingConv},
@@ -201,7 +201,7 @@ fn debug() -> anyhow::Result<()> {
     #[cfg(windows)]
     test_debug(r"C:\Windows\System32\cmd.exe", &["/c", "type", ARG])?;
     #[cfg(unix)]
-    test_debug("cat", &ARG)?;
+    test_debug("cat", &[ARG])?;
 
     Ok(())
 }
@@ -244,7 +244,11 @@ fn target() {
 fn tracee() -> anyhow::Result<()> {
     use std::cell::RefCell;
 
-    let tracee = env!("CARGO_BIN_EXE_tracee");
+    let mut tracee = env!("CARGO_BIN_EXE_tracee");
+    if !Path::new(tracee).exists() {
+        tracee = "./tracee";
+        assert!(Path::new(tracee).exists());
+    }
     set_logger();
 
     let mut engine = udbg::os::DefaultEngine::default();

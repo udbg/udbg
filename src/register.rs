@@ -1635,6 +1635,8 @@ pub trait UDbgRegs: crate::memory::AsByteArray {
             None => self.argument(i, Some(StdCall)),
             #[cfg(all(unix, target_arch = "x86_64"))]
             None => self.argument(i, Some(SystemV)),
+            #[cfg(all(target_arch = "aarch64"))]
+            None => self.argument(i, Some(AArch64)),
         }
     }
 
