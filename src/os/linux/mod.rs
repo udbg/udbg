@@ -562,7 +562,7 @@ mod arch_util {
                 // iov_len: 18 * 4,
             };
             Errno::result(ptrace(PTRACE_GETREGSET, tid, NT_PRSTATUS, &mut io))
-                .or_else(|_| Errno::result(ptrace(PTRACE_GETREGS, tid, 0, regs)))
+                .or_else(|_| Errno::result(ptrace(PTRACE_GETREGS as _, tid, 0, regs)))
         }
     }
 
@@ -573,7 +573,7 @@ mod arch_util {
                 iov_len: size_of_val(regs),
             };
             Errno::result(ptrace(PTRACE_SETREGSET, tid, NT_PRSTATUS, &mut io))
-                .or_else(|_| Errno::result(ptrace(PTRACE_SETREGS, tid, 0, regs)))
+                .or_else(|_| Errno::result(ptrace(PTRACE_SETREGS as _, tid, 0, regs)))
         }
     }
 

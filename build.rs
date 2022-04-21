@@ -1,4 +1,3 @@
-#[cfg(target_os = "macos")]
 fn make_ipc_code() {
     use std::{env, path::Path, process::Command};
 
@@ -23,6 +22,10 @@ fn make_ipc_code() {
 }
 
 fn main() {
-    #[cfg(target_os = "macos")]
-    make_ipc_code();
+    use std::env;
+
+    let os = env::var("CARGO_CFG_TARGET_OS").unwrap();
+    if os == "macos" {
+        make_ipc_code();
+    }
 }
