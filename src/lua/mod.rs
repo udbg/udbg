@@ -457,6 +457,17 @@ impl ToLua for BpType {
 
 impl UserData for ArcBreakpoint {
     const TYPE_NAME: &'static str = "UDbgBreakpoint*";
+    const WEAK_REF_CACHE: bool = false;
+
+    fn key_to_cache(&self) -> *const () {
+        (self.as_ref() as *const dyn UDbgBreakpoint)
+            .to_raw_parts()
+            .0
+    }
+
+    fn uservalue_count(&self, s: &State) -> i32 {
+        1
+    }
 
     fn getter(fields: &ValRef) {
         MethodRegistry::<Self, dyn UDbgBreakpoint>::new(fields)
@@ -465,16 +476,54 @@ impl UserData for ArcBreakpoint {
             .register("type", <dyn UDbgBreakpoint>::get_type)
             .register("hitcount", <dyn UDbgBreakpoint>::hit_count)
             .register("enabled", <dyn UDbgBreakpoint>::enabled);
+        fields.register("callback", |s: &State| {
+            s.get_iuservalue(1, 1);
+            Pushed(1)
+        });
     }
 
     fn setter(fields: &ValRef) {
-        fields.register("enabled", |this: &Self, enabled: bool| this.enable(enabled));
+        MethodRegistry::<Self, dyn UDbgBreakpoint>::new(fields)
+            .register("enabled", <dyn UDbgBreakpoint>::enable);
+        fields.register("callback", |s: &State| {
+            s.push_value(2);
+            s.set_iuservalue(1, 1);
+        });
     }
 
     fn methods(mt: &ValRef) {
         mt.register("enable", |this: &Self| this.enable(true));
         mt.register("disable", |this: &Self| this.enable(false));
-        mt.register("remove", |this: &Self| this.remove());
+        mt.register("remove", |s: &State, this: &Self| {
+            this.clear_cached(s);
+            this.remove();
+        });
+    }
+}
+
+impl ToLuaMulti for UEvent {
+    fn to_lua(self, s: &State) -> i32 {
+        use UEvent::*;
+        match self {
+            InitBp => s.pushx(INIT_BP),
+            Step => s.pushx(STEP),
+            Breakpoint(bp) => s.pushx((BREAKPOINT, ArcBreakpoint(bp))),
+            ProcessCreate => s.pushx(PROCESS_CREATE),
+            ProcessExit(code) => s.pushx((PROCESS_EXIT, code)),
+            ModuleLoad(m) => {
+                s.push(MODULE_LOAD);
+                s.push(ArcModule(m));
+                2
+            }
+            ModuleUnload(m) => {
+                s.push(MODULE_UNLOAD);
+                s.push(ArcModule(m));
+                2
+            }
+            ThreadCreate(tid) => s.pushx((THREAD_CREATE, tid)),
+            ThreadExit(code) => s.pushx((THREAD_EXIT, code)),
+            Exception { first, code } => s.pushx((EXCEPTION, code, first)),
+        }
     }
 }
 
@@ -488,51 +537,52 @@ impl AsRef<dyn UDbgTarget> for ArcTarget {
     }
 }
 
-impl dyn UDbgTarget {
-    pub fn uevent_to_lua(&self, s: &State, e: UEvent) -> i32 {
-        use UEvent::*;
-
-        let base = self.base();
-        s.push(base.event_tid.get());
-        (match e {
-            InitBp => s.pushx((INIT_BP, base.event_tid.get())),
-            Step => s.pushx((STEP, base.event_tid.get())),
-            Breakpoint(bp) => s.pushx((BREAKPOINT, base.event_tid.get(), bp.get_id())),
-            ProcessCreate => s.pushx((PROCESS_CREATE, self.pid())),
-            ProcessExit(code) => s.pushx((PROCESS_EXIT, self.pid(), code)),
-            ModuleLoad(m) => {
-                s.push(MODULE_LOAD);
-                s.push(ArcModule(m));
-                2
-            }
-            ModuleUnload(m) => {
-                s.push(MODULE_UNLOAD);
-                s.push(ArcModule(m));
-                2
-            }
-            ThreadCreate(tid) => s.pushx((THREAD_CREATE, tid, base.event_tid.get())),
-            ThreadExit(code) => s.pushx((THREAD_EXIT, base.event_tid.get(), code)),
-            Exception { first, code } => s.pushx((EXCEPTION, base.event_tid.get(), code, first)),
-        }) + 1
-    }
-}
-
 impl UserData for ArcTarget {
     const TYPE_NAME: &'static str = "UDbgTarget*";
     const INDEX_USERVALUE: bool = true;
 
-    fn methods(mt: &ValRef) {
-        // mt.register("pid", Self::pid);
-        mt.register("base", |this: &'static Self| SerdeValue(this.base()));
-        mt.register("status", |this: &Self| match this.base().status.get() {
-            UDbgStatus::Idle => "idle",
-            UDbgStatus::Opened => "opened",
-            UDbgStatus::Attached => "attached",
-            UDbgStatus::Paused => "paused",
-            UDbgStatus::Running => "running",
-            UDbgStatus::Ended => "ended",
-        });
+    const GETTER: lua_CFunction =
+        RsFn::new(|this: &Self, key: &str| this.0.get_prop(key).map(SerdeValue).ok()).wrapper();
 
+    fn init_userdata(s: &State) {
+        let this: &Self = s.arg(-1).unwrap();
+        s.push(SerdeValue(this.base()));
+        s.set_uservalue(-2);
+    }
+
+    fn key_to_cache(&self) -> *const () {
+        (self.0.as_ref() as *const dyn UDbgTarget).to_raw_parts().0
+    }
+
+    fn getter(fields: &ValRef) {
+        fields
+            .register("base", |this: &'static Self| SerdeValue(this.base()))
+            .register("pid", |this: &Self| this.base().pid.get())
+            .register("arch", |this: &Self| this.base().arch)
+            .register("event_tid", |this: &Self| this.base().event_tid.get())
+            .register("pointer_size", |this: &Self| this.base().pointer_size())
+            .register("status", |this: &Self| match this.base().status.get() {
+                UDbgStatus::Idle => "idle",
+                UDbgStatus::Opened => "opened",
+                UDbgStatus::Attached => "attached",
+                UDbgStatus::Paused => "paused",
+                UDbgStatus::Running => "running",
+                UDbgStatus::Ended => "ended",
+            })
+            .register("context_arch", |this: &Self| {
+                match this.base().context_arch.get() {
+                    ARCH_X86 => "x86",
+                    ARCH_X64 => "x86_64",
+                    ARCH_ARM => "arm",
+                    ARCH_ARM64 => "arm64",
+                    _ => unreachable!(),
+                }
+            });
+        #[cfg(windows)]
+        fields.register("handle", |this: &Self| this.handle() as usize);
+    }
+
+    fn methods(mt: &ValRef) {
         MethodRegistry::<Self, dyn UDbgTarget>::new(mt)
             .register("read_u8", <dyn UDbgTarget>::read_value::<u8>)
             .register("read_u16", <dyn UDbgTarget>::read_value::<u16>)
@@ -540,6 +590,7 @@ impl UserData for ArcTarget {
             .register("read_u64", <dyn UDbgTarget>::read_value::<u64>)
             .register("read_f32", <dyn UDbgTarget>::read_value::<f32>)
             .register("read_f64", <dyn UDbgTarget>::read_value::<f64>)
+            .register("image_path", <dyn UDbgTarget>::image_path)
             .register("detach", <dyn UDbgTarget>::detach)
             .register("kill", <dyn UDbgTarget>::kill)
             .register("pause", <dyn UDbgTarget>::breakk)
@@ -646,17 +697,6 @@ impl UserData for ArcTarget {
         mt.register("write_wstring", |this: &Self, a: usize, buf: &str| {
             this.write_wstring(a, buf)
         });
-
-        mt.register(
-            "__call",
-            |s: &State, this: &Self, key: &str| -> UDbgResult<Pushed> {
-                Ok(match key {
-                    #[cfg(windows)]
-                    "handle" => s.pushed(this.handle() as usize),
-                    _ => s.pushed(SerdeValue(this.0.get_prop(key)?)),
-                })
-            },
-        );
 
         mt.register(
             "read_pack",
@@ -889,8 +929,9 @@ impl UserData for BoxEngine {
                 co.pop(nres);
                 s.push_value(-1);
                 s.xmove(&co, 1);
-                let this = ctx.target();
-                let st = co.resume(Some(&s), this.uevent_to_lua(&co, event), &mut nres);
+                let this = ArcTarget(ctx.target());
+                co.push(this.clone());
+                let st = co.resume(Some(&s), co.pushx(event) + 1, &mut nres);
                 if !matches!(st, ThreadStatus::Yield | ThreadStatus::Ok) {
                     s.traceback(&co, cstr!("resume event"), 1);
                     s.error();
