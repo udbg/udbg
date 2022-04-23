@@ -92,3 +92,6 @@ rustyline = '9'
 flexi_logger = '0.22'
 clap = {version = "3.1.9", features = ["derive"]}
 llua = {version = '0.1.0', features = ['vendored']}
+
+[patch.crates-io]
+llua = {git = 'https://github.com/udbg/llua'}
