@@ -9,7 +9,6 @@ on:
 env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
-  rust_nightly: 1.62.0-nightly
 
 jobs:
   build:
@@ -18,7 +17,17 @@ jobs:
 
     steps:
     - uses: actions/checkout@v3
+    - name: Install latest nightly
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: nightly
+          override: true
+          components: rustc
     - name: Build
-      run: cargo build --verbose
+      uses: actions-rs/cargo@v1
+      with:
+        command: build
     - name: Run tests
-      run: cargo test --verbose --test-threads=1 --nocapture
+      uses: actions-rs/cargo@v1
+      with:
+        command: test --verbose --test-threads=1 --nocapture
