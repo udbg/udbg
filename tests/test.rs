@@ -216,8 +216,17 @@ fn debug_wow64() -> anyhow::Result<()> {
 
 #[test]
 fn target() {
+    use llua::*;
+    use udbg::lua::*;
+
     let mut engine = udbg::os::DefaultEngine::default();
     let target = engine.open_self().unwrap();
+
+    let lua = &State::new();
+    lua.open_libs();
+    lua.global().set("target", ArcTarget(target.clone()));
+    lua.do_string("print(target.base, target:image_path())")
+        .chk_err(lua);
 
     println!("Modules:");
     for m in target.enum_module().unwrap() {
@@ -269,11 +278,14 @@ fn tracee() -> anyhow::Result<()> {
             target.base().event_tid.get()
         );
         match event {
-            UEvent::ThreadCreate(tid) => {
+            UEvent::InitBp => {
+                udbg_ui().base().trace_child.set(true);
+            }
+            UEvent::ThreadCreate(_) => {
                 *ds.thread_count.borrow_mut() += 1;
             }
             UEvent::ProcessCreate => {
-                println!("  {:?}", target.image_path());
+                info!("  {:?}", target.image_path());
                 *ds.child_count.borrow_mut() += 1;
             }
             // UEvent::ProcessExit(code) => assert_eq!(code, 0),
