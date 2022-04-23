@@ -10,11 +10,13 @@ fn main() -> anyhow::Result<()> {
 
     println!("[+] new subprocess");
     #[cfg(unix)]
-    process::Command::new("ls").spawn().unwrap();
+    process::Command::new("ls").spawn().unwrap().wait().unwrap();
     #[cfg(windows)]
     process::Command::new("cmd")
         .args(&["/c", "echo", "in child process"])
         .spawn()
+        .unwrap()
+        .wait()
         .unwrap();
 
     Ok(())

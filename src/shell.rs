@@ -5,6 +5,7 @@ use super::prelude::*;
 
 use log::*;
 use serde::de::DeserializeOwned;
+use std::cell::Cell;
 use std::{path::PathBuf, sync::Arc};
 
 /// Process information
@@ -63,6 +64,7 @@ impl Default for UDbgFlags {
 
 pub struct ShellData {
     pub symcache: Option<PathBuf>,
+    pub trace_child: Cell<bool>,
 }
 
 impl Default for ShellData {
@@ -75,7 +77,10 @@ impl Default for ShellData {
         };
         #[cfg(not(windows))]
         let symcache = None;
-        Self { symcache }
+        Self {
+            symcache,
+            trace_child: false.into(),
+        }
     }
 }
 

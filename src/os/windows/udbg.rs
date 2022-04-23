@@ -729,7 +729,6 @@ pub struct CommonAdaptor {
     pub cx32: Cell<*mut CONTEXT32>,
     pub show_debug_string: Cell<bool>,
     pub uspy_tid: Cell<u32>,
-    pub detaching: Cell<bool>,
     hwbps: UnsafeCell<CONTEXT>,
 }
 
@@ -769,7 +768,7 @@ where
     T: Deref<Target = CommonAdaptor>,
 {
     default fn detach(&self) -> Result<(), UDbgError> {
-        self.detaching.set(true);
+        self.base.status.set(UDbgStatus::Detaching);
         Ok(())
     }
 
@@ -824,7 +823,6 @@ impl CommonAdaptor {
             cx32: Cell::new(null_mut()),
             context: Cell::new(null_mut()),
             uspy_tid: Cell::new(0),
-            detaching: false.into(),
             hwbps: UnsafeCell::new(unsafe { core::mem::zeroed() }),
         };
         result.check_all_module(&result.process);
@@ -1857,15 +1855,19 @@ impl UDbgEngine for DefaultEngine {
     fn event_loop(&mut self, callback: &mut UDbgCallback) -> UDbgResult<()> {
         let mut cx = Align16::<CONTEXT>::new();
         let mut cx32 = unsafe { core::mem::zeroed() };
+
+        let target = self
+            .targets
+            .iter()
+            .next()
+            .map(Clone::clone)
+            .expect("no attached target");
+        target.base.status.set(UDbgStatus::Attached);
+
         let mut buf = TraceBuf {
             callback,
             wow64: false,
-            target: self
-                .targets
-                .iter()
-                .next()
-                .map(Clone::clone)
-                .expect("no attached target"),
+            target,
             cx: cx.as_mut(),
             cx32: &mut cx32,
             record: unsafe { core::mem::zeroed() },
@@ -1881,9 +1883,6 @@ impl UDbgEngine for DefaultEngine {
 
 impl EventHandler for DefaultEngine {
     fn fetch(&mut self, tb: &mut TraceBuf) -> Option<()> {
-        self.targets
-            .iter()
-            .for_each(|p| p.base.status.set(UDbgStatus::Running));
         self.event = wait_for_debug_event(INFINITE)?;
         if self.event.dwDebugEventCode == CREATE_PROCESS_DEBUG_EVENT {
             if self
@@ -1894,6 +1893,14 @@ impl EventHandler for DefaultEngine {
             {
                 let target =
                     StandardAdaptor::open(self.event.dwProcessId).expect("attach child process");
+                target
+                    .base
+                    .status
+                    .set(if udbg_ui().base().trace_child.get() {
+                        UDbgStatus::Attached
+                    } else {
+                        UDbgStatus::Detaching
+                    });
                 self.targets.push(target);
             }
         }
@@ -1907,7 +1914,6 @@ impl EventHandler for DefaultEngine {
 
         tb.target = this.clone();
         let base = &this.base;
-        base.status.set(UDbgStatus::Paused);
         base.event_tid.set(self.event.dwThreadId);
         if self.event.dwDebugEventCode == EXCEPTION_DEBUG_EVENT {
             tb.record
@@ -1929,6 +1935,10 @@ impl EventHandler for DefaultEngine {
 
             match self.event.dwDebugEventCode {
                 CREATE_PROCESS_DEBUG_EVENT => {
+                    if this.status.get() == UDbgStatus::Detaching {
+                        self.targets.pop();
+                        return Some(cotinue_status);
+                    }
                     let info = self.event.u.CreateProcessInfo();
                     if info.hThread.is_null() {
                         udbg_ui().error(format!("CREATE_PROCESS_DEBUG_EVENT {}", tid));
@@ -2100,7 +2110,9 @@ impl EventHandler for DefaultEngine {
                             } else {
                                 HandleResult::NotHandled
                             };
-                            if result == HandleResult::NotHandled && !this.detaching.get() {
+                            if result == HandleResult::NotHandled
+                                && this.base.status.get() != UDbgStatus::Detaching
+                            {
                                 result = this.user_handle_exception(first, tb);
                             }
                             result
@@ -2129,11 +2141,15 @@ impl EventHandler for DefaultEngine {
         this.context.set(null_mut());
         continue_debug_event(self.event.dwProcessId, self.event.dwThreadId, status as u32);
 
-        if this.detaching.get() {
-            udbg_ui().info(&format!("detach: {}", unsafe {
-                DebugActiveProcessStop(self.event.dwProcessId)
-            }));
-            // return None;
+        if this.status.get() == UDbgStatus::Detaching {
+            if unsafe { DebugActiveProcessStop(self.event.dwProcessId) == 0 } {
+                udbg_ui().error(format!(
+                    "detach {}: {:?}",
+                    self.event.dwProcessId,
+                    UDbgError::system()
+                ));
+            }
+            self.targets.retain(|t| !Arc::ptr_eq(&this, t));
         }
     }
 }

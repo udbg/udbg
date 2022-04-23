@@ -156,7 +156,6 @@ pub struct CommonAdaptor {
     tc_module: TimeCheck,
     tc_memory: TimeCheck,
     mem_pages: RwLock<Vec<MemoryPage>>,
-    pub detaching: Cell<bool>,
     waiting: Cell<bool>,
     pub trace_opts: Options,
     pub hwbps: UnsafeCell<user_hwdebug_state>,
@@ -187,7 +186,6 @@ impl CommonAdaptor {
             threads: RwLock::new(HashSet::new()),
             trace_opts,
             waiting: Cell::new(false),
-            detaching: Cell::new(false),
             hwbps: unsafe { core::mem::zeroed() },
         }
     }
@@ -300,14 +298,12 @@ impl CommonAdaptor {
     }
 
     fn wait_event(&self, tb: &mut TraceBuf) -> Option<WaitStatus> {
-        self.base.status.set(UDbgStatus::Running);
         self.waiting.set(true);
         let mut status = 0;
         let tid = unsafe { libc::waitpid(-1, &mut status, __WALL | WUNTRACED) };
         // let status = ::nix::sys::wait::waitpid(None, WaitPidFlag::__WALL | WaitPidFlag::__WNOTHREAD | WaitPidFlag::WNOHANG).unwrap();
         self.waiting.set(false);
         self.base.event_tid.set(tid);
-        self.base.status.set(UDbgStatus::Paused);
 
         if tid <= 0 {
             return None;
@@ -775,7 +771,7 @@ impl GetProp for StandardAdaptor {
 
 impl TargetControl for StandardAdaptor {
     fn detach(&self) -> UDbgResult<()> {
-        self.detaching.set(true);
+        self.base.status.set(UDbgStatus::Detaching);
         if self.waiting.get() {
             self.breakk()
         } else {
@@ -878,10 +874,68 @@ impl EventHandler for DefaultEngine {
         loop {
             self.status = waitpid(None, Some(WaitPidFlag::__WALL)).ok()?;
             // info!("[status] {:?}", self.status);
-            if self.fetch_target(buf) {
+            self.tid = self
+                .status
+                .pid()
+                .map(|p| p.as_raw() as tid_t)
+                .unwrap_or_default();
+
+            if matches!(
+                self.status,
+                WaitStatus::Stopped(_, _) //  | WaitStatus::Signaled(_, _, _)
+            ) {
+                buf.update_regs(self.tid);
+                buf.update_siginfo(self.tid);
+                // info!(
+                //     "si: {:?}, address: {:p}, ip: {:x}",
+                //     buf.si,
+                //     unsafe { buf.si.si_addr() },
+                //     *crate::register::AbstractRegs::ip(&mut buf.user)
+                // );
+            }
+
+            let target = self
+                .targets
+                .iter()
+                .find(|&t| self.tid == t.pid() as tid_t || t.threads.read().contains(&self.tid))
+                .cloned()
+                .or_else(|| {
+                    self.targets
+                        .iter()
+                        .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
+                        .cloned()
+                });
+
+            if let Some(target) = target {
+                buf.target = target.clone();
+                buf.target.base.event_tid.set(self.tid as _);
+
+                if target.base.status.get() == UDbgStatus::Detaching {
+                    break;
+                }
+
+                let mut cont = false;
+                if target.base.status.get() < UDbgStatus::Attached {
+                    target.base.status.set(UDbgStatus::Attached);
+                    // buf.call(UEvent::ProcessCreate);
+                    cont = true;
+                }
+
+                // set trace options for new thread
+                if buf.target.insert_thread(self.tid) {
+                    buf.call(UEvent::ThreadCreate(self.tid));
+                    cont = true;
+                }
+
+                if cont {
+                    ptrace::cont(Pid::from_raw(self.tid), None);
+                    continue;
+                }
+
                 break;
             } else {
-                ptrace::cont(self.status.pid().unwrap(), None);
+                udbg_ui().warn(format!("{} is not traced", self.tid));
+                ptrace::cont(Pid::from_raw(self.tid), None);
             }
         }
         Some(())
@@ -892,6 +946,9 @@ impl EventHandler for DefaultEngine {
         let this = buf.target.clone();
         let tid = self.tid;
 
+        if this.base.status.get() == UDbgStatus::Detaching {
+            return Some(None);
+        }
         Some(match status {
             WaitStatus::Stopped(_, sig) => loop {
                 if sig == Signal::SIGTRAP {
@@ -934,14 +991,17 @@ impl EventHandler for DefaultEngine {
                         // ptrace::cont(newpid, None);
                         StandardAdaptor::open(new_pid)
                             .log_error("open child")
-                            .map(|t| self.targets.push(t));
+                            .map(|t| {
+                                t.base.status.set(if udbg_ui().base().trace_child.get() {
+                                    UDbgStatus::Attached
+                                } else {
+                                    UDbgStatus::Detaching
+                                });
+                                self.targets.push(t);
+                            });
                     }
                     PTRACE_EVENT_EXEC => {
-                        // let new_pid =
-                        //     ptrace::getevent(Pid::from_raw(tid)).unwrap_or_default() as pid_t;
-                        // info!("execed new pid: {new_pid}");
-                        info!("PTRACE_EVENT_EXEC: {:?}", this.process.image_path());
-                        // buf.call(UEvent::ProcessCreate);
+                        buf.call(UEvent::ProcessCreate);
                     }
                     _ => {}
                 }
@@ -976,21 +1036,22 @@ impl EventHandler for DefaultEngine {
 
     fn cont(&mut self, sig: HandleResult, buf: &mut TraceBuf) {
         let this = buf.target.clone();
-        if this.detaching.get() {
+        let tid = Pid::from_raw(self.tid as _);
+
+        if this.base.status.get() == UDbgStatus::Detaching {
             for bp in this.get_breakpoints() {
-                bp.remove();
+                bp.enable(false);
             }
             for &tid in this.threads.read().iter() {
-                if let Err(err) = ptrace::detach(Pid::from_raw(tid as _), None) {
-                    udbg_ui().error(format!("ptrace_detach({tid}) failed: {err:?}"));
-                }
+                ptrace::detach(Pid::from_raw(tid as _), None)
+                    .log_error_with(|err| format!("ptrace_detach({tid}) failed: {err:?}"));
             }
-        }
-        let tid = Pid::from_raw(self.tid as _);
-        if buf.regs_dirty {
+            self.targets.retain(|t| !Arc::ptr_eq(&this, t));
+        } else if buf.regs_dirty {
             buf.regs_dirty = false;
             buf.write_regs(self.tid);
         }
+
         ptrace::cont(tid, sig);
     }
 }
@@ -1011,62 +1072,6 @@ impl Default for DefaultEngine {
             inited: false,
             tid: 0,
             cloned_tids: Default::default(),
-        }
-    }
-}
-
-impl DefaultEngine {
-    pub fn fetch_target(&mut self, buf: &mut TraceBuf) -> bool {
-        self.tid = self
-            .status
-            .pid()
-            .map(|p| p.as_raw() as tid_t)
-            .unwrap_or_default();
-
-        if matches!(
-            self.status,
-            WaitStatus::Stopped(_, _) //  | WaitStatus::Signaled(_, _, _)
-        ) {
-            buf.update_regs(self.tid);
-            buf.update_siginfo(self.tid);
-            // info!(
-            //     "si: {:?}, address: {:p}, ip: {:x}",
-            //     buf.si,
-            //     unsafe { buf.si.si_addr() },
-            //     *crate::register::AbstractRegs::ip(&mut buf.user)
-            // );
-        }
-
-        let target = self
-            .targets
-            .iter()
-            .find(|&t| self.tid == t.pid() as tid_t || t.threads.read().contains(&self.tid))
-            .cloned()
-            .or_else(|| {
-                self.targets
-                    .iter()
-                    .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
-                    .cloned()
-            });
-
-        if let Some(target) = target {
-            buf.target = target.clone();
-            buf.target.base.event_tid.set(self.tid as _);
-
-            if target.base.status.get() < UDbgStatus::Attached {
-                target.base.status.set(UDbgStatus::Attached);
-                buf.call(UEvent::ProcessCreate);
-            }
-
-            // set trace options for new thread
-            if buf.target.insert_thread(self.tid) {
-                buf.call(UEvent::ThreadCreate(self.tid));
-                return false;
-            }
-            true
-        } else {
-            udbg_ui().warn(format!("{} is not traced", self.tid));
-            false
         }
     }
 }

@@ -561,14 +561,7 @@ impl UserData for ArcTarget {
             .register("arch", |this: &Self| this.base().arch)
             .register("event_tid", |this: &Self| this.base().event_tid.get())
             .register("pointer_size", |this: &Self| this.base().pointer_size())
-            .register("status", |this: &Self| match this.base().status.get() {
-                UDbgStatus::Idle => "idle",
-                UDbgStatus::Opened => "opened",
-                UDbgStatus::Attached => "attached",
-                UDbgStatus::Paused => "paused",
-                UDbgStatus::Running => "running",
-                UDbgStatus::Ended => "ended",
-            })
+            .register("status", |this: &Self| this.base().status.get().as_str())
             .register("context_arch", |this: &Self| {
                 match this.base().context_arch.get() {
                     ARCH_X86 => "x86",

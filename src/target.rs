@@ -14,12 +14,21 @@ use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
 pub enum UDbgStatus {
-    Idle,
     Opened,
     Attached,
-    Paused,
-    Running,
-    Ended,
+    Detaching,
+    Detached,
+}
+
+impl UDbgStatus {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            UDbgStatus::Opened => "opened",
+            UDbgStatus::Attached => "attached",
+            UDbgStatus::Detaching => "detaching",
+            UDbgStatus::Detached => "detached",
+        }
+    }
 }
 
 /// Common data for debugger target
