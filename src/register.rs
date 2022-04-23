@@ -1330,12 +1330,16 @@ mod plat {
 
     #[cfg(target_arch = "aarch64")]
     pub fn context_to_regs(c: &CONTEXT) -> Registers {
-        Registers {
-            regs: unsafe { core::mem::transmute(c.u) },
-            sp: c.Sp,
-            pc: c.Pc,
-            // TODO:
-            pstate: c.Cpsr as _,
+        unsafe {
+            let regs: &[reg_t; 29] = core::mem::transmute(&c.u.s().X0);
+            Registers {
+                regs: *regs,
+                fp: c.u.s().Fp,
+                lr: c.u.s().Lr,
+                sp: c.Sp,
+                pc: c.Pc,
+                pstate: c.Cpsr as _,
+            }
         }
     }
 
@@ -1626,7 +1630,7 @@ pub trait UDbgRegs: crate::memory::AsByteArray {
                 _ => return Err(i - 1),
             }),
             Some(AArch64) => Ok(match i {
-                1..=8 => ARM64_REG_X0 + i as u32,
+                1..=8 => ARM64_REG_X0 + (i - 1) as u32,
                 _ => return Err(i - 8),
             }),
             #[cfg(all(windows, target_arch = "x86_64"))]

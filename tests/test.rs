@@ -256,7 +256,7 @@ fn tracee() -> anyhow::Result<()> {
     let mut tracee = env!("CARGO_BIN_EXE_tracee");
     if !Path::new(tracee).exists() {
         tracee = "./tracee";
-        assert!(Path::new(tracee).exists());
+        // assert!(Path::new(tracee).exists());
     }
     set_logger();
 
