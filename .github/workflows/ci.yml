@@ -12,8 +12,19 @@ env:
 
 jobs:
   build:
-
-    runs-on: ubuntu-latest
+    name: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        build: [linux, windows]
+        include:
+          - build: linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - build: windows
+            os: windows-2019
+            target: x86_64-pc-windows-msvc
+      fail-fast: false
 
     steps:
     - uses: actions/checkout@v3
@@ -22,7 +33,9 @@ jobs:
       with:
           toolchain: nightly
           override: true
+          profile: minimal
           components: rustc
+          target: ${{ matrix.target }}
     - name: Build
       uses: actions-rs/cargo@v1
       with:
