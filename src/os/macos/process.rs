@@ -128,23 +128,16 @@ where
 }
 
 impl Process {
-    pub fn enum_pid() -> impl Iterator<Item = pid_t> {
+    pub fn enum_pid() -> nix::Result<impl Iterator<Item = pid_t>> {
         unsafe {
-            let count = libc::proc_listallpids(::std::ptr::null_mut(), 0);
-            if count < 1 {
-                return vec![].into_iter();
-            }
+            let count = Errno::result(libc::proc_listallpids(::std::ptr::null_mut(), 0))?;
             let mut pids: Vec<pid_t> = Vec::with_capacity(count as usize);
             pids.set_len(count as usize);
-            let count = count * core::mem::size_of::<pid_t>() as i32;
-            let x = libc::proc_listallpids(pids.as_mut_ptr().cast(), count);
 
-            if x < 1 || x as usize >= pids.len() {
-                return vec![].into_iter();
-            } else {
-                pids.set_len(x as usize);
-                pids.into_iter()
-            }
+            let count = count * core::mem::size_of::<pid_t>() as i32;
+            let x = Errno::result(libc::proc_listallpids(pids.as_mut_ptr().cast(), count))?;
+            pids.set_len(x as usize);
+            Ok(pids.into_iter())
         }
     }
 
@@ -649,13 +642,13 @@ fn get_arg_max() -> usize {
 }
 
 impl ProcessInfo {
-    pub fn enumerate() -> Box<dyn Iterator<Item = Self>> {
-        Box::new(Process::enum_pid().map(|pid| Self {
+    pub fn enumerate() -> nix::Result<Box<dyn Iterator<Item = Self>>> {
+        Ok(Box::new(Process::enum_pid()?.map(|pid| Self {
             pid,
             wow64: false,
             name: Process::pid_name(pid).unwrap_or_default(),
             path: Process::pid_path(pid).unwrap_or_default(),
             cmdline: Process::pid_cmdline(pid).join(" "),
-        }))
+        })))
     }
 }

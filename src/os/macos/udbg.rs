@@ -130,6 +130,10 @@ impl Target for StandardAdaptor {
         &self.0.base
     }
 
+    fn process(&self) -> Option<&Process> {
+        Some(&self.process)
+    }
+
     fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
         Some(&self.symgr)
     }

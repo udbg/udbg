@@ -58,6 +58,13 @@ impl From<String> for UDbgError {
     }
 }
 
+#[cfg(target_os = "macos")]
+impl From<nix::Error> for UDbgError {
+    fn from(err: nix::Error) -> Self {
+        UDbgError::Kern(err as i32)
+    }
+}
+
 impl fmt::Display for UDbgError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "")

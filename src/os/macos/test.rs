@@ -2,7 +2,7 @@ use super::*;
 
 #[test]
 fn process() {
-    for pid in Process::enum_pid() {
+    for pid in Process::enum_pid().unwrap() {
         let ps = match Process::from_pid(pid) {
             Ok(r) => r,
             Err(_) => continue,
