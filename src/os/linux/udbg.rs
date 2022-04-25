@@ -331,7 +331,7 @@ impl CommonAdaptor {
         // correct the pc register
         let mut address = *tb.user.regs.ip();
         let is_step = tb.si.si_code == TRAP_TRACE;
-        if IS_X86 && tb.si.si_signo == SIGTRAP {
+        if IS_X86 {
             if is_step || tb.si.si_code == TRAP_HWBKPT {
                 address = unsafe { tb.si.si_addr() as _ };
             } else {
@@ -386,6 +386,8 @@ impl CommonAdaptor {
 
                 // step once and revert
                 tb.user.set_step(true);
+                #[cfg(any(target_arch = "aarch64"))]
+                ptrace::step(Pid::from_raw(tid), None);
                 loop {
                     eh.cont(None, tb);
                     match eh.fetch(tb) {
@@ -722,7 +724,7 @@ impl StandardAdaptor {
         }
     }
 
-    pub fn remove_thread(&self, tid: tid_t, s: i32, tb: &mut TraceBuf) {
+    pub fn remove_thread(&self, tid: tid_t, s: i32, tb: &mut TraceBuf) -> bool {
         let mut threads = self.threads.write();
         if threads.remove(&tid) {
             tb.call(UEvent::ThreadExit(s as u32));
@@ -732,6 +734,7 @@ impl StandardAdaptor {
         } else {
             udbg_ui().error(&format!("tid {tid} not found"));
         }
+        threads.is_empty()
     }
 }
 
@@ -1015,18 +1018,16 @@ impl EventHandler for DefaultEngine {
                 });
                 let code = ptrace::getevent(Pid::from_raw(self.tid)).unwrap_or(-1);
                 if !matches!(sig, Signal::SIGSTOP) {
-                    this.remove_thread(tid, code as _, buf);
+                    if this.remove_thread(tid, code as _, buf) {
+                        self.targets.retain(|t| !Arc::ptr_eq(t, &this));
+                    }
                 }
                 Some(sig)
             }
             // exited normally
             WaitStatus::Exited(_, code) => {
-                this.remove_thread(tid, code, buf);
-                if this.threads.read().is_empty() {
+                if this.remove_thread(tid, code, buf) {
                     self.targets.retain(|t| !Arc::ptr_eq(t, &this));
-                }
-                if self.targets.is_empty() {
-                    return None;
                 }
                 None
             }
@@ -1159,6 +1160,9 @@ impl UDbgEngine for DefaultEngine {
 
         while let Some(s) = self.fetch(buf).and_then(|_| self.handle(buf)) {
             self.cont(s, buf);
+            if self.targets.is_empty() {
+                break;
+            }
         }
 
         Ok(())
