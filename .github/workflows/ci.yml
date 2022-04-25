@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [ dev ]
+  pull_request:
+    branches: [ dev ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  build:
+    name: build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        build: [linux, windows]
+        include:
+          - build: linux
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - build: windows
+            os: windows-2019
+            target: x86_64-pc-windows-msvc
+      fail-fast: false
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Install latest nightly
+      uses: actions-rs/toolchain@v1
+      with:
+          toolchain: nightly
+          override: true
+          profile: minimal
+          components: rustc
+          target: ${{ matrix.target }}
+    - name: Build
+      uses: actions-rs/cargo@v1
+      with:
+        command: build
+    - name: Run tests
+      run: cargo test --verbose -- --test-threads=1 --nocapture
