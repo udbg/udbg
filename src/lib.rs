@@ -89,10 +89,10 @@ pub mod util {
     pub struct Utils;
 
     impl Utils {
-        pub fn mapfile(path: &str) -> Option<Mmap> {
+        pub fn mapfile(path: &str) -> anyhow::Result<Mmap> {
             std::fs::File::open(path)
                 .and_then(|f| unsafe { Mmap::map(&f) })
-                .ok()
+                .map_err(Into::into)
         }
 
         pub fn file_lines<P: AsRef<Path>>(path: P) -> IoResult<impl Iterator<Item = String>> {

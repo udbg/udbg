@@ -2,13 +2,15 @@
 //! Utilities for dealing symbols implements by udbg which is platform independently
 //!
 
+use crate::{
+    consts::*, error::*, pe::PeHelper, prelude::GetProp, range::RangeValue, shell::udbg_ui,
+};
+
 use core::cell::Cell;
 use parking_lot::RwLock;
 use spin::RwLock as SpinRW;
 use std::collections::BTreeMap;
 use std::sync::Arc;
-
-use crate::{consts::*, error::*, prelude::GetProp, shell::udbg_ui};
 
 #[cfg(windows)]
 use unicase::UniCase;
@@ -98,7 +100,7 @@ pub struct FieldInfo {
 /// * 符号信息，结构体偏移等
 pub trait SymbolFile {
     fn path(&self) -> &str;
-    fn global(&self) -> Result<Arc<Syms>, String>;
+    fn global(&self) -> anyhow::Result<Arc<SymbolMap>>;
 
     fn find_type(&self, name: &str) -> Vec<TypeInfo> {
         vec![]
@@ -193,45 +195,47 @@ impl ModuleData {
     }
 }
 
-pub type Syms = BTreeMap<usize, Symbol>;
+#[derive(Deref, DerefMut, Default)]
+pub struct SymbolMap(pub BTreeMap<usize, Symbol>);
 
-pub fn find_symbol(symbols: &Syms, moffset: usize, max_offset: usize) -> Option<Symbol> {
-    (if max_offset == 0 {
-        symbols.get(&moffset)
-    } else {
-        symbols.range(0..=moffset).last().map(|(_, v)| v)
-    })
-    .map(Symbol::clone)
-}
+impl SymbolMap {
+    pub fn find_symbol(&self, moffset: usize, max_offset: usize) -> Option<Symbol> {
+        (if max_offset == 0 {
+            self.get(&moffset)
+        } else {
+            self.range(0..=moffset).last().map(|(_, v)| v)
+        })
+        .map(Symbol::clone)
+    }
 
-pub fn add_symbol(symbols: &mut Syms, offset: usize, name: &str) -> UDbgResult<()> {
-    symbols.insert(
-        offset,
-        Symbol {
-            offset: offset as u32,
-            name: name.into(),
-            type_id: 0,
-            len: SYM_NOLEN,
-            flags: 0,
-        },
-    );
-    Ok(())
-}
+    pub fn add_symbol(&mut self, offset: usize, name: &str) -> UDbgResult<()> {
+        self.insert(
+            offset,
+            Symbol {
+                offset: offset as u32,
+                name: name.into(),
+                type_id: 0,
+                len: SYM_NOLEN,
+                flags: 0,
+            },
+        );
+        Ok(())
+    }
 
-pub fn get_symbol(symbols: &Syms, name: &str) -> Option<Symbol> {
-    symbols
-        .iter()
-        .find(|(_, s)| name == s.name.as_ref())
-        .map(|(_, v)| v.clone())
+    pub fn get_symbol(&self, name: &str) -> Option<Symbol> {
+        self.iter()
+            .find(|(_, s)| name == s.name.as_ref())
+            .map(|(_, v)| v.clone())
+    }
 }
 
 /// Represents the symbols in a module
 #[derive(Default)]
 pub struct SymbolsData {
     /// symbols user added
-    pub user_syms: RwLock<Syms>,
+    pub user_syms: RwLock<SymbolMap>,
     /// symbols from module export
-    pub exports: Syms,
+    pub exports: SymbolMap,
     /// PDB Signature
     pub pdb_sig: Box<str>,
     /// PDB file name
@@ -241,31 +245,31 @@ pub struct SymbolsData {
 
 impl SymbolsData {
     pub fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
-        add_symbol(&mut self.user_syms.write(), offset, name)
+        self.user_syms.write().add_symbol(offset, name)
     }
 
     pub fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
-        find_symbol(&self.user_syms.read(), offset, max_offset)
+        self.user_syms.read().find_symbol(offset, max_offset)
             .or_else(|| {
                 self.pdb
                     .read()
                     .as_ref()
                     .and_then(|p| p.global().ok())
-                    .and_then(|s| find_symbol(&s, offset, max_offset))
+                    .and_then(|s| s.find_symbol(offset, max_offset))
             })
-            .or_else(|| find_symbol(&self.exports, offset, max_offset))
+            .or_else(|| self.exports.find_symbol(offset, max_offset))
     }
 
     pub fn get_symbol(&self, name: &str) -> Option<Symbol> {
-        get_symbol(&self.user_syms.read(), name)
+        self.user_syms.read().get_symbol(name)
             .or_else(|| {
                 self.pdb
                     .read()
                     .as_ref()
                     .and_then(|p| p.global().ok())
-                    .and_then(|s| get_symbol(&s, name))
+                    .and_then(|s| s.get_symbol(name))
             })
-            .or_else(|| get_symbol(&self.exports, name))
+            .or_else(|| self.exports.get_symbol(name))
     }
 
     pub fn enum_symbol<'a>(&'a self, pat: Option<&str>) -> UDbgResult<Vec<Symbol>> {
@@ -316,14 +320,20 @@ pub trait UDbgModule: GetProp {
         IS_ARCH_X64 || IS_ARCH_ARM64
     }
 
+    fn symbols_data(&self) -> Option<&SymbolsData> {
+        None
+    }
+
     fn symbol_status(&self) -> SymbolStatus;
 
     fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
+        self.symbols_data()
+            .map(|syms| syms.add_symbol(offset, name))
+            .unwrap_or(Err(UDbgError::NotSupport))
     }
 
     fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
-        None
+        self.symbols_data()?.find_symbol(offset, max_offset)
     }
 
     #[cfg(windows)]
@@ -355,27 +365,56 @@ pub trait UDbgModule: GetProp {
 
     /// get symbol info by name
     fn get_symbol(&self, name: &str) -> Option<Symbol> {
-        None
+        self.symbols_data()?.get_symbol(name)
     }
 
     /// get the symbol file of this module
     fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
-        None
+        self.symbols_data()?.pdb.read().clone()
     }
 
     /// specific a symbol file for this module
     fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
+        if let Some(syms) = self.symbols_data() {
+            *syms.pdb.write() = Some(match path {
+                // TODO:
+                #[cfg(windows)]
+                Some(path) => Arc::new(crate::pdbfile::PDBData::load(path, None)?),
+                #[cfg(not(windows))]
+                Some(_) => return Err(UDbgError::NotSupport),
+                None => return Err(UDbgError::NotFound),
+            });
+            Ok(())
+        } else {
+            Err(UDbgError::NotSupport)
+        }
     }
 
     /// enumerate symbols by optional wildcard
     fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol> + '_>> {
-        Err(UDbgError::NotSupport)
+        if let Some(syms) = self.symbols_data() {
+            Ok(Box::new(syms.enum_symbol(pat)?.into_iter()))
+        } else {
+            Err(UDbgError::NotSupport)
+        }
     }
 
     /// get all exported symbols
     fn get_exports(&self) -> Option<Vec<Symbol>> {
-        None
+        Some(
+            self.symbols_data()?
+                .exports
+                .iter()
+                .map(|i| i.1.clone())
+                .collect(),
+        )
+    }
+}
+
+impl<T: UDbgModule + Sized> RangeValue for T {
+    default fn as_range(&self) -> std::ops::Range<usize> {
+        let data = self.data();
+        data.base..data.base + data.size
     }
 }
 
@@ -615,5 +654,52 @@ impl<T: UDbgModule + 'static> TargetSymbol for SymbolManager<T> {
         file: winapi::um::winnt::HANDLE,
     ) -> bool {
         false
+    }
+}
+
+impl PeHelper<'_> {
+    pub fn runtime_functions(&self) -> Vec<RUNTIME_FUNCTION> {
+        #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
+        {
+            self.exception_data
+                .iter()
+                .map(|e| e.functions())
+                .flatten()
+                .filter_map(|x| x.ok())
+                .map(|x| unsafe { core::mem::transmute::<_, RUNTIME_FUNCTION>(x) })
+                .collect()
+        }
+
+        #[cfg(any(target_arch = "aarch64"))]
+        {
+            vec![]
+        }
+    }
+
+    pub fn symbols_data(&self, path: &str) -> SymbolsData {
+        let pdb_sig = self
+            .get_pdb_signature()
+            .unwrap_or_default()
+            .to_ascii_uppercase();
+        let pdb_name = self
+            .debug_data
+            .and_then(|d| d.codeview_pdb70_debug_info)
+            .and_then(|d| std::str::from_utf8(&d.filename).ok())
+            .unwrap_or_default()
+            .trim_matches(|c: char| c.is_whitespace() || c == '\0')
+            .to_string();
+        let pdb = self
+            .find_pdb(path)
+            // .map_err(|err| ui.warn(format!("load pdb for {}: {err:?}", data.name)))
+            .ok()
+            .map(|p| p as Arc<dyn SymbolFile>);
+
+        SymbolsData {
+            pdb: pdb.into(),
+            user_syms: Default::default(),
+            exports: self.exported_symbols(),
+            pdb_name: pdb_name.into(),
+            pdb_sig: pdb_sig.into(),
+        }
     }
 }

@@ -28,7 +28,7 @@ use parking_lot::RwLock;
 use serde_value::Value as SerdeVal;
 
 use super::ntdll::*;
-use crate::{pdbfile::*, pe::PeHelper, range::*, register::*, shell::udbg_ui};
+use crate::{pe::PeHelper, range::*, register::*, shell::udbg_ui};
 
 #[repr(u32)]
 #[derive(Copy, Clone, PartialEq)]
@@ -458,13 +458,13 @@ pub fn get_selector_entry_wow64(th: HANDLE, s: u32) -> u32 {
 }
 
 #[inline]
-fn map_or_open(file: HANDLE, path: &str) -> Option<memmap2::Mmap> {
+fn map_or_open(file: HANDLE, path: &str) -> anyhow::Result<memmap2::Mmap> {
     if file.is_null() {
         Utils::mapfile(path)
     } else {
         unsafe {
             let f = File::from_raw_handle(file.cast());
-            memmap2::Mmap::map(&f).ok()
+            memmap2::Mmap::map(&f).map_err(Into::into)
         }
     }
 }
@@ -507,37 +507,13 @@ impl UDbgModule for Module {
             SymbolStatus::Unload
         }
     }
-    fn add_symbol(&self, offset: usize, name: &str) -> UDbgResult<()> {
-        self.syms.add_symbol(offset, name)
+
+    fn symbols_data(&self) -> Option<&SymbolsData> {
+        Some(&self.syms)
     }
-    fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
-        self.syms.find_symbol(offset, max_offset)
-    }
+
     fn runtime_function(&self) -> Option<&[RUNTIME_FUNCTION]> {
         self.funcs.as_slice().into()
-    }
-    fn get_symbol(&self, name: &str) -> Option<Symbol> {
-        self.syms.get_symbol(name)
-    }
-    fn symbol_file(&self) -> Option<Arc<dyn SymbolFile>> {
-        self.syms.pdb.read().clone()
-    }
-    fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
-        *self.syms.pdb.write() = Some(match path {
-            Some(path) => Arc::new(PDBData::load(path, None)?),
-            None => {
-                let mmap = map_or_open(self.file, &self.data.path).ok_or("map failed")?;
-                let pe = PeHelper::parse(&mmap).ok_or("parse pe")?;
-                find_pdb(&self.data.path, &pe)? as Arc<dyn SymbolFile>
-            }
-        });
-        Ok(())
-    }
-    fn enum_symbol(&self, pat: Option<&str>) -> UDbgResult<Box<dyn Iterator<Item = Symbol>>> {
-        Ok(Box::new(self.syms.enum_symbol(pat)?.into_iter()))
-    }
-    fn get_exports(&self) -> Option<Vec<Symbol>> {
-        Some(self.syms.exports.iter().map(|i| i.1.clone()).collect())
     }
 }
 
@@ -573,9 +549,9 @@ impl TargetSymbol for SymbolManager<Module> {
         let mut buf = vec![0u8; 0x1000];
         let mmap = map_or_open(file, path);
         let m = match &mmap {
-            Some(m) => m,
-            None => {
-                ui.warn(format!("map {} failed", path));
+            Ok(m) => m,
+            Err(err) => {
+                ui.warn(format!("map {path} failed: {err:?}"));
                 if read.read_memory(base, &mut buf).is_none() {
                     ui.error(format!("read pe falied: {:x} {}", base, path));
                     return false;
@@ -632,83 +608,11 @@ impl TargetSymbol for SymbolManager<Module> {
         };
 
         let mut funcs: Vec<RUNTIME_FUNCTION> = Default::default();
-        let mut pdb_sig = String::new();
-        let mut pdb_name = String::new();
-        let syms = if let Some(pe) = PeHelper::parse(&m) {
-            pdb_sig = pe
-                .get_pdb_signature()
-                .unwrap_or_default()
-                .to_ascii_uppercase();
-            pdb_name = pe
-                .debug_data
-                .and_then(|d| d.codeview_pdb70_debug_info)
-                .and_then(|d| std::str::from_utf8(&d.filename).ok())
-                .unwrap_or_default()
-                .trim_matches(|c: char| c.is_whitespace() || c == '\0')
-                .to_string();
-            let pdb = match find_pdb(&path, &pe) {
-                Ok(p) => {
-                    // info!("load pdb: {}", p.path);
-                    Some(p as Arc<dyn SymbolFile>)
-                }
-                Err(e) => {
-                    if !e.is_empty() {
-                        ui.warn(format!("load pdb for {}: {}", data.name, e));
-                    }
-                    None
-                }
-            };
-
-            pub fn get_exports_from_pe(pe: &PeHelper) -> Syms {
-                let mut result = Syms::new();
-                for e in pe.exports.iter() {
-                    let len = pe
-                        .exception_data
-                        .as_ref()
-                        .and_then(|x| x.find_function(e.rva as u32).ok())
-                        .and_then(|f| f.map(|f| f.end_address - f.begin_address))
-                        .unwrap_or(SYM_NOLEN);
-                    result.insert(
-                        e.rva,
-                        Symbol {
-                            name: e.name.unwrap_or("<>").into(),
-                            type_id: 0,
-                            len,
-                            offset: e.rva as u32,
-                            flags: (SymbolFlags::FUNCTION | SymbolFlags::EXPORT).bits(),
-                        },
-                    );
-                }
-                result
-            }
-
-            // TODO: aarch64
-            #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
-            {
-                funcs = pe
-                    .exception_data
-                    .iter()
-                    .map(|e| e.functions())
-                    .flatten()
-                    .filter_map(|x| x.ok())
-                    .map(|x| unsafe { transmute::<_, RUNTIME_FUNCTION>(x) })
-                    .collect::<Vec<_>>();
-            }
-            SymbolsData {
-                pdb: pdb.into(),
-                user_syms: Default::default(),
-                exports: get_exports_from_pe(&pe),
-                pdb_name: pdb_name.into(),
-                pdb_sig: pdb_sig.into(),
-            }
+        let syms = if let Ok(pe) = PeHelper::parse(&m) {
+            funcs = pe.runtime_functions();
+            pe.symbols_data(path)
         } else {
-            SymbolsData {
-                exports: Default::default(),
-                user_syms: Default::default(),
-                pdb: Default::default(),
-                pdb_name: pdb_name.into(),
-                pdb_sig: pdb_sig.into(),
-            }
+            SymbolsData::default()
         };
         symgr.add(Module {
             data,

@@ -2,11 +2,12 @@
 //! Utilities for accessing symbols in pdb file
 //!
 
+use anyhow::Context;
 use pdb::{FallibleIterator, ItemIter, MemberType, SymbolData, TypeData, TypeIndex, PDB};
 
 use spin::Mutex;
-use std::fs::File;
 use std::sync::Arc;
+use std::{fs::File, io::ErrorKind};
 
 use crate::{pe, prelude::*, shell::udbg_ui};
 
@@ -26,12 +27,12 @@ pub struct PdbFile {
 }
 
 impl PdbFile {
-    pub fn load(path: &str, pe: Option<&pe::PeHelper>) -> Result<Self, String> {
+    pub fn load(path: &str, pe: Option<&pe::PeHelper>) -> anyhow::Result<Self> {
         let mut db = Box::new(
-            pdb::PDB::open(File::open(path).map_err(|e| format!("open file {}: {:}", path, e))?)
-                .map_err(|e| format!("open pdb {}: {:?}", path, e))?,
+            pdb::PDB::open(File::open(path).with_context(|| format!("open file {path}"))?)
+                .with_context(|| format!("open pdb {path}"))?,
         );
-        let pi = db.pdb_information().map_err(|_| "PDBInformation")?;
+        let pi = db.pdb_information().context("PDBInformation")?;
         if let Some(pe) = pe {
             if !pe
                 .debug_data
@@ -44,15 +45,15 @@ impl PdbFile {
                 })
                 .unwrap_or(true)
             {
-                return Err("Signature not matched".into());
+                anyhow::bail!("Signature not matched");
             }
         }
 
-        let ti = db.type_information().map_err(|_| "ItemInformation")?;
+        let ti = db.type_information().context("ItemInformation")?;
         let pti: *const _ = &ti;
         unsafe {
             let finder = pti.as_ref().unwrap().finder();
-            // let ii = db.id_information().map_err(|_| "IdInformation")?;
+            // let ii = db.id_information().context("IdInformation")?;
             Ok(Self {
                 db,
                 ti,
@@ -61,15 +62,15 @@ impl PdbFile {
         }
     }
 
-    pub fn global(&mut self) -> Result<Syms, String> {
+    pub fn global(&mut self) -> anyhow::Result<SymbolMap> {
         let pdb = &mut self.db;
-        let address_map = pdb.address_map().map_err(|_| "address_map failed")?;
+        let address_map = pdb.address_map().context("address_map failed")?;
         let dbi = pdb
             .debug_information()
-            .map_err(|_| "debug_information failed")?;
-        let mut modules = dbi.modules().map_err(|_| "get modules failed")?;
+            .context("debug_information failed")?;
+        let mut modules = dbi.modules().context("get modules failed")?;
 
-        let mut result = Syms::new();
+        let mut result = SymbolMap::default();
         let mut push_symbol = |sym: SymbolData| {
             match sym {
                 SymbolData::Public(p) => {
@@ -126,7 +127,7 @@ impl PdbFile {
             // println!("module name: {}, object file name: {}", module.module_name(), module.object_file_name());
         }
 
-        let symbol_table = pdb.global_symbols().map_err(|_| "global_symbols failed")?;
+        let symbol_table = pdb.global_symbols().context("global_symbols failed")?;
         let mut symbols = symbol_table.iter();
         while let Ok(Some(symbol)) = symbols.next() {
             symbol.parse().map(|sym| push_symbol(sym)).ok();
@@ -325,11 +326,11 @@ impl PdbFile {
 pub struct PDBData {
     pub file: Mutex<PdbFile>,
     pub path: Arc<str>,
-    pub global: Mutex<Option<Arc<Syms>>>,
+    pub global: Mutex<Option<Arc<SymbolMap>>>,
 }
 
 impl PDBData {
-    pub fn load(path: &str, pe: Option<&pe::PeHelper>) -> Result<PDBData, String> {
+    pub fn load(path: &str, pe: Option<&pe::PeHelper>) -> anyhow::Result<PDBData> {
         Ok(Self {
             file: PdbFile::load(path, pe)?.into(),
             path: path.into(),
@@ -363,7 +364,7 @@ impl SymbolFile for PDBData {
         self.file.lock().find_field(id, name).ok()
     }
 
-    fn global(&self) -> Result<Arc<Syms>, String> {
+    fn global(&self) -> anyhow::Result<Arc<SymbolMap>> {
         let result = self.global.lock().clone();
         match result {
             Some(r) => Ok(r.clone()),
@@ -376,47 +377,51 @@ impl SymbolFile for PDBData {
     }
 }
 
-pub fn find_pdb(path: &str, pe: &pe::PeHelper) -> Result<Arc<PDBData>, String> {
-    use std::path::Path;
+impl pe::PeHelper<'_> {
+    pub fn find_pdb(&self, path: &str) -> anyhow::Result<Arc<PDBData>> {
+        use std::path::Path;
 
-    let fullpath = Path::new(path);
-    let pdbpath = pe.get_pdb_path().and_then(|p| p.to_str().ok());
-    let mut paths = vec![];
+        let fullpath = Path::new(path);
+        let pdbpath = self.get_pdb_path().and_then(|p| p.to_str().ok());
+        let mut paths = vec![];
 
-    if let Some(pdbpath) = pdbpath {
-        let pdbpath = Path::new(pdbpath);
-        let pdbname = pdbpath.file_name().ok_or("pdbname")?;
-        // 1. the pdb's full path
-        if pdbpath.is_absolute() {
-            paths.push(pdbpath.to_path_buf());
-        }
-        // 2. dir(module) + pdb's name
-        paths.push(fullpath.with_file_name(pdbname));
-        // 3. the cached pdb path
-        udbg_ui().base().symcache.as_ref().map(|cache| {
-            if let Some(pdb_sig) = pe.get_pdb_signature() {
-                paths.push(cache.join(pdbname).join(pdb_sig).join(pdbname));
+        if let Some(pdbpath) = pdbpath {
+            let pdbpath = Path::new(pdbpath);
+            let pdbname = pdbpath.file_name().context("pdbname")?;
+            // 1. the pdb's full path
+            if pdbpath.is_absolute() {
+                paths.push(pdbpath.to_path_buf());
             }
-        });
-    }
-    // 4. the same pdb path to dll
-    paths.push(fullpath.with_extension("pdb"));
+            // 2. dir(module) + pdb's name
+            paths.push(fullpath.with_file_name(pdbname));
+            // 3. the cached pdb path
+            udbg_ui().base().symcache.as_ref().map(|cache| {
+                if let Some(pdb_sig) = self.get_pdb_signature() {
+                    paths.push(cache.join(pdbname).join(pdb_sig).join(pdbname));
+                }
+            });
+        }
+        // 4. the same pdb path to dll
+        paths.push(fullpath.with_extension("pdb"));
 
-    let mut err = None;
-    for p in paths.iter() {
-        if p.exists() {
-            match PDBData::load(&p.to_string_lossy(), pe.into()) {
-                Ok(pdb) => return Ok(pdb.into()),
-                Err(e) => err = Some(format!("{}: {}", p.to_string_lossy(), e)),
+        let mut err = None;
+        for p in paths.iter() {
+            if p.exists() {
+                match PDBData::load(&p.to_string_lossy(), self.into()) {
+                    Ok(pdb) => return Ok(pdb.into()),
+                    Err(e) => err = Some(e),
+                }
             }
         }
-    }
 
-    Err(err.unwrap_or("not found".into()))
+        Err(err
+            .map(Into::into)
+            .unwrap_or_else(|| std::io::Error::from(ErrorKind::NotFound).into()))
+    }
 }
 
 impl SymbolsData {
-    pub fn load_from_pdb(&self, path: &str) -> Result<Syms, String> {
+    pub fn load_from_pdb(&self, path: &str) -> anyhow::Result<SymbolMap> {
         let mut pdb = PdbFile::load(path, None)?;
         pdb.global()
     }

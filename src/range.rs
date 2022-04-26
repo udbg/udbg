@@ -40,14 +40,14 @@ pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
     }
 }
 
-impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Box<R> {
-    fn as_range(&self) -> Range<S> {
-        self.as_ref().as_range()
-    }
-}
+// impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Box<R> {
+//     fn as_range(&self) -> Range<S> {
+//         self.as_ref().as_range()
+//     }
+// }
 
-impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Arc<R> {
-    fn as_range(&self) -> Range<S> {
-        self.as_ref().as_range()
-    }
-}
+// impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Arc<R> {
+//     fn as_range(&self) -> Range<S> {
+//         self.as_ref().as_range()
+//     }
+// }
