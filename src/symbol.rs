@@ -249,7 +249,9 @@ impl SymbolsData {
     }
 
     pub fn find_symbol(&self, offset: usize, max_offset: usize) -> Option<Symbol> {
-        self.user_syms.read().find_symbol(offset, max_offset)
+        self.user_syms
+            .read()
+            .find_symbol(offset, max_offset)
             .or_else(|| {
                 self.pdb
                     .read()
@@ -261,7 +263,9 @@ impl SymbolsData {
     }
 
     pub fn get_symbol(&self, name: &str) -> Option<Symbol> {
-        self.user_syms.read().get_symbol(name)
+        self.user_syms
+            .read()
+            .get_symbol(name)
             .or_else(|| {
                 self.pdb
                     .read()
@@ -658,6 +662,7 @@ impl<T: UDbgModule + 'static> TargetSymbol for SymbolManager<T> {
 }
 
 impl PeHelper<'_> {
+    #[cfg(windows)]
     pub fn runtime_functions(&self) -> Vec<RUNTIME_FUNCTION> {
         #[cfg(any(target_arch = "x86_64", target_arch = "x86"))]
         {

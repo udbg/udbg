@@ -110,9 +110,9 @@ impl SymbolsData {
         this
     }
 
-    fn load(&mut self, path: &str) -> Result<(), String> {
-        let map = Utils::mapfile(path.as_ref()).ok_or("map failed")?;
-        let e = ElfHelper::parse(&map).ok_or("parse failed")?;
+    fn load(&mut self, path: &str) -> anyhow::Result<()> {
+        let map = Utils::mapfile(path.as_ref()).context("map")?;
+        let e = ElfHelper::parse(&map).context("parse")?;
         let mut push_symbol = |s: ElfSym| {
             if s.name.starts_with("$x.") {
                 return;
