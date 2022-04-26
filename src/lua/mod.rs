@@ -24,12 +24,9 @@ pub const EXCEPTION: lua_Integer = 9;
 pub const STEP: lua_Integer = 10;
 
 pub fn init_udbg(t: &ValRef) {
-    t.set("SymbolFile", ArcSymbolFile::init_metatable as InitMetatable);
-    t.set("UDbgTarget", ArcTarget::init_metatable as InitMetatable);
-    t.set(
-        "UDbgBreakpoint",
-        ArcBreakpoint::init_metatable as InitMetatable,
-    );
+    t.set("SymbolFile", ArcSymbolFile::metatable());
+    t.set("UDbgTarget", ArcTarget::metatable());
+    t.set("UDbgBreakpoint", ArcBreakpoint::metatable());
 
     t.state.create_table(0, 4);
     {
@@ -200,7 +197,7 @@ impl ToLua for CpuReg {
 impl UserData for MemoryPage {
     const TYPE_NAME: &'static str = "MemoryPage";
     #[cfg(windows)]
-    const GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| {
+    const INDEX_GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| {
         use winapi::um::winnt::PAGE_READONLY;
         match key {
             "alloc_base" => s.pushed(this.alloc_base),
@@ -218,7 +215,7 @@ impl UserData for MemoryPage {
     .wrapper();
 
     #[cfg(not(windows))]
-    const GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| match key {
+    const INDEX_GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| match key {
         "base" => s.pushed(this.base),
         "size" => s.pushed(this.size),
         "executable" => s.pushed(this.is_executable()),
@@ -252,7 +249,7 @@ impl ToLuaMulti for HandleInfo {
 
 impl UserData for Symbol {
     const TYPE_NAME: &'static str = "UDbgSymbol";
-    const INDEX_SELF: bool = false;
+    const INDEX_METATABLE: bool = false;
 
     fn getter(fields: &ValRef) {
         fields.register("name", |this: &Self| this.name.clone());
@@ -333,7 +330,7 @@ impl AsRef<dyn UDbgModule> for ArcModule {
 
 impl UserData for ArcModule {
     const TYPE_NAME: &'static str = "UDbgModule*";
-    const GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| {
+    const INDEX_GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| {
         this.0
             .get_prop(key)
             .map(|val| s.pushed(SerdeValue(val)))
@@ -541,7 +538,7 @@ impl UserData for ArcTarget {
     const TYPE_NAME: &'static str = "UDbgTarget*";
     const INDEX_USERVALUE: bool = true;
 
-    const GETTER: lua_CFunction =
+    const INDEX_GETTER: lua_CFunction =
         RsFn::new(|this: &Self, key: &str| this.0.get_prop(key).map(SerdeValue).ok()).wrapper();
 
     fn init_userdata(s: &State) {
