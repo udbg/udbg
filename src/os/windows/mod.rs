@@ -153,7 +153,7 @@ impl<T: Copy> Iterator for ToolHelperIter<T> {
     }
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct MemoryPage {
     pub base: usize,
     pub alloc_base: usize,

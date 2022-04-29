@@ -1,6 +1,7 @@
 use crate::{
     os::{pid_t, tid_t},
     pdbfile,
+    pe::PETarget,
     prelude::*,
     register::{get_regid, CpuReg},
 };
@@ -39,6 +40,9 @@ pub fn init_udbg(t: &ValRef) {
     t.setf(cstr!("SymbolFlags"), TopVal);
 
     t.register("get_regid", get_regid);
+    t.register("open_pe_target", |path: &str| {
+        PETarget::new(path).map(Arc::new).map(|t| ArcTarget(t as _))
+    });
 
     t.state.create_table(0, 8);
     {
@@ -252,7 +256,7 @@ impl UserData for Symbol {
     const INDEX_METATABLE: bool = false;
 
     fn getter(fields: &ValRef) {
-        fields.register("name", |this: &Self| this.name.clone());
+        fields.register("name", |this: &'static Self| this.name.as_ref());
         fields.register("offset", |this: &Self| this.offset);
         fields.register("len", |this: &Self| this.len);
         fields.register("flags", |this: &Self| this.flags);
@@ -341,8 +345,8 @@ impl UserData for ArcModule {
     fn getter(fields: &ValRef) {
         fields.register("base", |this: &Self| this.data().base);
         fields.register("size", |this: &Self| this.data().size);
-        fields.register("name", |this: &Self| this.data().name.clone());
-        fields.register("path", |this: &Self| this.data().path.clone());
+        fields.register("name", |this: &'static Self| this.data().name.as_ref());
+        fields.register("path", |this: &'static Self| this.data().path.as_ref());
         fields.register("arch", |this: &Self| this.data().arch);
         fields.register("entry", |this: &Self| this.data().entry);
         fields.register("entry_point", |this: &Self| {

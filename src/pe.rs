@@ -4,10 +4,58 @@ use crate::prelude::*;
 use crate::range::RangeValue;
 
 use anyhow::Context;
-use goblin::pe::section_table::SectionTable;
+use goblin::pe::section_table::*;
 use goblin::pe::PE;
 use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::path::Path;
+use std::sync::Arc;
+
+pub const PAGE_NOACCESS: u32 = 0x01;
+pub const PAGE_READONLY: u32 = 0x02;
+pub const PAGE_READWRITE: u32 = 0x04;
+pub const PAGE_WRITECOPY: u32 = 0x08;
+pub const PAGE_EXECUTE: u32 = 0x10;
+pub const PAGE_EXECUTE_READ: u32 = 0x20;
+pub const PAGE_EXECUTE_READWRITE: u32 = 0x40;
+pub const PAGE_EXECUTE_WRITECOPY: u32 = 0x80;
+pub const PAGE_GUARD: u32 = 0x100;
+pub const PAGE_NOCACHE: u32 = 0x200;
+pub const PAGE_WRITECOMBINE: u32 = 0x400;
+pub const PAGE_ENCLAVE_THREAD_CONTROL: u32 = 0x80000000;
+pub const PAGE_REVERT_TO_FILE_MAP: u32 = 0x80000000;
+pub const PAGE_TARGETS_NO_UPDATE: u32 = 0x40000000;
+pub const PAGE_TARGETS_INVALID: u32 = 0x40000000;
+pub const PAGE_ENCLAVE_UNVALIDATED: u32 = 0x20000000;
+pub const PAGE_ENCLAVE_DECOMMIT: u32 = 0x10000000;
+pub const MEM_COMMIT: u32 = 0x1000;
+pub const MEM_RESERVE: u32 = 0x2000;
+pub const MEM_DECOMMIT: u32 = 0x4000;
+pub const MEM_RELEASE: u32 = 0x8000;
+pub const MEM_FREE: u32 = 0x10000;
+pub const MEM_PRIVATE: u32 = 0x20000;
+pub const MEM_MAPPED: u32 = 0x40000;
+pub const MEM_RESET: u32 = 0x80000;
+pub const MEM_TOP_DOWN: u32 = 0x100000;
+pub const MEM_WRITE_WATCH: u32 = 0x200000;
+pub const MEM_PHYSICAL: u32 = 0x400000;
+pub const MEM_ROTATE: u32 = 0x800000;
+pub const MEM_DIFFERENT_IMAGE_BASE_OK: u32 = 0x800000;
+pub const MEM_RESET_UNDO: u32 = 0x1000000;
+pub const MEM_LARGE_PAGES: u32 = 0x20000000;
+pub const MEM_4MB_PAGES: u32 = 0x80000000;
+pub const MEM_64K_PAGES: u32 = MEM_LARGE_PAGES | MEM_PHYSICAL;
+pub const SEC_64K_PAGES: u32 = 0x00080000;
+pub const SEC_FILE: u32 = 0x800000;
+pub const SEC_IMAGE: u32 = 0x1000000;
+pub const SEC_PROTECTED_IMAGE: u32 = 0x2000000;
+pub const SEC_RESERVE: u32 = 0x4000000;
+pub const SEC_COMMIT: u32 = 0x8000000;
+pub const SEC_NOCACHE: u32 = 0x10000000;
+pub const SEC_WRITECOMBINE: u32 = 0x40000000;
+pub const SEC_LARGE_PAGES: u32 = 0x80000000;
+pub const SEC_IMAGE_NO_EXECUTE: u32 = SEC_IMAGE | SEC_NOCACHE;
+pub const MEM_IMAGE: u32 = SEC_IMAGE;
 
 #[derive(Deref)]
 pub struct PeHelper<'a>(pub PE<'a>);
@@ -97,12 +145,15 @@ pub struct PEModule {
     pub syms: SymbolsData,
     helper: PeHelper<'static>,
     map: memmap2::Mmap,
+    pages: Vec<MemoryPage>,
 }
 
 impl PEModule {
-    pub fn new(path: &str) -> anyhow::Result<Self> {
+    pub fn new<P: AsRef<Path>>(path: P) -> anyhow::Result<Self> {
         unsafe {
-            let map = crate::util::Utils::mapfile(path)?;
+            let path = path.as_ref();
+            let pathstr = &path.to_string_lossy();
+            let map = crate::util::Utils::mapfile(pathstr)?;
             let helper = PeHelper::parse(core::mem::transmute(map.as_ref()))?;
             let opt = helper
                 .header
@@ -115,18 +166,59 @@ impl PEModule {
                 size: opt.windows_fields.size_of_image as _,
                 entry: opt.standard_fields.address_of_entry_point as _,
                 arch: helper.get_arch().unwrap_or_default(),
-                name: std::path::Path::new(path)
+                name: path
                     .file_name()
                     .unwrap_or_default()
                     .to_string_lossy()
                     .into(),
-                path: path.into(),
+                path: pathstr.as_ref().into(),
             };
+
+            let sec = helper.sections.first().unwrap();
+            let mut pages = vec![MemoryPage {
+                alloc_base: data.base,
+                base: data.base,
+                size: sec.virtual_address as _,
+                type_: MEM_IMAGE,
+                state: MEM_COMMIT,
+                protect: PAGE_READONLY,
+                alloc_protect: PAGE_READONLY,
+            }];
+            pages.extend(helper.sections.iter().map(|sec| {
+                let base = sec.virtual_address as usize + data.base;
+                let ch = sec.characteristics;
+                let protect = if IMAGE_SCN_MEM_EXECUTE & ch != 0 {
+                    if IMAGE_SCN_MEM_WRITE & ch != 0 {
+                        PAGE_EXECUTE_READWRITE
+                    } else {
+                        PAGE_EXECUTE_READ
+                    }
+                } else {
+                    if IMAGE_SCN_MEM_WRITE & ch != 0 {
+                        PAGE_READWRITE
+                    } else {
+                        PAGE_READONLY
+                    }
+                    //protect = IMAGE_SCN_MEM_WRITE & characters ? PAGE_EXECUTE_READWRITE: PAGE_READONLY;
+                    //protect = PAGE_READWRITE;
+                };
+                MemoryPage {
+                    alloc_base: base,
+                    alloc_protect: protect,
+                    base,
+                    protect,
+                    size: sec.virtual_size as _,
+                    type_: MEM_COMMIT,
+                    state: MEM_COMMIT,
+                }
+            }));
+
             Ok(Self {
-                syms: helper.symbols_data(path),
+                syms: helper.symbols_data(pathstr),
                 helper,
                 map,
                 data,
+                pages,
             })
         }
     }
@@ -158,7 +250,27 @@ impl UDbgModule for PEModule {
 }
 
 pub struct PETarget {
-    modules: Vec<PEModule>,
+    base: TargetBase,
+    symgr: SymbolManager<PEModule>,
+}
+
+unsafe impl Send for PETarget {}
+unsafe impl Sync for PETarget {}
+
+impl PETarget {
+    pub fn new<P: AsRef<Path>>(path: P) -> UDbgResult<Self> {
+        let module = PEModule::new(path.as_ref())?;
+        let base = TargetBase::default();
+        base.pid.set(1);
+        // base.arch
+        let symgr = SymbolManager::default();
+        symgr.base.write().list.push(module.into());
+        Ok(Self { base, symgr })
+    }
+
+    pub fn module(&self, addr: usize) -> Option<Arc<PEModule>> {
+        SymbolManager::find_module(&self.symgr, addr)
+    }
 }
 
 impl RangeValue for SectionTable {
@@ -171,13 +283,20 @@ impl RangeValue for SectionTable {
 
 impl ReadMemory for PETarget {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
-        let pe = RangeValue::binary_search(&self.modules, addr)?;
+        let pe = self.module(addr)?;
         let rva = addr - pe.data.base;
-        let sec = pe.helper.section_by_rva(rva)?;
-        // TODO: section fill by zero
-        let offset = (rva as u32 - sec.virtual_address + sec.pointer_to_raw_data) as usize;
+        let i = pe.pages.binary_search_by(|x| x.cmp(rva)).ok()?;
+        let page = pe.pages.get(i)?;
+        let (offset, size) = if i > 0 {
+            let sec = pe.helper.section_by_rva(rva)?;
+            // TODO: section fill by zero
+            let offset = (rva as u32 - sec.virtual_address + sec.pointer_to_raw_data) as usize;
+            (offset, sec.virtual_size as usize - rva)
+        } else {
+            (0, page.size - rva)
+        };
         let slice = &pe.map.as_ref()[offset..];
-        let len = data.len().min(slice.len());
+        let len = data.len().min(size);
         let res = &mut data[..len];
         res.copy_from_slice(&slice[..len]);
         Some(res)
@@ -192,14 +311,78 @@ impl WriteMemory for PETarget {
 
 impl TargetMemory for PETarget {
     fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + '_>> {
-        todo!()
+        let modules = self.symgr.base.read().list.clone();
+        Ok(Box::new(
+            modules
+                .into_iter()
+                .map(|pe| pe.pages.clone().into_iter())
+                .flatten(),
+        ))
     }
 
     fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
-        todo!()
+        let pe = self.module(address)?;
+        RangeValue::binary_search(&pe.pages, address - pe.data.base).cloned()
     }
 
     fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
-        todo!()
+        let modules = self.symgr.base.read().list.clone();
+        modules
+            .iter()
+            .map(|pe| {
+                pe.pages.iter().enumerate().map(|(i, page)| MemoryPageInfo {
+                    base: page.base,
+                    size: page.size,
+                    flags: MF_IMAGE,
+                    type_: page.type_().into(),
+                    protect: page.protect().into(),
+                    usage: if i > 0 {
+                        pe.helper.sections[i].name().unwrap_or_default().into()
+                    } else {
+                        pe.data.path.clone()
+                    },
+                    alloc_base: page.alloc_base,
+                })
+            })
+            .flatten()
+            .collect()
     }
 }
+
+impl TargetControl for PETarget {
+    fn detach(&self) -> UDbgResult<()> {
+        self.base.status.set(UDbgStatus::Detaching);
+        Ok(())
+    }
+
+    fn kill(&self) -> UDbgResult<()> {
+        Err(UDbgError::NotSupport)
+    }
+}
+
+impl Target for PETarget {
+    fn base(&self) -> &TargetBase {
+        &self.base
+    }
+
+    fn enum_thread(
+        &self,
+        detail: bool,
+    ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + '_>> {
+        Ok(Box::new(core::iter::empty()))
+    }
+
+    fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
+        Some(&self.symgr)
+    }
+}
+
+impl GetProp for PETarget {
+    fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
+        Ok(serde_value::Value::Unit)
+    }
+}
+
+impl BreakpointManager for PETarget {}
+
+impl UDbgTarget for PETarget {}
