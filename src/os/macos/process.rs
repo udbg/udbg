@@ -64,18 +64,9 @@ impl TargetMemory for Process {
         Process::virtual_query(self, address as _)
     }
 
-    fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+    fn collect_memory_info(&self) -> Vec<MemoryPage> {
         // mach_vm_region_recurse(target_task, address, size, nesting_depth, info, infoCnt)
-        self.enum_memory()
-            .map(|m| MemoryPageInfo {
-                base: m.base,
-                size: m.size,
-                flags: 0,
-                type_: "".into(),
-                protect: m.protect().into(),
-                usage: m.usage.into(),
-            })
-            .collect()
+        self.enum_memory().collect()
     }
 }
 
@@ -91,7 +82,7 @@ where
         TargetMemory::virtual_query(self.as_ref(), address)
     }
 
-    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+    default fn collect_memory_info(&self) -> Vec<MemoryPage> {
         self.as_ref().collect_memory_info()
     }
 }
@@ -346,10 +337,11 @@ impl Process {
             Some(MemoryPage {
                 base: address as _,
                 size: size as _,
-                prot: protection_bits_to_rwx(&info),
-                usage: Self::regionfilename(self.pid, address as _)
-                    .unwrap_or_default()
-                    .into(),
+                protect: u32::from_be_bytes(protection_bits_to_rwx(&info)),
+                info: Self::regionfilename(self.pid, address as _)
+                    .ok()
+                    .map(Into::into),
+                ..Default::default()
             })
         }
     }
