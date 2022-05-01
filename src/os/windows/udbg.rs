@@ -662,7 +662,7 @@ where
         self.deref().virtual_query(address)
     }
 
-    default fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+    default fn collect_memory_info(&self) -> Vec<MemoryPage> {
         collect_memory_info(&self.process, self)
     }
 }
@@ -1205,7 +1205,7 @@ impl NtHeader for IMAGE_NT_HEADERS {
     }
 }
 
-pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPageInfo> {
+pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage> {
     const PAGE_SIZE: usize = 0x1000;
     const MAX_HEAPS: usize = 1000;
 
@@ -1213,30 +1213,24 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage
     let mut result = this
         .enum_memory()
         .unwrap()
-        .map(|m| {
+        .map(|mut page| {
             let mut usage = String::new();
-            let mut flags = match m.type_ {
-                MEM_PRIVATE => MF_PRIVATE,
-                MEM_IMAGE => MF_IMAGE,
-                MEM_MAPPED => MF_MAP,
-                _ => 0,
+            let mut flags = match page.type_ {
+                MEM_PRIVATE => MemoryFlags::PRIVATE,
+                MEM_IMAGE => MemoryFlags::IMAGE,
+                MEM_MAPPED => MemoryFlags::MAP,
+                _ => MemoryFlags::Normal,
             };
-            if m.base == 0x7FFE0000 {
+            if page.base == 0x7FFE0000 {
                 usage.push_str("KUSER_SHARED_DATA");
-            } else if m.base == peb {
+            } else if page.base == peb {
                 usage.push_str("PEB");
-                flags |= MF_PEB;
+                flags |= MemoryFlags::PEB;
             }
 
-            MemoryPageInfo {
-                alloc_base: m.alloc_base,
-                base: m.base,
-                size: m.size,
-                flags,
-                usage: usage.into(),
-                type_: m.type_().into(),
-                protect: m.protect().into(),
-            }
+            page.flags = flags;
+            page.info = Some(usage.into());
+            page
         })
         .collect::<Vec<_>>();
 
@@ -1248,8 +1242,8 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage
         });
         stack.map(|stack| {
             RangeValue::binary_search_mut(&mut result, stack).map(|m| {
-                m.usage = format!("Stack ~{}", t.tid).into();
-                m.flags |= MF_STACK;
+                m.info = Some(format!("Stack ~{}", t.tid).into());
+                m.flags |= MemoryFlags::STACK;
             })
         });
     }
@@ -1271,8 +1265,8 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage
             });
         for i in 0..buf.len() {
             RangeValue::binary_search_mut(&mut result, buf[i]).map(|m| {
-                m.usage = format!("Heap #{}", i).into();
-                m.flags |= MF_HEAP;
+                m.info = Some(format!("Heap #{}", i).into());
+                m.flags |= MemoryFlags::HEAP;
             });
         }
     }
@@ -1287,8 +1281,8 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage
             i += 1;
             p.get_mapped_file_name(m.base).and_then(|p| {
                 module = m.base;
-                m.usage = p.into();
-                if m.flags & MF_IMAGE == 0 {
+                m.info = Some(p.into());
+                if !m.flags.contains(MemoryFlags::IMAGE) {
                     return None;
                 }
 
@@ -1323,8 +1317,8 @@ pub fn collect_memory_info(p: &Process, this: &dyn UDbgTarget) -> Vec<MemoryPage
                         let len = name.iter().position(|&c| c == 0).unwrap_or(name.len());
                         let name = &name[..len];
                         let sec_name = unsafe { std::str::from_utf8_unchecked(name) };
-                        m.usage = sec_name.into();
-                        m.flags |= MF_SECTION;
+                        m.info = Some(sec_name.into());
+                        m.flags |= MemoryFlags::SECTION;
                     });
             }
         }

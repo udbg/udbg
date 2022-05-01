@@ -149,13 +149,22 @@ impl Process {
             }
             let usage: Arc<str> = line.rest().trim().into();
 
+            let mut flags = MemoryFlags::Normal;
+            if usage.as_ref() == "[heap]" {
+                flags |= MemoryFlags::HEAP;
+            }
+            if usage.as_ref() == "[stack]" {
+                flags |= MemoryFlags::STACK;
+            }
+            let mut protect = [0u8; 4];
+            protect.copy_from_slice(prot.as_bytes());
             let mut result = MemoryPage {
                 base,
                 size,
-                usage,
-                prot: [0; 4],
+                info: usage.into(),
+                protect: u32::from_be_bytes(protect),
+                ..Default::default()
             };
-            result.prot.copy_from_slice(prot.as_bytes());
             Some(result)
         }))
     }

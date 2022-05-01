@@ -3,10 +3,11 @@
 //!
 
 use crate::os::{priority_t, Module, Process};
-use crate::{prelude::*, register::*};
+use crate::{pe::*, prelude::*, register::*};
 
 use core::ops::Deref;
 use parking_lot::RwLock;
+use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Result as IoResult};
@@ -640,6 +641,117 @@ pub trait TraceContext {
         match self.arch() {
             ARCH_X86 | ARCH_ARM => 4,
             _ => core::mem::size_of::<usize>(),
+        }
+    }
+}
+
+impl MemoryPage {
+    #[inline]
+    pub fn is_commit(&self) -> bool {
+        if self.is_windows() {
+            self.state & MEM_COMMIT > 0
+        } else {
+            true
+        }
+    }
+
+    #[inline]
+    pub fn is_reserve(&self) -> bool {
+        if self.is_windows() {
+            self.state & MEM_RESERVE > 0
+        } else {
+            false
+        }
+    }
+
+    #[inline]
+    pub fn is_free(&self) -> bool {
+        if self.is_windows() {
+            self.state & MEM_FREE > 0
+        } else {
+            false
+        }
+    }
+
+    pub fn protect(&self) -> Cow<str> {
+        if self.is_windows() {
+            let result = match self.protect & !PAGE_GUARD {
+                PAGE_NOACCESS => "-----",
+                PAGE_READONLY => "-R---",
+                PAGE_READWRITE => "-RW--",
+                PAGE_WRITECOPY => "-RWC-",
+                PAGE_EXECUTE => "E----",
+                PAGE_EXECUTE_READ => "ER---",
+                PAGE_EXECUTE_READWRITE => "ERW--",
+                PAGE_EXECUTE_WRITECOPY => "ERWC-",
+                _ => "?????",
+            };
+            if self.protect & PAGE_GUARD > 0 {
+                let mut res = result.to_string();
+                unsafe {
+                    res.as_bytes_mut()[4] = b'G';
+                }
+                res.into()
+            } else {
+                result.into()
+            }
+        } else {
+            unsafe { core::str::from_utf8_unchecked(self.as_linux_protect()) }.into()
+        }
+    }
+
+    pub fn type_(&self) -> &'static str {
+        if self.is_windows() {
+            match self.type_ {
+                MEM_PRIVATE => "PRV",
+                MEM_IMAGE => "IMG",
+                MEM_MAPPED => "MAP",
+                _ => "",
+            }
+        } else if self.is_private() {
+            "PRV"
+        } else if self.is_shared() {
+            "SHR"
+        } else {
+            ""
+        }
+    }
+
+    #[inline]
+    pub fn is_private(&self) -> bool {
+        if self.is_windows() {
+            self.type_ & MEM_PRIVATE > 0
+        } else {
+            self.as_linux_protect()[3] == b'p'
+        }
+    }
+
+    #[inline]
+    pub fn is_shared(&self) -> bool {
+        self.as_linux_protect()[3] == b's'
+    }
+
+    pub fn is_executable(&self) -> bool {
+        if self.is_windows() {
+            self.protect & 0xF0 > 0
+        } else {
+            self.as_linux_protect()[2] == b'x'
+        }
+    }
+
+    pub fn is_writable(&self) -> bool {
+        if self.is_windows() {
+            self.protect & 0xCC > 0
+        } else {
+            self.as_linux_protect()[1] == b'w'
+        }
+    }
+
+    pub fn is_readonly(&self) -> bool {
+        if self.is_windows() {
+            self.protect == PAGE_READONLY
+        } else {
+            self.as_linux_protect()[0] == b'r' && !self.is_writable() && !self.is_executable()
         }
     }
 }

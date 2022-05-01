@@ -153,26 +153,8 @@ impl<T: Copy> Iterator for ToolHelperIter<T> {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct MemoryPage {
-    pub base: usize,
-    pub alloc_base: usize,
-    pub size: usize,
-    pub type_: u32,
-    pub state: u32,
-    pub protect: u32,
-    pub alloc_protect: u32,
-}
-
-impl crate::range::RangeValue for MemoryPage {
-    #[inline]
-    fn as_range(&self) -> core::ops::Range<usize> {
-        self.base..self.base + self.size
-    }
-}
-
-impl MemoryPage {
-    pub fn from_mbi(mbi: &MEMORY_BASIC_INFORMATION) -> MemoryPage {
+impl From<&MEMORY_BASIC_INFORMATION> for MemoryPage {
+    fn from(mbi: &MEMORY_BASIC_INFORMATION) -> Self {
         MemoryPage {
             base: mbi.BaseAddress as usize,
             alloc_base: mbi.AllocationBase as usize,
@@ -181,67 +163,7 @@ impl MemoryPage {
             state: mbi.State,
             protect: mbi.Protect,
             alloc_protect: mbi.AllocationProtect,
-        }
-    }
-
-    #[inline]
-    pub fn is_commit(&self) -> bool {
-        self.state & MEM_COMMIT > 0
-    }
-
-    #[inline]
-    pub fn is_reserve(&self) -> bool {
-        self.state & MEM_RESERVE > 0
-    }
-
-    #[inline]
-    pub fn is_free(&self) -> bool {
-        self.state & MEM_FREE > 0
-    }
-
-    #[inline]
-    pub fn is_private(&self) -> bool {
-        self.type_ & MEM_PRIVATE > 0
-    }
-
-    pub fn is_executable(&self) -> bool {
-        self.protect & 0xF0 > 0
-    }
-    pub fn is_writable(&self) -> bool {
-        self.protect & 0xCC > 0
-    }
-    pub fn is_readonly(&self) -> bool {
-        self.protect == PAGE_READONLY
-    }
-
-    pub fn protect(&self) -> String {
-        let guard = self.protect & PAGE_GUARD > 0;
-        let mut result = match self.protect & !PAGE_GUARD {
-            PAGE_NOACCESS => "-----",
-            PAGE_READONLY => "-R---",
-            PAGE_READWRITE => "-RW--",
-            PAGE_WRITECOPY => "-RWC-",
-            PAGE_EXECUTE => "E----",
-            PAGE_EXECUTE_READ => "ER---",
-            PAGE_EXECUTE_READWRITE => "ERW--",
-            PAGE_EXECUTE_WRITECOPY => "ERWC-",
-            _ => "?????",
-        }
-        .to_string();
-        if guard {
-            unsafe {
-                result.as_bytes_mut()[4] = b'G';
-            }
-        }
-        result
-    }
-
-    pub fn type_(&self) -> &'static str {
-        match self.type_ {
-            MEM_PRIVATE => "PRV",
-            MEM_IMAGE => "IMG",
-            MEM_MAPPED => "MAP",
-            _ => "",
+            ..Default::default()
         }
     }
 }
@@ -721,7 +643,7 @@ impl Process {
             let mut mbi: MEMORY_BASIC_INFORMATION = zeroed();
             match VirtualQueryEx(*self.handle, address as LPVOID, &mut mbi, size_of_val(&mbi)) {
                 0 => None,
-                _ => Some(MemoryPage::from_mbi(&mbi)),
+                _ => Some(MemoryPage::from(&mbi)),
             }
         }
     }

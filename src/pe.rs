@@ -183,6 +183,8 @@ impl PEModule {
                 state: MEM_COMMIT,
                 protect: PAGE_READONLY,
                 alloc_protect: PAGE_READONLY,
+                info: Some(data.path.clone()),
+                flags: MemoryFlags::IMAGE,
             }];
             pages.extend(helper.sections.iter().map(|sec| {
                 let base = sec.virtual_address as usize + data.base;
@@ -199,8 +201,6 @@ impl PEModule {
                     } else {
                         PAGE_READONLY
                     }
-                    //protect = IMAGE_SCN_MEM_WRITE & characters ? PAGE_EXECUTE_READWRITE: PAGE_READONLY;
-                    //protect = PAGE_READWRITE;
                 };
                 MemoryPage {
                     alloc_base: base,
@@ -210,6 +210,8 @@ impl PEModule {
                     size: sec.virtual_size as _,
                     type_: MEM_COMMIT,
                     state: MEM_COMMIT,
+                    info: Some(sec.name().unwrap_or_default().into()),
+                    flags: MemoryFlags::IMAGE,
                 }
             }));
 
@@ -325,25 +327,11 @@ impl TargetMemory for PETarget {
         RangeValue::binary_search(&pe.pages, address - pe.data.base).cloned()
     }
 
-    fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
+    fn collect_memory_info(&self) -> Vec<MemoryPage> {
         let modules = self.symgr.base.read().list.clone();
         modules
             .iter()
-            .map(|pe| {
-                pe.pages.iter().enumerate().map(|(i, page)| MemoryPageInfo {
-                    base: page.base,
-                    size: page.size,
-                    flags: MF_IMAGE,
-                    type_: page.type_().into(),
-                    protect: page.protect().into(),
-                    usage: if i > 0 {
-                        pe.helper.sections[i].name().unwrap_or_default().into()
-                    } else {
-                        pe.data.path.clone()
-                    },
-                    alloc_base: page.alloc_base,
-                })
-            })
+            .map(|pe| pe.pages.iter().map(Clone::clone))
             .flatten()
             .collect()
     }

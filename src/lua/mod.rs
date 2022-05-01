@@ -200,37 +200,25 @@ impl ToLua for CpuReg {
 
 impl UserData for MemoryPage {
     const TYPE_NAME: &'static str = "MemoryPage";
-    #[cfg(windows)]
-    const INDEX_GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| {
-        use winapi::um::winnt::PAGE_READONLY;
-        match key {
-            "alloc_base" => s.pushed(this.alloc_base),
-            "base" => s.pushed(this.base),
-            "size" => s.pushed(this.size),
-            "executable" => s.pushed(this.protect & 0xF0 > 0),
-            "writable" => s.pushed(this.protect & 0xCC > 0),
-            "readonly" => s.pushed(this.protect == PAGE_READONLY),
-            "protect" => s.pushed(this.protect),
-            "type" => s.pushed(this.type_),
-            "state" => s.pushed(this.state),
-            _ => 0.into(),
-        }
-    })
-    .wrapper();
 
-    #[cfg(not(windows))]
-    const INDEX_GETTER: lua_CFunction = RsFn::new(|s: &State, this: &Self, key: &str| match key {
-        "base" => s.pushed(this.base),
-        "size" => s.pushed(this.size),
-        "executable" => s.pushed(this.is_executable()),
-        "writable" => s.pushed(this.is_writable()),
-        "readonly" => s.pushed(this.is_readonly()),
-        "protect" => s.pushed(&this.prot[..]),
-        "type" => s.pushed(if this.is_private() { "private" } else { "" }),
-        "image" => s.pushed(this.usage.as_ref()),
-        _ => return 0.into(),
-    })
-    .wrapper();
+    fn getter(fields: &ValRef) {
+        fields.register("alloc_base", |this: &Self| this.alloc_base);
+        fields.register("alloc_protect", |this: &Self| this.alloc_protect);
+        fields.register("base", |this: &Self| this.base);
+        fields.register("size", |this: &Self| this.size);
+        fields.register("executable", |this: &Self| this.is_executable());
+        fields.register("writable", |this: &Self| this.is_writable());
+        fields.register("readonly", |this: &Self| this.is_readonly());
+        fields.register("private", |this: &Self| this.is_private());
+        fields.register("commited", |this: &Self| this.is_commit());
+        fields.register("protect", |this: &Self| this.protect);
+        fields.register("type", |this: &Self| this.type_);
+        fields.register("state", |this: &Self| this.state);
+        fields.register("info", |this: &Self| this.info.clone());
+        fields.register("memory_info", |this: &Self| {
+            SerdeValue(MemoryPageInfo::from(this))
+        });
+    }
 
     fn methods(mt: &ValRef) {
         mt.register("is_commit", MemoryPage::is_commit)
@@ -744,7 +732,7 @@ impl UserData for ArcTarget {
         });
 
         mt.register("get_memory_map", |this: &Self| {
-            SerdeValue(this.collect_memory_info())
+            IterVec(this.collect_memory_info().into_iter())
         })
         .register("get_module", |s: &State, this: &Self| {
             (if s.is_none_or_nil(2) {

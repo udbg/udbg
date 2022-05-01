@@ -432,29 +432,6 @@ impl CommonAdaptor {
         Ok(Box::new(self.mem_pages.read().clone().into_iter()))
     }
 
-    fn get_memory_map(&self) -> Vec<MemoryPageInfo> {
-        self.enum_memory()
-            .unwrap()
-            .map(|m| {
-                let mut flags = 0u32;
-                if m.usage.as_ref() == "[heap]" {
-                    flags |= MF_HEAP;
-                }
-                if m.usage.as_ref() == "[stack]" {
-                    flags |= MF_STACK;
-                }
-                MemoryPageInfo {
-                    base: m.base,
-                    size: m.size,
-                    flags,
-                    type_: m.type_str().into(),
-                    protect: m.protect().into(),
-                    usage: m.usage.clone(),
-                }
-            })
-            .collect::<Vec<_>>()
-    }
-
     fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
         use std::os::unix::fs::FileTypeExt;
 
@@ -756,8 +733,8 @@ impl TargetMemory for StandardAdaptor {
         RangeValue::binary_search(&self.mem_pages.read().as_slice(), address).map(|r| r.clone())
     }
 
-    fn collect_memory_info(&self) -> Vec<MemoryPageInfo> {
-        self.0.get_memory_map()
+    fn collect_memory_info(&self) -> Vec<MemoryPage> {
+        self.0.enum_memory().unwrap().collect::<Vec<_>>()
     }
 }
 

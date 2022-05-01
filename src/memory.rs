@@ -4,15 +4,13 @@
 //! This module contains some commonly used utilities, you can read the most of data types from process or others debug target, such as read/write string, read array, read structed value, etc.
 //!
 
-pub use crate::os::MemoryPage;
-
 use super::error::*;
 use alloc::{string::*, sync::Arc, vec::Vec};
 use core::{
+    fmt,
     mem::{size_of, transmute, zeroed},
     slice::*,
 };
-use std::io::Result as IoResult;
 
 pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
@@ -198,7 +196,7 @@ pub use crate::os::windows::ReadMemUtilsWin;
 
 pub trait WriteMemory {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize>;
-    fn flush_cache(&self, address: usize, len: usize) -> IoResult<()> {
+    fn flush_cache(&self, address: usize, len: usize) -> std::io::Result<()> {
         Ok(())
     }
 }
@@ -247,29 +245,104 @@ pub trait TargetMemory: ReadMemory + WriteMemory {
     }
 
     /// collect all memory infomation
-    fn collect_memory_info(&self) -> Vec<MemoryPageInfo>;
+    fn collect_memory_info(&self) -> Vec<MemoryPage>;
 }
 
-pub const MF_IMAGE: u32 = 1 << 0;
-pub const MF_MAP: u32 = 1 << 1;
-pub const MF_PRIVATE: u32 = 1 << 2;
-pub const MF_SECTION: u32 = 1 << 3;
-pub const MF_STACK: u32 = 1 << 4;
-pub const MF_HEAP: u32 = 1 << 5;
-pub const MF_PEB: u32 = 1 << 6;
+bitflags! {
+    pub struct MemoryFlags: u32 {
+        const Normal = 0;
+        const IMAGE = 1 << 1;
+        const MAP = 1 << 2;
+        const PRIVATE = 1 << 3;
+        const SECTION = 1 << 4;
+        const STACK = 1 << 5;
+        const HEAP = 1 << 6;
+        const PEB = 1 << 7;
+        const TEB = 1 << 8;
+    }
+}
+
+impl Default for MemoryFlags {
+    fn default() -> Self {
+        MemoryFlags::Normal
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct MemoryPage {
+    pub base: usize,
+    pub alloc_base: usize,
+    pub size: usize,
+    pub type_: u32,
+    pub state: u32,
+    pub protect: u32,
+    pub alloc_protect: u32,
+    pub flags: MemoryFlags,
+    pub info: Option<Arc<str>>,
+}
+
+impl crate::range::RangeValue for MemoryPage {
+    #[inline]
+    fn as_range(&self) -> core::ops::Range<usize> {
+        self.base..self.base + self.size
+    }
+}
+
+impl MemoryPage {
+    #[inline(always)]
+    pub fn is_windows(&self) -> bool {
+        self.state > 0
+    }
+
+    #[inline(always)]
+    pub fn as_linux_protect(&self) -> &[u8; 4] {
+        unsafe { transmute(&self.protect) }
+    }
+}
+
+impl fmt::Debug for MemoryPage {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut ds = f.debug_struct("MemoryPage");
+        ds.field("base", &self.base);
+        ds.field("size", &self.size);
+        ds.field("type", &self.type_());
+        ds.field("protect", &self.protect().as_ref());
+        if self.is_windows() {
+            ds.field("state", &self.state);
+            ds.field("alloc_base", &self.alloc_base);
+            ds.field("alloc_protect", &self.alloc_protect);
+        } else {
+        }
+        ds.field("info", &self.info);
+        ds.finish()
+    }
+}
 
 #[repr(C)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct MemoryPageInfo {
     pub base: usize,
     pub size: usize,
-    pub flags: u32, // MF_*
+    pub flags: u32,
     #[serde(rename = "type")]
-    pub type_: Arc<str>,
-    pub protect: Arc<str>,
-    pub usage: Arc<str>,
-    #[cfg(windows)]
+    pub type_: Box<str>,
+    pub protect: Box<str>,
+    pub usage: Option<Arc<str>>,
     pub alloc_base: usize,
+}
+
+impl From<&MemoryPage> for MemoryPageInfo {
+    fn from(page: &MemoryPage) -> Self {
+        Self {
+            base: page.base,
+            size: page.size,
+            flags: page.flags.bits(),
+            type_: page.type_().into(),
+            protect: page.protect().as_ref().into(),
+            usage: page.info.clone(),
+            alloc_base: page.alloc_base,
+        }
+    }
 }
 
 impl crate::range::RangeValue for MemoryPageInfo {
