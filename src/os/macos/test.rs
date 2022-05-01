@@ -34,6 +34,6 @@ fn udbg() {
     }
 
     for p in a.collect_memory_info() {
-        println!("{}", p.usage);
+        println!("{:?}", p.info);
     }
 }
