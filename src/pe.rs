@@ -1,4 +1,4 @@
-//! PE file helper
+//! PE file helper && [`PETarget`] implementation
 
 use crate::prelude::*;
 use crate::range::RangeValue;

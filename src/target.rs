@@ -182,30 +182,33 @@ pub type ThreadContext = winapi::um::winnt::CONTEXT;
 #[cfg(windows)]
 pub type ThreadContext32 = super::register::CONTEXT32;
 
+/// Represents a thread in target
 pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
+    /// Thread name
     fn name(&self) -> Arc<str> {
         "".into()
     }
+
     fn status(&self) -> Arc<str> {
         "".into()
     }
 
-    /// get thread's priority
+    /// Get thread's priority
     fn priority(&self) -> Option<priority_t> {
         None
     }
 
-    /// suspend the thread, and return the suspend count if success
+    /// Suspend the thread, and return the suspend count if success
     fn suspend(&self) -> IoResult<i32> {
         Err(ErrorKind::Unsupported.into())
     }
 
-    /// resume the thread, and return the suspend count if success
+    /// Resume the thread, and return the suspend count if success
     fn resume(&self) -> IoResult<u32> {
         Err(ErrorKind::Unsupported.into())
     }
 
-    /// get thread's suspend count
+    /// Get thread's suspend count
     fn suspend_count(&self) -> usize {
         0
     }
@@ -254,13 +257,13 @@ impl core::fmt::Debug for dyn UDbgThread {
     }
 }
 
-/// Debugger Engine
+/// Debugger Engine, interfaces of debugging
 pub trait UDbgEngine {
     fn enum_process(&self) -> UDbgResult<Box<dyn Iterator<Item = ProcessInfo>>> {
         Ok(Box::new(ProcessInfo::enumerate()?))
     }
 
-    /// open a process, only open, not attach
+    /// Open a process, not attach, for non-invasive debugging purpose
     fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
         Err(UDbgError::NotSupport)
     }
@@ -269,10 +272,10 @@ pub trait UDbgEngine {
         self.open(std::process::id() as _)
     }
 
-    /// attach to a active process
+    /// Attach to a active process
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>>;
 
-    /// create and debug a process
+    /// Create and debug a process
     fn create(
         &mut self,
         path: &str,
@@ -280,14 +283,12 @@ pub trait UDbgEngine {
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgTarget>>;
 
-    fn do_cmd(&self, cmd: &str) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
-    }
-
+    /// Start the debug event loop, with a event callback
     fn event_loop<'a>(&mut self, callback: &mut UDbgCallback<'a>) -> UDbgResult<()> {
         Err(UDbgError::NotSupport)
     }
 
+    /// Start the debug event loop, wraps a async task as event callback
     fn task_loop(&mut self, mut task: DebugTask) -> UDbgResult<()> {
         self.event_loop(&mut |ctx, event| {
             task.state.ctx.set(unsafe { core::mem::transmute(ctx) });
@@ -446,7 +447,7 @@ impl core::fmt::Debug for dyn UDbgTarget {
     }
 }
 
-/// Practical functions based on UDbgTarget
+/// Practical functions based on [`UDbgTarget`]
 pub trait TargetUtil: UDbgTarget {
     fn add_bp(&self, opt: impl Into<BpOpt>) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         self.add_breakpoint(opt.into())

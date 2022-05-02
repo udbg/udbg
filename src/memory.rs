@@ -12,6 +12,7 @@ use core::{
     slice::*,
 };
 
+/// Abstracted interface to read memory
 pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
 }
@@ -27,6 +28,7 @@ impl<T: Copy> ReadValue for T {
     }
 }
 
+/// Practical functions based on [`ReadMemory`]
 #[allow(invalid_type_param_default)]
 pub trait ReadMemoryUtils: ReadMemory {
     /// read continuous values until the conditions are met
@@ -194,6 +196,7 @@ pub trait ReadMemoryUtils: ReadMemory {
 #[cfg(windows)]
 pub use crate::os::windows::ReadMemUtilsWin;
 
+/// Abstracted interface to write memory
 pub trait WriteMemory {
     fn write_memory(&self, address: usize, data: &[u8]) -> Option<usize>;
     fn flush_cache(&self, address: usize, len: usize) -> std::io::Result<()> {
@@ -201,6 +204,7 @@ pub trait WriteMemory {
     }
 }
 
+/// Practical functions based on [`WriteMemory`]
 pub trait WriteMemoryUtils: WriteMemory {
     #[inline]
     fn write_value<T>(&self, address: usize, val: &T) -> Option<usize> {
@@ -229,11 +233,12 @@ pub trait WriteMemoryUtils: WriteMemory {
 impl<T: ReadMemory + ?Sized> ReadMemoryUtils for T {}
 impl<T: WriteMemory + ?Sized> WriteMemoryUtils for T {}
 
+/// Interfaces of memory operation
 pub trait TargetMemory: ReadMemory + WriteMemory {
-    /// enumerate the memory page in target memory space
+    /// Enumerate the memory page in target memory space
     fn enum_memory(&self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + '_>>;
 
-    /// query the memory page of address in target memory space
+    /// Query the memory page of address in target memory space
     fn virtual_query(&self, address: usize) -> Option<MemoryPage>;
 
     // size: usize, type: RWX, commit/reverse
@@ -244,7 +249,7 @@ pub trait TargetMemory: ReadMemory + WriteMemory {
         Err(UDbgError::NotSupport)
     }
 
-    /// collect all memory infomation
+    /// Collect all memory infomation, includes its information of usage
     fn collect_memory_info(&self) -> Vec<MemoryPage>;
 }
 
@@ -268,6 +273,7 @@ impl Default for MemoryFlags {
     }
 }
 
+/// Cross-platform representation of memory page
 #[derive(Default, Clone)]
 pub struct MemoryPage {
     pub base: usize,

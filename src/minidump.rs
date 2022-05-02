@@ -1,3 +1,5 @@
+//! [`MiniDumpTarget`] implementation
+
 use crate::{os::priority_t, pe::*, prelude::*, range::RangeValue};
 
 use anyhow::Context;

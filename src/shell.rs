@@ -12,32 +12,29 @@ use std::{path::PathBuf, sync::Arc};
 #[repr(C)]
 #[derive(Serialize, Deserialize)]
 pub struct ProcessInfo {
+    /// Process ID
     pub pid: crate::os::pid_t,
+    /// Is it a WOW64 process
     pub wow64: bool,
+    /// Process name
     pub name: String,
+    /// Image path of this process
     pub path: String,
+    /// Command line of this process
     pub cmdline: String,
-}
-
-/// Thread information
-#[repr(C)]
-#[derive(Serialize, Deserialize)]
-pub struct ThreadInfo {
-    pub tid: u32,
-    pub entry: usize,
-    pub teb: usize,
-    pub name: Arc<str>,
-    pub status: Arc<str>,
-    pub priority: Arc<str>,
 }
 
 /// Handle/FD information
 #[repr(C)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HandleInfo {
+    /// Type number of this handle
     pub ty: u32,
+    /// Handle/FD value
     pub handle: usize,
+    /// Type name of this handle
     pub type_name: String,
+    /// Name of this handle, maybe file path, pipe name, socket number, etc.
     pub name: String,
 }
 
@@ -105,10 +102,6 @@ pub trait UDbgShell: AsRef<ShellData> {
         print!("{msg}");
     }
 
-    // #[cfg(windows)]
-    // fn new_symgr(&self) -> Arc<dyn UDbgSymMgr>;
-    // fn get_util(&self) -> &'static dyn UDbgUtil;
-
     fn runtime_config(&self, key: &str) -> Option<serde_value::Value> {
         None
     }
@@ -157,15 +150,6 @@ pub trait UDbgUtil {
 }
 
 pub static mut UDBG_UI: Option<Arc<dyn UDbgShell>> = None;
-
-#[no_mangle]
-pub fn plugin_load(ui: &Arc<dyn UDbgShell>) -> bool {
-    unsafe {
-        let loaded = UDBG_UI.is_some();
-        UDBG_UI.get_or_insert_with(|| ui.clone());
-        loaded
-    }
-}
 
 pub fn set_ui(ui: impl UDbgShell + 'static) {
     unsafe {

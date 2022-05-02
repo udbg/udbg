@@ -235,24 +235,40 @@ cfg_if! {
     }
 }
 
+/// Represents a breakpoint
 pub trait UDbgBreakpoint {
+    /// Get the ID of this breakpoint
     fn get_id(&self) -> BpID;
+
+    /// Address of this breakpoint
     fn address(&self) -> usize;
+
+    /// Detect if this breakpoint enabled
     fn enabled(&self) -> bool;
+
+    /// Type of this breakpoint
     fn get_type(&self) -> BpType;
-    /// count of this breakpoint hitted
+
+    /// Count of this breakpoint hitted
     fn hit_count(&self) -> usize;
-    /// set count of the to be used,
+
+    /// Set count of the to be used,
     /// when hit_count() > this count, bp will be delete
     fn set_count(&self, count: usize);
-    /// set the which can hit the bp. if tid == 0, all thread used
-    fn set_hit_thread(&self, tid: tid_t);
-    /// current tid setted by set_hit_thread()
-    fn hit_tid(&self) -> tid_t;
-    /// original bytes written by software breakpoint
-    fn origin_bytes<'a>(&'a self) -> Option<&'a [u8]>;
 
+    /// Set the which can hit the bp. if tid == 0, all thread used
+    fn set_hit_thread(&self, tid: tid_t);
+
+    /// Current tid setted by set_hit_thread()
+    fn hit_tid(&self) -> tid_t;
+
+    /// Original bytes written by software breakpoint
+    fn origin_bytes(&self) -> Option<&[u8]>;
+
+    /// Enable or disable this breakpoint
     fn enable(&self, enable: bool) -> UDbgResult<()>;
+
+    /// Remove this breakpoint
     fn remove(&self) -> UDbgResult<()>;
 }
 

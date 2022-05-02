@@ -4,10 +4,10 @@ version = "0.2.0"
 edition = "2021"
 license = "MIT"
 authors = ["metaworm <metaworm@outlook.com>"]
-description = "udbg provides a mass of functions for implementing a binary debugger"
-homepage = "https://docs.rs/udbg"
+description = "cross-platform library for binary debugging and memory hacking"
+homepage = "https://crates.io/crates/udbg"
 documentation = "https://docs.rs/udbg"
-repository = "https://github.com/udbg/udbg-base"
+repository = "https://github.com/udbg/udbg"
 include = ["/src", "README.md", "/examples"]
 
 [features]

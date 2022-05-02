@@ -1,3 +1,5 @@
+//! lua bindings for udbg
+
 use crate::{
     os::{pid_t, tid_t},
     pdbfile,
