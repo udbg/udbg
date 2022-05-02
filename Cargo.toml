@@ -1,6 +1,6 @@
 [package]
 name = "udbg"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "MIT"
 authors = ["metaworm <metaworm@outlook.com>"]
@@ -22,7 +22,7 @@ spin = '0.9'
 ctor = '0.1'
 regex = '1.5'
 pdb = '0.7'
-llua = '0.1.0'
+llua = '0.1.1'
 extend = '1.1'
 bitflags = '1.2'
 anyhow = '1.0'
@@ -92,7 +92,7 @@ cc = '1'
 rustyline = '9'
 flexi_logger = '0.22'
 clap = {version = "3.1.9", features = ["derive"]}
-llua = {version = '0.1.0', features = ['vendored']}
+llua = {version = '0.1.1', features = ['vendored']}
 
 [patch.crates-io]
 llua = {git = 'https://github.com/udbg/llua'}
