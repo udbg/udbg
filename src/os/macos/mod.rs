@@ -142,7 +142,7 @@ mod arch {
         }
     }
 
-    impl CommonAdaptor {
+    impl TargetCommon {
         pub fn enable_hwbp_for_thread(
             &self,
             tid: tid_t,

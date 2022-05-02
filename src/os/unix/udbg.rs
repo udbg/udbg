@@ -1,5 +1,5 @@
 use crate::{
-    os::{user_regs, StandardAdaptor},
+    os::{user_regs, ProcessTarget},
     prelude::*,
 };
 
@@ -9,7 +9,7 @@ use std::sync::Arc;
 
 pub struct TraceBuf<'a> {
     pub callback: *mut UDbgCallback<'a>,
-    pub target: Arc<StandardAdaptor>,
+    pub target: Arc<ProcessTarget>,
     pub user: user_regs,
     pub regs_dirty: bool,
     pub si: siginfo_t,

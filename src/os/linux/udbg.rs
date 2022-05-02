@@ -149,7 +149,7 @@ impl TimeCheck {
 }
 
 #[derive(Deref)]
-pub struct CommonAdaptor {
+pub struct TargetCommon {
     #[deref]
     _base: CommonBase,
     pub threads: RwLock<HashSet<tid_t>>,
@@ -161,7 +161,7 @@ pub struct CommonAdaptor {
     pub hwbps: UnsafeCell<user_hwdebug_state>,
 }
 
-impl CommonAdaptor {
+impl TargetCommon {
     pub fn new(ps: Process) -> Self {
         const TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -679,15 +679,15 @@ pub fn ptrace_step_and_wait(tid: pid_t) -> bool {
 }
 
 #[derive(Deref)]
-pub struct StandardAdaptor(pub CommonAdaptor);
+pub struct ProcessTarget(pub TargetCommon);
 
-unsafe impl Send for StandardAdaptor {}
-unsafe impl Sync for StandardAdaptor {}
+unsafe impl Send for ProcessTarget {}
+unsafe impl Sync for ProcessTarget {}
 
-impl StandardAdaptor {
+impl ProcessTarget {
     pub fn open(pid: pid_t) -> UDbgResult<Arc<Self>> {
         let ps = Process::from_pid(pid)?;
-        Ok(Arc::new(Self(CommonAdaptor::new(ps))))
+        Ok(Arc::new(Self(TargetCommon::new(ps))))
     }
 
     pub fn insert_thread(&self, tid: tid_t) -> bool {
@@ -715,7 +715,7 @@ impl StandardAdaptor {
     }
 }
 
-impl WriteMemory for StandardAdaptor {
+impl WriteMemory for ProcessTarget {
     fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
         self.process.write_memory(addr, data)
         // ptrace_write(self.pid.get(), addr, data);
@@ -723,7 +723,7 @@ impl WriteMemory for StandardAdaptor {
     }
 }
 
-impl TargetMemory for StandardAdaptor {
+impl TargetMemory for ProcessTarget {
     fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
         self.0.enum_memory()
     }
@@ -738,7 +738,7 @@ impl TargetMemory for StandardAdaptor {
     }
 }
 
-impl GetProp for StandardAdaptor {
+impl GetProp for ProcessTarget {
     fn get_prop(&self, key: &str) -> UDbgResult<serde_value::Value> {
         // match key {
         //     "moduleTimeout" => { self.tc_module.duration.set(Duration::from_secs_f64(s.args(3))); }
@@ -749,7 +749,7 @@ impl GetProp for StandardAdaptor {
     }
 }
 
-impl TargetControl for StandardAdaptor {
+impl TargetControl for ProcessTarget {
     fn detach(&self) -> UDbgResult<()> {
         self.base.status.set(UDbgStatus::Detaching);
         if self.waiting.get() {
@@ -785,10 +785,10 @@ impl TargetControl for StandardAdaptor {
     }
 }
 
-// impl TargetSymbol for StandardAdaptor {
+// impl TargetSymbol for ProcessTarget {
 // }
 
-impl Target for StandardAdaptor {
+impl Target for ProcessTarget {
     fn base(&self) -> &TargetBase {
         &self._base
     }
@@ -847,7 +847,7 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgTarget for StandardAdaptor {}
+impl UDbgTarget for ProcessTarget {}
 
 impl EventHandler for DefaultEngine {
     fn fetch(&mut self, buf: &mut TraceBuf) -> Option<()> {
@@ -969,7 +969,7 @@ impl EventHandler for DefaultEngine {
                         // let newpid = Pid::from_raw(new_pid);
                         // ptrace::detach(newpid, None);
                         // ptrace::cont(newpid, None);
-                        StandardAdaptor::open(new_pid)
+                        ProcessTarget::open(new_pid)
                             .log_error("open child")
                             .map(|t| {
                                 t.base.status.set(if udbg_ui().base().trace_child.get() {
@@ -1035,7 +1035,7 @@ impl EventHandler for DefaultEngine {
 }
 
 pub struct DefaultEngine {
-    pub targets: Vec<Arc<StandardAdaptor>>,
+    pub targets: Vec<Arc<ProcessTarget>>,
     pub status: WaitStatus,
     pub inited: bool,
     pub cloned_tids: HashSet<tid_t>,
@@ -1056,11 +1056,11 @@ impl Default for DefaultEngine {
 
 impl UDbgEngine for DefaultEngine {
     fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        Ok(StandardAdaptor::open(pid)?)
+        Ok(ProcessTarget::open(pid)?)
     }
 
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        let this = StandardAdaptor::open(pid)?;
+        let this = ProcessTarget::open(pid)?;
         // attach each of threads
         for tid in this.process.tasks()?.filter_map(|t| t.ok().map(|t| t.tid)) {
             ptrace::attach(Pid::from_raw(tid)).with_context(|| format!("attach {tid}"))?;
@@ -1098,7 +1098,7 @@ impl UDbgEngine for DefaultEngine {
                 waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED))
                     .with_context(|| format!("waitpid({pid})"))?;
                 let ps = Process::from_pid(pid).context("open")?;
-                let this = Arc::new(StandardAdaptor(CommonAdaptor::new(ps)));
+                let this = Arc::new(ProcessTarget(TargetCommon::new(ps)));
                 self.targets.push(this.clone());
                 Ok(this)
             }

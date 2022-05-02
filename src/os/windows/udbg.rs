@@ -625,7 +625,7 @@ impl TargetSymbol for SymbolManager<Module> {
 }
 
 #[derive(Deref)]
-pub struct CommonAdaptor {
+pub struct TargetCommon {
     #[deref]
     _base: CommonBase,
     pub protected_thread: RwLock<Vec<u32>>,
@@ -638,7 +638,7 @@ pub struct CommonAdaptor {
 
 impl<T> GetProp for T
 where
-    T: Deref<Target = CommonAdaptor>,
+    T: Deref<Target = TargetCommon>,
 {
     default fn get_prop(&self, key: &str) -> UDbgResult<SerdeVal> {
         Ok(match key {
@@ -652,7 +652,7 @@ where
 
 impl<T> TargetMemory for T
 where
-    T: Deref<Target = CommonAdaptor> + UDbgTarget,
+    T: Deref<Target = TargetCommon> + UDbgTarget,
 {
     default fn enum_memory<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = MemoryPage> + 'a>> {
         self.deref().enum_memory()
@@ -669,7 +669,7 @@ where
 
 impl<T> TargetControl for T
 where
-    T: Deref<Target = CommonAdaptor>,
+    T: Deref<Target = TargetCommon>,
 {
     default fn detach(&self) -> Result<(), UDbgError> {
         self.base.status.set(UDbgStatus::Detaching);
@@ -707,8 +707,8 @@ where
     }
 }
 
-impl CommonAdaptor {
-    pub fn new(p: Process) -> CommonAdaptor {
+impl TargetCommon {
+    pub fn new(p: Process) -> TargetCommon {
         let ui = udbg_ui();
         let image_base = p
             .peb()
@@ -1388,7 +1388,7 @@ pub fn enum_process_handle<'a>(
 }
 
 pub struct MemoryIter<'a> {
-    dbg: &'a CommonAdaptor,
+    dbg: &'a TargetCommon,
     address: usize,
 }
 
@@ -1407,26 +1407,26 @@ impl<'a> Iterator for MemoryIter<'a> {
 }
 
 #[derive(Deref)]
-pub struct StandardAdaptor {
+pub struct ProcessTarget {
     #[deref]
-    pub _common: CommonAdaptor,
+    pub _common: TargetCommon,
     pub record: UnsafeCell<ExceptionRecord>,
     pub threads: RefCell<HashMap<u32, DbgThread>>,
     pub attached: Cell<bool>, // create by attach
 }
 
-unsafe impl Send for StandardAdaptor {}
-unsafe impl Sync for StandardAdaptor {}
+unsafe impl Send for ProcessTarget {}
+unsafe impl Sync for ProcessTarget {}
 
-impl StandardAdaptor {
-    pub fn open(pid: u32) -> Result<Arc<StandardAdaptor>, UDbgError> {
+impl ProcessTarget {
+    pub fn open(pid: u32) -> Result<Arc<ProcessTarget>, UDbgError> {
         let p = Process::open(pid, None).check_errstr("open process")?;
         Ok(Self::new(p))
     }
 
     fn new(p: Process) -> Arc<Self> {
         Arc::new(Self {
-            _common: CommonAdaptor::new(p),
+            _common: TargetCommon::new(p),
             record: UnsafeCell::new(unsafe { core::mem::zeroed() }),
             threads: HashMap::new().into(),
             attached: false.into(),
@@ -1542,7 +1542,7 @@ pub fn continue_debug_event(pid: u32, tid: u32, status: u32) -> bool {
     unsafe { ContinueDebugEvent(pid, tid, status) != 0 }
 }
 
-impl Target for StandardAdaptor {
+impl Target for ProcessTarget {
     fn base(&self) -> &TargetBase {
         &self.base
     }
@@ -1569,7 +1569,7 @@ impl Target for StandardAdaptor {
     }
 
     fn open_thread(&self, tid: u32) -> Result<Box<dyn UDbgThread>, UDbgError> {
-        StandardAdaptor::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
+        ProcessTarget::open_thread(self, tid).map(|r| r as Box<dyn UDbgThread>)
     }
 
     fn enum_thread(
@@ -1584,9 +1584,9 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgTarget for StandardAdaptor {}
+impl UDbgTarget for ProcessTarget {}
 
-pub struct TraceBuf<'a, T = StandardAdaptor> {
+pub struct TraceBuf<'a, T = ProcessTarget> {
     pub callback: *mut UDbgCallback<'a>,
     pub target: Arc<T>,
     pub record: ExceptionRecord,
@@ -1629,7 +1629,7 @@ impl<T: UDbgTarget> TraceContext for TraceBuf<'_, T> {
     }
 }
 
-pub trait EventHandler<T = StandardAdaptor> {
+pub trait EventHandler<T = ProcessTarget> {
     /// fetch a debug event
     fn fetch(&mut self, buf: &mut TraceBuf<T>) -> Option<()>;
     /// handle the debug event
@@ -1642,7 +1642,7 @@ pub fn enum_udbg_thread<'a>(
     p: *const Process,
     pid: u32,
     detail: bool,
-    a: Option<&'a StandardAdaptor>,
+    a: Option<&'a ProcessTarget>,
 ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + 'a>> {
     let mut info_iter = detail
         .then(|| match system_process_information() {
@@ -1677,7 +1677,7 @@ pub fn enum_udbg_thread<'a>(
                 });
         }
         let mut result = a
-            .and_then(|a| StandardAdaptor::open_thread(a, tid).ok())
+            .and_then(|a| ProcessTarget::open_thread(a, tid).ok())
             .or_else(|| WinThread::open(p, tid).ok())
             .or_else(|| Some(Box::new(WinThread::new(tid)?)))?;
         result.detail = info;
@@ -1686,7 +1686,7 @@ pub fn enum_udbg_thread<'a>(
 }
 
 pub struct DefaultEngine {
-    targets: Vec<Arc<StandardAdaptor>>,
+    targets: Vec<Arc<ProcessTarget>>,
     event: DEBUG_EVENT,
     first_bp_hitted: bool,
     first_bp32_hitted: bool,
@@ -1721,7 +1721,7 @@ impl DefaultEngine {
 
 impl UDbgEngine for DefaultEngine {
     fn open(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        let result = StandardAdaptor::open(pid)?;
+        let result = ProcessTarget::open(pid)?;
         self.targets.push(result.clone());
         Ok(result)
     }
@@ -1729,7 +1729,7 @@ impl UDbgEngine for DefaultEngine {
     fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         unsafe {
             DebugActiveProcess(pid).check_last()?;
-            let result = StandardAdaptor::open(pid)?;
+            let result = ProcessTarget::open(pid)?;
             result.attached.set(true);
             self.first_bp32_hitted = true;
             self.targets.push(result.clone());
@@ -1745,7 +1745,7 @@ impl UDbgEngine for DefaultEngine {
     ) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let mut pi: PROCESS_INFORMATION = unsafe { core::mem::zeroed() };
         let ppid = udbg_ui().get_config("ppid");
-        let result = StandardAdaptor::new(create_debug_process(path, cwd, args, &mut pi, ppid)?);
+        let result = ProcessTarget::new(create_debug_process(path, cwd, args, &mut pi, ppid)?);
         self.targets.push(result.clone());
         Ok(result)
     }
@@ -1790,7 +1790,7 @@ impl EventHandler for DefaultEngine {
                 .is_none()
             {
                 let target =
-                    StandardAdaptor::open(self.event.dwProcessId).expect("attach child process");
+                    ProcessTarget::open(self.event.dwProcessId).expect("attach child process");
                 target
                     .base
                     .status

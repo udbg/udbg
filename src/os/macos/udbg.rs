@@ -28,7 +28,7 @@ use std::slice::from_raw_parts_mut;
 use std::{collections::HashSet, sync::Arc};
 
 #[derive(Deref)]
-pub struct CommonAdaptor {
+pub struct TargetCommon {
     #[deref]
     _base: CommonBase,
     pub threads: RwLock<HashSet<tid_t>>,
@@ -38,7 +38,7 @@ pub struct CommonAdaptor {
     waiting: Cell<bool>,
 }
 
-impl CommonAdaptor {
+impl TargetCommon {
     pub fn new(ps: Process) -> Self {
         Self {
             _base: CommonBase::new(ps),
@@ -111,21 +111,21 @@ impl CommonAdaptor {
 }
 
 #[derive(Deref)]
-pub struct StandardAdaptor(pub CommonAdaptor);
+pub struct ProcessTarget(pub TargetCommon);
 
-unsafe impl Send for StandardAdaptor {}
-unsafe impl Sync for StandardAdaptor {}
+unsafe impl Send for ProcessTarget {}
+unsafe impl Sync for ProcessTarget {}
 
-impl AsRef<Process> for StandardAdaptor {
+impl AsRef<Process> for ProcessTarget {
     #[inline]
     fn as_ref(&self) -> &Process {
         &self.process
     }
 }
 
-impl GetProp for StandardAdaptor {}
+impl GetProp for ProcessTarget {}
 
-impl Target for StandardAdaptor {
+impl Target for ProcessTarget {
     fn base(&self) -> &TargetBase {
         &self.0.base
     }
@@ -177,11 +177,11 @@ impl Target for StandardAdaptor {
     }
 }
 
-impl UDbgTarget for StandardAdaptor {}
+impl UDbgTarget for ProcessTarget {}
 
-impl StandardAdaptor {
+impl ProcessTarget {
     pub fn open(pid: pid_t) -> UDbgResult<Arc<Self>> {
-        Ok(Self(CommonAdaptor::new(Process::from_pid(pid)?)).into())
+        Ok(Self(TargetCommon::new(Process::from_pid(pid)?)).into())
     }
 
     pub fn create(path: &str, args: &[&str]) -> UDbgResult<Arc<Self>> {
@@ -222,7 +222,7 @@ impl StandardAdaptor {
                 libc::setpgid(pid, pid);
                 waitpid(Pid::from_raw(pid), Some(WaitPidFlag::WUNTRACED)).context("waitpid")?;
                 let ps = Process::from_pid(pid).context("open")?;
-                let this = Self(CommonAdaptor::new(ps));
+                let this = Self(TargetCommon::new(ps));
                 this.base().status.set(UDbgStatus::Attached);
                 this.insert_thread(pid as _);
                 this.base().event_tid.set(pid as _);
@@ -411,7 +411,7 @@ impl Drop for MachPort {
 }
 
 pub struct DefaultEngine {
-    pub targets: Vec<Arc<StandardAdaptor>>,
+    pub targets: Vec<Arc<ProcessTarget>>,
     pub inited: bool,
     pub cloned_tids: HashSet<tid_t>,
     pub tid: tid_t,
@@ -455,11 +455,11 @@ impl DefaultEngine {
 
 impl UDbgEngine for DefaultEngine {
     fn open(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        Ok(StandardAdaptor::open(pid)?)
+        Ok(ProcessTarget::open(pid)?)
     }
 
     fn attach(&mut self, pid: pid_t) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        let this = StandardAdaptor::open(pid)?;
+        let this = ProcessTarget::open(pid)?;
         this.set_exception_port(self.excp_port.0)?;
         self.targets.push(this.clone());
         Ok(this)
@@ -471,7 +471,7 @@ impl UDbgEngine for DefaultEngine {
         cwd: Option<&str>,
         args: &[&str],
     ) -> UDbgResult<Arc<dyn UDbgTarget>> {
-        let this = StandardAdaptor::create(path, args)?;
+        let this = ProcessTarget::create(path, args)?;
         this.set_exception_port(self.excp_port.0)?;
         self.targets.push(this.clone());
         self.tid = this.pid() as _;

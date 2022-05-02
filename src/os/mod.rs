@@ -44,7 +44,7 @@ cfg_if! {
     }
 }
 
-impl CommonAdaptor {
+impl TargetCommon {
     pub fn add_soft_bp(&self, this: &dyn UDbgTarget, opt: &BpOpt) -> UDbgResult<Arc<Breakpoint>> {
         // software breakpoint
         if let Some(raw_byte) = this.read_value::<BpInsn>(opt.address) {
@@ -248,7 +248,7 @@ impl CommonAdaptor {
 
 impl<T> BreakpointManager for T
 where
-    T: core::ops::Deref<Target = CommonAdaptor> + UDbgTarget,
+    T: core::ops::Deref<Target = TargetCommon> + UDbgTarget,
 {
     default fn add_breakpoint(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Ok(self.deref().add_bp(self, &opt)?)
@@ -270,7 +270,7 @@ where
 
 impl<T> ReadMemory for T
 where
-    T: Deref<Target = CommonAdaptor>,
+    T: Deref<Target = TargetCommon>,
 {
     default fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         self.process.read_memory(addr, data)
@@ -279,7 +279,7 @@ where
 
 impl<T> WriteMemory for T
 where
-    T: Deref<Target = CommonAdaptor>,
+    T: Deref<Target = TargetCommon>,
 {
     default fn write_memory(&self, addr: usize, data: &[u8]) -> Option<usize> {
         WriteMemory::write_memory(&self.process, addr, data)

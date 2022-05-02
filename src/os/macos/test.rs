@@ -28,7 +28,7 @@ fn process() {
 
 #[test]
 fn udbg() {
-    let a = StandardAdaptor::open(std::process::id() as _).unwrap();
+    let a = ProcessTarget::open(std::process::id() as _).unwrap();
     for m in a.enum_module().unwrap() {
         // println!("{}", m.data().path);
     }

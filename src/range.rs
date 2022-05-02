@@ -4,7 +4,6 @@
 
 use core::cmp::Ordering;
 use core::ops::Range;
-use std::sync::Arc;
 
 pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
     fn as_range(&self) -> Range<T>;
@@ -39,15 +38,3 @@ pub trait RangeValue<T: Copy + PartialOrd<T> = usize>: Sized {
         slice.get_mut(i)
     }
 }
-
-// impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Box<R> {
-//     fn as_range(&self) -> Range<S> {
-//         self.as_ref().as_range()
-//     }
-// }
-
-// impl<S: Copy + PartialOrd<S>, R: RangeValue<S>> RangeValue<S> for Arc<R> {
-//     fn as_range(&self) -> Range<S> {
-//         self.as_ref().as_range()
-//     }
-// }
