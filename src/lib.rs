@@ -36,6 +36,7 @@ pub mod error;
 pub mod event;
 pub mod lua;
 pub mod memory;
+pub mod minidump;
 pub mod os;
 pub mod pdbfile;
 pub mod pe;
