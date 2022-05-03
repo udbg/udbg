@@ -31,6 +31,8 @@ extern crate log;
 extern crate cstrptr;
 
 pub mod breakpoint;
+#[cfg(feature = "capstone")]
+pub mod capstone;
 pub mod elf;
 pub mod error;
 pub mod event;
