@@ -15,7 +15,7 @@ Cross-platform library for binary debugging and memory hacking written in Rust.
 
 There are two main kinds of interfaces in udbg, target information and debugging interfaces.
 
-Interaces of target information, which abstracted as the [`UDbgTarget`](trait@target::UDbgTarget) trait, represents an observable debugging target, it is an [`active process`](struct@os::ProcessTarget) in most cases, also it can be a [`minidump`](struct@minidump::MiniDumpTarget), a [`PE file`](struct@pe::PETarget), even be the OS-Kernel space with extra extension.
+Interfaces of target information, which abstracted as the [`UDbgTarget`](trait@target::UDbgTarget) trait, represents an observable debugging target, it is an [`active process`](struct@os::ProcessTarget) in most cases, also it can be a [`minidump`](struct@minidump::MiniDumpTarget), a [`PE file`](struct@pe::PETarget), even be the OS-Kernel space with extra extension.
 
 [`UDbgTarget`](trait@target::UDbgTarget) contains these functions, [`memory operation`](trait@memory::TargetMemory) (read/write/enumeration), [`module`](trait@symbol::UDbgModule) enumeration, [`thread`](trait@target::UDbgThread) enumeration, [`handle/FDs`](struct@shell::HandleInfo) enumeration, etc. Based on these functions, we can implement some utililties over the different types of target, such as **[module dump](https://github.com/glmcdona/Process-Dump)**, **memory search**, **hook scanning**, **malicious code scanning**, etc.
 

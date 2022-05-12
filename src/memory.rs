@@ -32,7 +32,7 @@ impl<T: Copy> ReadValue for T {
 #[allow(invalid_type_param_default)]
 pub trait ReadMemoryUtils: ReadMemory {
     /// read continuous values until the conditions are met
-    fn read_util<T: PartialEq + Copy>(
+    fn read_until<T: PartialEq + Copy>(
         &self,
         address: usize,
         pred: impl Fn(&T) -> bool + Copy,
@@ -73,28 +73,28 @@ pub trait ReadMemoryUtils: ReadMemory {
     }
 
     #[inline(always)]
-    fn read_util_eq<T: PartialOrd + Copy>(
+    fn read_until_eq<T: PartialOrd + Copy>(
         &self,
         address: usize,
         val: T,
         max_bytes: usize,
     ) -> Vec<T> {
-        self.read_util(address, |&x| x == val, max_bytes)
+        self.read_until(address, |&x| x == val, max_bytes)
     }
 
     #[inline(always)]
-    fn read_util_lt<T: PartialOrd + Copy>(
+    fn read_until_lt<T: PartialOrd + Copy>(
         &self,
         address: usize,
         val: T,
         max_bytes: usize,
     ) -> Vec<T> {
-        self.read_util(address, |&x| x < val, max_bytes)
+        self.read_until(address, |&x| x < val, max_bytes)
     }
 
     /// read a c string, which is ended with zero
     fn read_cstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<Vec<u8>> {
-        let result = self.read_util_eq(address, 0, max.into().unwrap_or(1000));
+        let result = self.read_until_eq(address, 0, max.into().unwrap_or(1000));
         if result.len() == 0 || (result.len() == 1 && result[0] < b' ') {
             return None;
         }
@@ -161,7 +161,7 @@ pub trait ReadMemoryUtils: ReadMemory {
 
     // read wide-string (utf16)
     fn read_wstring(&self, address: usize, max: impl Into<Option<usize>>) -> Option<String> {
-        let result = self.read_util(
+        let result = self.read_until(
             address,
             |&x| x < b' ' as u16 && x != 9 && x != 10 && x != 13,
             max.into().unwrap_or(1000),
