@@ -699,11 +699,12 @@ where
         self.terminate_process()
     }
 
-    default fn wait(&self) -> UDbgResult<u32> {
-        self.is_process_exited(-1i32 as _);
-        self.process
-            .get_exit_code()
-            .ok_or_else(|| UDbgError::system())
+    default fn wait_exit(&self, timeout: Option<u32>) -> UDbgResult<Option<u32>> {
+        Ok(if self.wait_process_exit(timeout) {
+            self.process.get_exit_code()
+        } else {
+            None
+        })
     }
 }
 
@@ -772,10 +773,12 @@ impl TargetCommon {
         Ok(())
     }
 
-    pub fn is_process_exited(&self, timeout: u32) -> bool {
+    pub fn wait_process_exit(&self, timeout: Option<u32>) -> bool {
         use winapi::shared::winerror::WAIT_TIMEOUT;
         use winapi::um::synchapi::WaitForSingleObject;
-        unsafe { WAIT_TIMEOUT != WaitForSingleObject(*self.process.handle, timeout) }
+        unsafe {
+            WAIT_TIMEOUT != WaitForSingleObject(*self.process.handle, timeout.unwrap_or(INFINITE))
+        }
     }
 
     #[inline(always)]

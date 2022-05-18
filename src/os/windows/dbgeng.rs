@@ -484,6 +484,7 @@ impl TargetMemory for DebugTarget {
 
 impl TargetControl for DebugTarget {
     fn detach(&self) -> UDbgResult<()> {
+        self.base.status.set(UDbgStatus::Detaching);
         unsafe {
             self.client
                 .DetachCurrentProcess()

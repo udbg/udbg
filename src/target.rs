@@ -11,6 +11,7 @@ use std::borrow::Cow;
 use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{ErrorKind, Result as IoResult};
+use std::str::FromStr;
 use std::sync::Arc;
 
 #[derive(Copy, Clone, Debug, PartialEq, PartialOrd)]
@@ -29,6 +30,20 @@ impl UDbgStatus {
             UDbgStatus::Detaching => "detaching",
             UDbgStatus::Detached => "detached",
         }
+    }
+}
+
+impl FromStr for UDbgStatus {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        Ok(match s {
+            "opened" => UDbgStatus::Opened,
+            "attached" => UDbgStatus::Attached,
+            "detaching" => UDbgStatus::Detaching,
+            "detached" => UDbgStatus::Detached,
+            _ => return Err(()),
+        })
     }
 }
 
@@ -332,8 +347,9 @@ pub trait TargetControl {
         Err(UDbgError::NotSupport)
     }
     /// wait for target to exit
-    fn wait(&self) -> UDbgResult<u32> {
-        Err(UDbgError::NotSupport)
+    fn wait_exit(&self, timeout: Option<u32>) -> UDbgResult<Option<u32>> {
+        timeout.map(|tm| std::thread::sleep(std::time::Duration::from_millis(tm as _)));
+        Ok(None)
     }
 }
 

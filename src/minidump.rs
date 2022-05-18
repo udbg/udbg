@@ -79,7 +79,8 @@ impl GetProp for MiniDumpTarget {
 
 impl TargetControl for MiniDumpTarget {
     fn detach(&self) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
+        self.base.status.set(UDbgStatus::Detaching);
+        Ok(())
     }
 
     fn kill(&self) -> UDbgResult<()> {

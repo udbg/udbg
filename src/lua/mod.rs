@@ -585,8 +585,8 @@ impl UserData for ArcTarget {
             .register("kill", <dyn UDbgTarget>::kill)
             .register("pause", <dyn UDbgTarget>::breakk)
             .register("resume", <dyn UDbgTarget>::resume)
-            .register("wait", <dyn UDbgTarget>::wait)
-            .register("suspend", <dyn UDbgTarget>::suspend);
+            .register("suspend", <dyn UDbgTarget>::suspend)
+            .register("wait_exit", <dyn UDbgTarget>::wait_exit);
 
         fn write_value<T>(this: &ArcTarget, a: usize, val: T) {
             this.write_value(a, &val);

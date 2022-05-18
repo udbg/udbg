@@ -93,7 +93,8 @@ where
 {
     /// detach from debugging target
     fn detach(&self) -> UDbgResult<()> {
-        Err(UDbgError::NotSupport)
+        self.base.status.set(UDbgStatus::Detaching);
+        Ok(())
     }
     /// interrupt the target running
     fn breakk(&self) -> UDbgResult<()> {
@@ -256,10 +257,10 @@ impl Process {
     }
 
     pub fn pid_fds(pid: pid_t) -> UDbgResult<impl Iterator<Item = HandleInfo>> {
-        use ::libproc::libproc::bsd_info::BSDInfo;
-        use ::libproc::libproc::file_info::*;
-        use ::libproc::libproc::net_info::*;
-        use ::libproc::libproc::proc_pid::*;
+        use libproc::libproc::bsd_info::BSDInfo;
+        use libproc::libproc::file_info::*;
+        use libproc::libproc::net_info::*;
+        use libproc::libproc::proc_pid::*;
 
         impl Default for vnode_fdinfowithpath {
             fn default() -> Self {
