@@ -12,7 +12,6 @@ include = ["/src", "README.md", "/examples"]
 
 [features]
 dbgeng = ['windows']
-capstone = ['dep:capstone']
 
 [dependencies]
 cfg-if = '1.0'
@@ -22,7 +21,7 @@ log = '0.4'
 spin = '0.9'
 ctor = '0.1'
 regex = '1.5'
-pdb = '0.7'
+pdb = '0.8'
 llua = '0.1.1'
 extend = '1.1'
 bitflags = '1.2'
@@ -31,7 +30,7 @@ futures = '0.3'
 thiserror = '1.0'
 cstrptr = '0.1'
 crossbeam = '0.8'
-minidump = '0.10'
+minidump = '0.11'
 parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
@@ -54,7 +53,7 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
-windows = {version = '0.35', features = [
+windows = {version = '0.37', features = [
     "alloc", "implement",
     "Data_Xml_Dom",
     "Win32_Foundation",
@@ -84,7 +83,7 @@ procfs = '0.12'
 
 [target.'cfg(target_os="macos")'.dependencies]
 mach2 = '0.4'
-libproc = '0.11'
+libproc = '0.12'
 mach_o_sys = '0.1'
 
 [build-dependencies]

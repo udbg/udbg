@@ -152,7 +152,7 @@ impl PdbFile {
                         fields: cls.fields.map(|x| x.0),
                         vtable: cls.vtable_shape.map(|x| x.0),
                         derive: cls.derived_from.map(|x| x.0),
-                        size: cls.size,
+                        size: cls.size as _,
                     },
                 )
             }
