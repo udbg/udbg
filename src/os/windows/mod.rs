@@ -19,11 +19,13 @@ pub type pid_t = u32;
 
 use alloc::string::String;
 use alloc::sync::Arc;
+use anyhow::{Context, Error, Result};
 use core::mem::{size_of, size_of_val, transmute, zeroed};
 use core::ops::Deref;
 use core::ptr::{null, null_mut};
-
+use failed_result::LastError;
 use ntapi::ntpsapi::PROCESS_BASIC_INFORMATION;
+use std::io::{Error as IoError, Result as IoResult};
 use winapi::shared::minwindef::*;
 use winapi::shared::ntdef::UNICODE_STRING;
 use winapi::um::handleapi::*;
@@ -33,9 +35,6 @@ use winapi::um::psapi::*;
 use winapi::um::tlhelp32::*;
 use winapi::um::winbase::*;
 use winapi::um::winnt::*;
-
-use anyhow::{Error, Result};
-use std::io::{Error as IoError, Result as IoResult};
 
 use crate::prelude::*;
 use crate::shell::ProcessInfo;
@@ -839,7 +838,7 @@ pub fn create_debug_process(
         if r == 0 {
             return Err(UDbgError::system());
         }
-        Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).check_errstr("get pid")?)
+        Ok(Process::from_handle(Handle::from_raw_handle(pi.hProcess)).last_error()?)
     }
 }
 

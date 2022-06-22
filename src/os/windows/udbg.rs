@@ -769,7 +769,7 @@ impl TargetCommon {
     }
 
     pub fn terminate_process(&self) -> UDbgResult<()> {
-        self.process.terminate().check_errno("")?;
+        self.process.terminate().last_error()?;
         Ok(())
     }
 
@@ -1422,8 +1422,10 @@ unsafe impl Send for ProcessTarget {}
 unsafe impl Sync for ProcessTarget {}
 
 impl ProcessTarget {
-    pub fn open(pid: u32) -> Result<Arc<ProcessTarget>, UDbgError> {
-        let p = Process::open(pid, None).check_errstr("open process")?;
+    pub fn open(pid: u32) -> UDbgResult<Arc<ProcessTarget>> {
+        let p = Process::open(pid, None)
+            .last_error()
+            .context("open process")?;
         Ok(Self::new(p))
     }
 
@@ -1648,14 +1650,9 @@ pub fn enum_udbg_thread<'a>(
     a: Option<&'a ProcessTarget>,
 ) -> UDbgResult<Box<dyn Iterator<Item = Box<dyn UDbgThread>> + 'a>> {
     let mut info_iter = detail
-        .then(|| match system_process_information() {
-            Ok(spi) => Some(spi.flat_map(|iter| iter.threads().iter())),
-            Err(e) => {
-                error!("system_process_information: {:x}", e);
-                None
-            }
-        })
-        .flatten();
+        .then(system_process_information)
+        .transpose()?
+        .map(|spi| spi.flat_map(|iter| iter.threads().iter()));
 
     let mut cache: HashMap<u32, Box<SYSTEM_THREAD_INFORMATION>> = HashMap::new();
     let mut threads = enum_thread().filter(move |t| t.pid() == pid);
@@ -1731,7 +1728,7 @@ impl UDbgEngine for DefaultEngine {
 
     fn attach(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         unsafe {
-            DebugActiveProcess(pid).check_last()?;
+            DebugActiveProcess(pid).last_error()?;
             let result = ProcessTarget::open(pid)?;
             result.attached.set(true);
             self.first_bp32_hitted = true;

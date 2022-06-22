@@ -11,7 +11,7 @@ repository = "https://github.com/udbg/udbg"
 include = ["/src", "README.md", "/examples"]
 
 [features]
-dbgeng = ['windows']
+dbgeng = ['windows/Win32_System_Diagnostics_Debug']
 
 [dependencies]
 cfg-if = '1.0'
@@ -34,6 +34,7 @@ minidump = '0.11'
 parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
+failed-result = '0.2'
 goblin = {version = '0.5'}
 memmap2 = {version = '0.5.3'}
 cpp_demangle = {version = '0.3'}
@@ -55,7 +56,6 @@ winapi = {version = '0.3.9', features = [
 ]}
 windows = {version = '0.37', features = [
     "alloc", "implement",
-    "Data_Xml_Dom",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",
@@ -65,10 +65,8 @@ windows = {version = '0.37', features = [
     "Management_Deployment",
     "Foundation",
     "Foundation_Collections",
-    "ApplicationModel",
     "Win32_System_WinRT",
-    "Win32_System_Diagnostics_Debug",
-], optional = true}
+]}
 ntapi = '0.3'
 unicase = '2.6'
 msvc-demangler = '0.9'
@@ -92,7 +90,7 @@ cc = '1'
 [dev-dependencies]
 rustyline = '9'
 flexi_logger = '0.22'
-clap = {version = "3.1.9", features = ["derive"]}
+clap = {version = "3.2", features = ["derive"]}
 llua = {version = '0.1.1', features = ['vendored']}
 
 [patch.crates-io]

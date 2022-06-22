@@ -16,7 +16,7 @@ use core::marker::PhantomData;
 use core::mem::{size_of, size_of_val, transmute, zeroed};
 use core::ptr::{null, null_mut};
 use core::slice::from_raw_parts;
-
+use failed_result::*;
 use winapi::shared::ntdef::*;
 use winapi::shared::{minwindef::LPVOID, ntstatus::STATUS_INFO_LENGTH_MISMATCH};
 use winapi::um::winnt::HANDLE;
@@ -105,7 +105,7 @@ pub fn query_process<T>(
     }
 }
 
-pub fn read_object_info(handle: HANDLE, info: u32, extra_size: usize) -> Result<Vec<u8>, NTSTATUS> {
+pub fn read_object_info(handle: HANDLE, info: u32, extra_size: usize) -> WindowsResult<Vec<u8>> {
     let mut size = 0u32;
     unsafe {
         let mut result = vec![0u8; 1024];
@@ -122,18 +122,18 @@ pub fn read_object_info(handle: HANDLE, info: u32, extra_size: usize) -> Result<
             }
             result.resize(size as usize + extra_size, 0u8);
         };
-        err.check()?;
+        err.ntstatus_result()?;
         Ok(result)
     }
 }
 
 // maybe block, you can call this function within `call_with_timeout`
-pub fn query_object_name(handle: HANDLE) -> Result<BufferType<UNICODE_STRING>, NTSTATUS> {
+pub fn query_object_name(handle: HANDLE) -> WindowsResult<BufferType<UNICODE_STRING>> {
     read_object_info(handle, ObjectNameInformation, size_of::<u16>() * 16)
         .map(|r| BufferType::from_vec(r))
 }
 
-pub fn query_object_type(handle: HANDLE) -> Result<BufferType<OBJECT_TYPE_INFORMATION>, NTSTATUS> {
+pub fn query_object_type(handle: HANDLE) -> WindowsResult<BufferType<OBJECT_TYPE_INFORMATION>> {
     read_object_info(handle, ObjectTypeInformation, 0).map(|r| BufferType::from_vec(r))
 }
 
@@ -191,7 +191,7 @@ impl SystemProcessInfo for SYSTEM_PROCESS_INFORMATION {
     }
 }
 
-pub fn system_process_information<'a>() -> Result<SystemProcessInfoIter<'a>, NTSTATUS> {
+pub fn system_process_information<'a>() -> WindowsResult<SystemProcessInfoIter<'a>> {
     let v = read_system_information(SystemProcessInformation, 0)?;
     Ok(SystemProcessInfoIter::from(v))
 }
@@ -246,7 +246,7 @@ impl<'a> Iterator for SystemHandleInfoIter<'a> {
 pub fn read_system_information(
     si: SYSTEM_INFORMATION_CLASS,
     extra_size: usize,
-) -> Result<Vec<u8>, NTSTATUS> {
+) -> WindowsResult<Vec<u8>> {
     let mut size = 0u32;
     unsafe {
         let mut result = vec![0u8; 1024];
@@ -262,11 +262,8 @@ pub fn read_system_information(
             }
             result.resize(size as usize + extra_size, 0u8);
         };
-        if NT_SUCCESS(err) {
-            Ok(result)
-        } else {
-            Err(err)
-        }
+        err.ntstatus_result()?;
+        Ok(result)
     }
 }
 
@@ -333,7 +330,7 @@ impl SYSTEM_MODULE_INFORMATION_ENTRY {
 }
 
 pub fn system_module_list<'a>(
-) -> Result<impl Iterator<Item = &'a SYSTEM_MODULE_INFORMATION_ENTRY>, NTSTATUS> {
+) -> WindowsResult<impl Iterator<Item = &'a SYSTEM_MODULE_INFORMATION_ENTRY>> {
     let v = read_system_information(SystemModuleInformation, 0)?;
 
     let smi = BufferType::<SYSTEM_MODULE_INFORMATION>::from_vec(v);
@@ -505,7 +502,7 @@ pub fn query_working_set_ex(
     handle: HANDLE,
     base: usize,
     size: usize,
-) -> Result<Vec<MEMORY_WORKING_SET_EX_INFORMATION>, NTSTATUS> {
+) -> WindowsResult<Vec<MEMORY_WORKING_SET_EX_INFORMATION>> {
     let count = size / PAGE_SIZE;
     let mut len: usize = 0;
     unsafe {
@@ -513,19 +510,16 @@ pub fn query_working_set_ex(
         for i in 0..count {
             infos[i].VirtualAddress = transmute(base + PAGE_SIZE * i);
         }
-        let r = ZwQueryVirtualMemory(
+        ZwQueryVirtualMemory(
             handle,
             null_mut(),
             MemoryWorkingSetExInformation as u32,
             transmute(infos.as_mut_ptr()),
             infos.len() * size_of::<MEMORY_WORKING_SET_EX_INFORMATION>(),
             &mut len,
-        );
-        if NT_SUCCESS(r) {
-            Ok(infos)
-        } else {
-            Err(r)
-        }
+        )
+        .ntstatus_result()?;
+        Ok(infos)
     }
 }
 
@@ -546,64 +540,6 @@ pub fn find_handle<'a>(
     system_handle_information().filter(move |h| {
         type_index == h.ObjectTypeIndex as u32 && h.GrantedAccess & access == access
     })
-}
-
-pub trait CheckNtStatus {
-    type R;
-
-    fn check(self) -> Result<Self::R, NTSTATUS>;
-    fn check_err(self, err: &str) -> Result<Self::R, String>;
-}
-
-impl<T> CheckNtStatus for Result<T, NTSTATUS> {
-    type R = T;
-
-    fn check(self) -> Result<Self::R, NTSTATUS> {
-        self
-    }
-
-    fn check_err(self, err: &str) -> Result<Self::R, String> {
-        self.map_err(|e| format!("{}: 0x{:x}", err, e))
-    }
-}
-
-impl CheckNtStatus for NTSTATUS {
-    type R = ();
-
-    fn check(self) -> Result<Self::R, NTSTATUS> {
-        if NT_SUCCESS(self) {
-            Ok(())
-        } else {
-            Err(self)
-        }
-    }
-
-    fn check_err(self, err: &str) -> Result<Self::R, String> {
-        if NT_SUCCESS(self) {
-            Ok(())
-        } else {
-            Err(format!("{}: 0x{:x}", err, self))
-        }
-    }
-}
-
-pub fn get_pbi() -> Result<PROCESS_BASIC_INFORMATION, NTSTATUS> {
-    let mut pbi: PROCESS_BASIC_INFORMATION = unsafe { zeroed() };
-    unsafe {
-        ZwQueryInformationProcess(
-            ZwCurrentProcess,
-            ProcessBasicInformation,
-            transmute(&mut pbi),
-            size_of_val(&pbi) as u32,
-            null_mut(),
-        )
-        .check()?;
-        Ok(pbi)
-    }
-}
-
-pub fn get_peb() -> &'static mut PEB {
-    unsafe { transmute(get_pbi().unwrap().PebBaseAddress) }
 }
 
 #[inline]
@@ -648,4 +584,23 @@ where
         let p: *mut LDR_DATA_TABLE_ENTRY = unsafe { transmute(p - size_of::<LPVOID>() * 2) };
         callback(unsafe { transmute(p) })
     });
+}
+
+pub fn get_pbi() -> WindowsResult<PROCESS_BASIC_INFORMATION> {
+    let mut pbi: PROCESS_BASIC_INFORMATION = unsafe { zeroed() };
+    unsafe {
+        ZwQueryInformationProcess(
+            ZwCurrentProcess,
+            ProcessBasicInformation,
+            transmute(&mut pbi),
+            size_of_val(&pbi) as u32,
+            null_mut(),
+        )
+        .ntstatus_result()?;
+        Ok(pbi)
+    }
+}
+
+pub fn get_peb() -> WindowsResult<*mut PEB> {
+    Ok(get_pbi()?.PebBaseAddress)
 }

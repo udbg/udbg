@@ -1,15 +1,15 @@
 use super::*;
 use alloc::vec::Vec;
+use anyhow::Context;
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::{Deref, DerefMut};
-use winapi::um::debugapi::OutputDebugStringW;
-use winapi::um::errhandlingapi::GetLastError;
-use winapi::um::libloaderapi::GetProcAddress;
-use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
-
+use failed_result::*;
 use winapi::shared::ntdef::HANDLE;
 use winapi::shared::{minwindef::*, ntdef::*};
+use winapi::um::debugapi::OutputDebugStringW;
+use winapi::um::libloaderapi::GetProcAddress;
+use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
 use winapi::um::processthreadsapi::*;
 
 #[inline]
@@ -41,7 +41,7 @@ pub fn resume_thread(handle: HANDLE) -> u32 {
     unsafe { ResumeThread(handle) }
 }
 
-pub fn enable_privilege(name: &str) -> Result<(), String> {
+pub fn enable_privilege(name: &str) -> anyhow::Result<()> {
     use winapi::shared::winerror::ERROR_NOT_ALL_ASSIGNED;
     use winapi::um::securitybaseapi::AdjustTokenPrivileges;
 
@@ -51,11 +51,13 @@ pub fn enable_privilege(name: &str) -> Result<(), String> {
         let mut luid: LUID = zeroed();
 
         OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token)
-            .check_errstr("open")?;
+            .last_error()
+            .context("open")?;
 
         let token = Handle(token);
         LookupPrivilegeValueW(null(), name.to_unicode_with_null().as_ptr(), &mut luid)
-            .check_errstr("lookup")?;
+            .last_error()
+            .context("lookup")?;
 
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = luid;
@@ -68,17 +70,14 @@ pub fn enable_privilege(name: &str) -> Result<(), String> {
             null_mut(),
             null_mut(),
         )
-        .check_errstr("adjust")?;
+        .last_error()
+        .context("adjust")?;
 
-        if GetLastError() == ERROR_NOT_ALL_ASSIGNED {
-            Err("not all".into())
-        } else {
-            Ok(())
-        }
+        Ok(())
     }
 }
 
-pub fn enable_debug_privilege() -> Result<(), String> {
+pub fn enable_debug_privilege() -> anyhow::Result<()> {
     enable_privilege(SE_DEBUG_NAME)
 }
 
@@ -165,6 +164,10 @@ impl<T> BufferType<T> {
     pub fn as_mut_ptr(&mut self) -> *mut T {
         unsafe { mem::transmute(self.0.as_mut_ptr()) }
     }
+
+    pub fn as_slice(&self) -> &[u8] {
+        self.0.as_slice()
+    }
 }
 
 impl<T> Deref for BufferType<T> {
@@ -203,7 +206,7 @@ impl<T> Align16<T> {
     }
 }
 
-pub fn register_dll_notification(handler: PLDR_DLL_NOTIFICATION_FUNCTION) -> Result<(), NTSTATUS> {
+pub fn register_dll_notification(handler: PLDR_DLL_NOTIFICATION_FUNCTION) -> WindowsResult<()> {
     use winapi::shared::ntstatus::STATUS_NOT_FOUND;
     use winapi::um::libloaderapi::*;
 
@@ -215,9 +218,9 @@ pub fn register_dll_notification(handler: PLDR_DLL_NOTIFICATION_FUNCTION) -> Res
         ));
         if let Some(LdrRegisterDllNotification) = fun {
             let mut dll_cookie = 0usize;
-            LdrRegisterDllNotification(0, handler, null_mut(), &mut dll_cookie).check()
+            LdrRegisterDllNotification(0, handler, null_mut(), &mut dll_cookie).ntstatus_result()
         } else {
-            Err(STATUS_NOT_FOUND)
+            STATUS_NOT_FOUND.ntstatus_result()
         }
     }
 }
