@@ -17,6 +17,15 @@ pub trait ReadMemory {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]>;
 }
 
+impl ReadMemory for [u8] {
+    fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
+        let rest = &self[addr..];
+        let len = rest.len().min(data.len());
+        data.copy_from_slice(&rest[..len]);
+        Some(&mut data[..len])
+    }
+}
+
 pub trait ReadValue<O = Self>: Sized {
     fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<O>;
 }
