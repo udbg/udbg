@@ -7,7 +7,7 @@ use capstone::arch::{
 };
 use capstone::prelude::*;
 use capstone::{Insn, Instructions};
-use std::lazy::SyncLazy;
+use std::sync::LazyLock;
 
 cfg_if! {
     if #[cfg(any(target_arch = "x86", target_arch = "x86_64"))] {
@@ -27,7 +27,7 @@ pub struct CachedCapstone {
 unsafe impl Send for CachedCapstone {}
 unsafe impl Sync for CachedCapstone {}
 
-pub static CS: SyncLazy<CachedCapstone> = SyncLazy::new(|| {
+pub static CS: LazyLock<CachedCapstone> = LazyLock::new(|| {
     let mut arm = Capstone::new()
         .arm()
         .mode(arch::arm::ArchMode::Arm)
