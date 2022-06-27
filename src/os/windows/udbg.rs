@@ -1598,6 +1598,8 @@ pub struct TraceBuf<'a, T = ProcessTarget> {
     pub wow64: bool,
     pub cx: *mut CONTEXT,
     pub cx32: *mut CONTEXT32,
+    pub first_bp_hitted: bool,
+    pub first_bp32_hitted: bool,
 }
 
 impl<T: UDbgTarget> TraceBuf<'_, T> {
@@ -1688,8 +1690,6 @@ pub fn enum_udbg_thread<'a>(
 pub struct DefaultEngine {
     targets: Vec<Arc<ProcessTarget>>,
     event: DEBUG_EVENT,
-    first_bp_hitted: bool,
-    first_bp32_hitted: bool,
 }
 
 impl Default for DefaultEngine {
@@ -1697,8 +1697,6 @@ impl Default for DefaultEngine {
         Self {
             targets: vec![],
             event: unsafe { core::mem::zeroed() },
-            first_bp_hitted: false,
-            first_bp32_hitted: false,
         }
     }
 }
@@ -1731,7 +1729,6 @@ impl UDbgEngine for DefaultEngine {
             DebugActiveProcess(pid).last_error()?;
             let result = ProcessTarget::open(pid)?;
             result.attached.set(true);
-            self.first_bp32_hitted = true;
             self.targets.push(result.clone());
             Ok(result)
         }
@@ -1769,6 +1766,8 @@ impl UDbgEngine for DefaultEngine {
             cx: cx.as_mut(),
             cx32: &mut cx32,
             record: unsafe { core::mem::zeroed() },
+            first_bp_hitted: false,
+            first_bp32_hitted: false,
         };
 
         while let Some(s) = self.fetch(&mut buf).and_then(|_| self.handle(&mut buf)) {
@@ -1961,19 +1960,19 @@ impl EventHandler for DefaultEngine {
                     }
                     cotinue_status = match record.code {
                         EXCEPTION_WX86_BREAKPOINT => {
-                            if self.first_bp32_hitted {
+                            if tb.first_bp32_hitted {
                                 this.handle_breakpoint(self, first, tb, cx32)
                             } else {
-                                self.first_bp32_hitted = true;
+                                tb.first_bp32_hitted = true;
                                 this.handle_reply(this, tb.call(InitBp), cx32);
                                 HandleResult::NotHandled
                             }
                         }
                         EXCEPTION_BREAKPOINT => {
-                            if self.first_bp_hitted {
+                            if tb.first_bp_hitted {
                                 this.handle_breakpoint(self, first, tb, cx)
                             } else {
-                                self.first_bp_hitted = true;
+                                tb.first_bp_hitted = true;
                                 // 创建32位进程时忽略 附加32位进程时不忽略
                                 if !this.symgr.is_wow64.get() || this.attached.get() {
                                     this.handle_reply(this, tb.call(InitBp), cx);

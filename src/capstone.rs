@@ -211,7 +211,7 @@ impl dyn UDbgTarget {
         }
     }
 
-    pub fn select_cs(&self, address: usize) -> &Capstone {
+    pub fn select_cs(&self, address: usize) -> &'static Capstone {
         // if IS_ARM && address & 1 > 0 { return &self.thumb; }
         let cs = &CS;
         match self.base().context_arch.get() {
