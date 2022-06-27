@@ -4,6 +4,7 @@ use crate::os::unix::{udbg::*, Module};
 use crate::prelude::{pid_t, *};
 
 use anyhow::Context;
+use goblin::mach::{exports, header, imports, load_command, parse_magic_and_ctx, segment};
 use mach2::exception_types::*;
 use mach2::mach_port::*;
 use mach2::mach_types::exception_handler_array_t;
@@ -51,27 +52,34 @@ impl TargetCommon {
     }
 
     fn update_module(&self) -> Result<(), String> {
-        use anyhow::Context;
-        use goblin::mach::MachO;
-
         for mut m in self.process.list_module() {
             if self.symgr.find_module(m.base).is_some() {
                 continue;
             }
 
             // MachO::parse(bytes, offset)
-            let nm = (|| -> anyhow::Result<_> {
-                let data =
-                    Utils::mapfile(&m.path).with_context(|| format!("map file: {}", m.path))?;
-                let mach = MachO::parse(&data, 0).context("parse macho")?;
-                let base = m.base;
-                let path = m.path.clone();
-                m.entry = mach.entry as _;
-                m.size = mach.segments.iter().map(|s| s.cmdsize).sum::<u32>() as _;
-                Ok(())
-            })();
+            (|| -> anyhow::Result<_> {
+                use goblin::mach::MachO;
+                let header = self
+                    .read_value::<mach_header_64, Vec<u8>>(m.base)
+                    .unwrap_or_default();
+                // info!("header size: {}", header.len());
+                if header.is_empty() {
+                    anyhow::bail!("read header");
+                }
 
-            nm.map_err(|e| error!("{e:?}"));
+                let map = Utils::mapfile(&m.path).ok();
+                if let Some(mach) = map.as_ref().and_then(|data| MachO::parse(&data, 0).ok()) {
+                    m.entry = mach.entry as _;
+                    m.size = mach.segments.iter().map(|s| s.vmsize).sum::<u64>() as _;
+                } else {
+                    // let (_, segments) = parse_partial_macho(&header)?;
+                    // m.size = segments.iter().map(|s| s.vmsize).sum::<u64>() as _;
+                }
+                Ok(())
+            })()
+            .log_warn("parse macho");
+
             self.symgr.base.write().add(Module {
                 data: m,
                 loaded: false.into(),
@@ -120,6 +128,13 @@ impl AsRef<Process> for ProcessTarget {
     #[inline]
     fn as_ref(&self) -> &Process {
         &self.process
+    }
+}
+
+impl AsRef<TargetBase> for ProcessTarget {
+    #[inline]
+    fn as_ref(&self) -> &TargetBase {
+        &self.base
     }
 }
 
@@ -527,4 +542,101 @@ impl UDbgEngine for DefaultEngine {
 
         Ok(())
     }
+}
+
+impl ReadValue<Vec<u8>> for mach_header {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Vec<u8>> {
+        r.read_copy::<mach_header>(address).map(|header| {
+            let mut size = core::mem::size_of::<mach_header>();
+            size += header.sizeofcmds as usize;
+            r.read_bytes(address, size)
+        })
+    }
+}
+
+impl ReadValue<Vec<u8>> for mach_header_64 {
+    fn read_value<R: ReadMemoryUtils + ?Sized>(r: &R, address: usize) -> Option<Vec<u8>> {
+        r.read_copy::<mach_header_64>(address).map(|header| {
+            let mut size = core::mem::size_of::<mach_header_64>();
+            size += header.sizeofcmds as usize;
+            r.read_bytes(address, size)
+        })
+    }
+}
+
+use goblin::mach::segment::Segments;
+fn parse_partial_macho(bytes: &[u8]) -> goblin::error::Result<(header::Header, Segments)> {
+    use goblin::error;
+    use scroll::{ctx::SizeWith, Pread};
+
+    let mut offset = 0;
+    let (magic, maybe_ctx) = parse_magic_and_ctx(bytes, offset)?;
+    let ctx = if let Some(ctx) = maybe_ctx {
+        ctx
+    } else {
+        return Err(error::Error::BadMagic(u64::from(magic)));
+    };
+    debug!("Ctx: {:?}", ctx);
+    let offset = &mut offset;
+    let header: header::Header = bytes.pread_with(*offset, ctx)?;
+    debug!("Mach-o header: {:?}", header);
+    let little_endian = ctx.le.is_little();
+    let is_64 = ctx.container.is_big();
+    *offset += header::Header::size_with(&ctx.container);
+    let ncmds = header.ncmds;
+
+    let sizeofcmds = header.sizeofcmds as usize;
+    // a load cmd is at least 2 * 4 bytes, (type, sizeof)
+    if ncmds > sizeofcmds / 8 || sizeofcmds > bytes.len() {
+        return Err(error::Error::BufferTooShort(ncmds, "load commands"));
+    }
+
+    let mut cmds: Vec<load_command::LoadCommand> = Vec::with_capacity(ncmds);
+    let mut export_trie = None;
+    let mut bind_interpreter = None;
+    let mut main_entry_offset = None;
+    let mut segments = segment::Segments::new(ctx);
+    for i in 0..ncmds {
+        let cmd = load_command::LoadCommand::parse(bytes, offset, ctx.le)?;
+        debug!("{} - {:?}", i, cmd);
+        match cmd.command {
+            load_command::CommandVariant::Segment32(command) => {
+                // FIXME: we may want to be less strict about failure here, and just return an empty segment to allow parsing to continue?
+                segment::Segment::from_32(bytes, &command, cmd.offset, ctx)
+                    // .log_warn("parse seg32")
+                    .map(|seg| segments.push(seg));
+            }
+            load_command::CommandVariant::Segment64(command) => {
+                segment::Segment::from_64(bytes, &command, cmd.offset, ctx)
+                    // .log_error("parse seg64")
+                    .map(|seg| segments.push(seg));
+            }
+            load_command::CommandVariant::Symtab(command) => {
+                // symbols = Some(symbols::Symbols::parse(bytes, &command, ctx)?);
+            }
+            load_command::CommandVariant::LoadDylib(command)
+            | load_command::CommandVariant::LoadUpwardDylib(command)
+            | load_command::CommandVariant::ReexportDylib(command)
+            | load_command::CommandVariant::LoadWeakDylib(command)
+            | load_command::CommandVariant::LazyLoadDylib(command) => {}
+            load_command::CommandVariant::Rpath(command) => {}
+            load_command::CommandVariant::DyldInfo(command)
+            | load_command::CommandVariant::DyldInfoOnly(command) => {
+                export_trie = Some(exports::ExportTrie::new(bytes, &command));
+                bind_interpreter = Some(imports::BindInterpreter::new(bytes, &command));
+            }
+            load_command::CommandVariant::DyldExportsTrie(command) => {}
+            load_command::CommandVariant::Unixthread(command) => {}
+            load_command::CommandVariant::Main(command) => {
+                // dyld cares only about the first LC_MAIN
+                if main_entry_offset.is_none() {
+                    main_entry_offset = Some(command.entryoff);
+                }
+            }
+            load_command::CommandVariant::IdDylib(command) => {}
+            _ => (),
+        }
+        cmds.push(cmd)
+    }
+    Ok((header, segments))
 }

@@ -61,7 +61,7 @@ impl TargetMemory for Process {
     }
 
     fn virtual_query(&self, address: usize) -> Option<MemoryPage> {
-        Process::virtual_query(self, address as _)
+        Process::vm_region(self, address as _).ok()
     }
 
     fn collect_memory_info(&self) -> Vec<MemoryPage> {
@@ -89,11 +89,11 @@ where
 
 impl<T> TargetControl for T
 where
-    T: AsRef<Process>,
+    T: AsRef<Process> + Target,
 {
     /// detach from debugging target
     fn detach(&self) -> UDbgResult<()> {
-        self.base.status.set(UDbgStatus::Detaching);
+        self.base().status.set(UDbgStatus::Detaching);
         Ok(())
     }
     /// interrupt the target running
@@ -183,17 +183,12 @@ impl Process {
     }
 
     pub fn regionfilename(pid: i32, address: u64) -> nix::Result<String> {
-        let mut buf: Vec<u8> = Vec::with_capacity(libc::PROC_PIDPATHINFO_MAXSIZE as usize - 1);
-        let buffer_size = buf.capacity() as u32;
-        let ret: i32;
-
+        let mut buf: Vec<u8> = vec![0; libc::PROC_PIDPATHINFO_MAXSIZE as usize - 1];
+        let buffer_size = buf.len() as u32;
         unsafe {
-            Errno::result(proc_regionfilename(
-                pid,
-                address,
-                buf.as_mut_ptr().cast(),
-                buffer_size,
-            ))?;
+            let r = proc_regionfilename(pid, address, buf.as_mut_ptr().cast(), buffer_size);
+            Errno::result(r)?;
+            buf.truncate(r as _);
             Ok(String::from_utf8_lossy(&buf).into())
         }
     }
@@ -316,13 +311,13 @@ impl Process {
         }))
     }
 
-    pub fn virtual_query(&self, mut address: u64) -> Option<MemoryPage> {
+    pub fn vm_region(&self, mut address: u64) -> Result<MemoryPage, i32> {
         let mut size: mach_vm_size_t = 0;
         unsafe {
             let mut info: vm_region_basic_info_64 = core::mem::zeroed();
             let mut count = core::mem::size_of::<vm_region_basic_info_64>() as u32;
             let mut object_name: mach_port_t = 0;
-            if mach_vm_region(
+            let r = mach_vm_region(
                 self.task,
                 &mut address,
                 &mut size,
@@ -330,20 +325,20 @@ impl Process {
                 &mut info as *mut _ as _,
                 &mut count,
                 &mut object_name as _,
-            ) != KERN_SUCCESS
-            {
-                return None;
+            );
+            if r == KERN_SUCCESS {
+                Ok(MemoryPage {
+                    base: address as _,
+                    size: size as _,
+                    protect: u32::from_be_bytes(protection_bits_to_rwx(&info)),
+                    info: Self::regionfilename(self.pid, address as _)
+                        .ok()
+                        .map(Into::into),
+                    ..Default::default()
+                })
+            } else {
+                Err(r)
             }
-
-            Some(MemoryPage {
-                base: address as _,
-                size: size as _,
-                protect: u32::from_be_bytes(protection_bits_to_rwx(&info)),
-                info: Self::regionfilename(self.pid, address as _)
-                    .ok()
-                    .map(Into::into),
-                ..Default::default()
-            })
         }
     }
 
@@ -387,9 +382,10 @@ impl Process {
                 .read_utf8(info.imageFilePath as _, PROC_PIDPATHINFO_MAXSIZE as usize)
                 .unwrap_or_default();
 
+            use libc::mach_header_64 as mach_header;
             let size = self
                 .read_value::<mach_header>(info.imageLoadAddress as _)
-                .and_then(|header| unsafe {
+                .and_then(|header: mach_header| unsafe {
                     let mut size = size_of::<mach_header>();
                     size += header.sizeofcmds as usize;
                     let mut lc = info.imageLoadAddress.offset(1).cast::<load_command>();

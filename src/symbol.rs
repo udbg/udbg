@@ -521,6 +521,9 @@ impl<T: UDbgModule> ModuleManager<T> {
         let list = &self.list;
         list.binary_search_by(|mm| {
             let m = mm.data();
+            if address == m.base {
+                return Ordering::Equal;
+            }
             if address >= m.base && address < (m.base + m.size) {
                 Ordering::Equal
             } else if address < m.base {

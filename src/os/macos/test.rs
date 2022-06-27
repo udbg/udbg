@@ -26,14 +26,36 @@ fn process() {
     }
 }
 
+fn set_logger() {
+    use std::sync::Once;
+    static ONCE: Once = Once::new();
+
+    ONCE.call_once(|| {
+        flexi_logger::Logger::try_with_env_or_str("info")
+            .expect("flexi_logger")
+            .use_utc()
+            .start()
+            .expect("flexi_logger");
+    });
+}
+
 #[test]
 fn udbg() {
+    set_logger();
     let a = ProcessTarget::open(std::process::id() as _).unwrap();
+
     for m in a.enum_module().unwrap() {
-        // println!("{}", m.data().path);
+        let data = m.data();
+        println!("{data:x?}");
+        // let bytes = a.read_bytes(data.base, 80);
+        // println!("  {bytes:x?}");
     }
 
+    let mods = a.enum_module().unwrap().collect::<Vec<_>>();
+    let mods2 = a.enum_module().unwrap().collect::<Vec<_>>();
+    assert_eq!(mods.len(), mods2.len());
+
     for p in a.collect_memory_info() {
-        println!("{:?}", p.info);
+        println!("{:x?}", p);
     }
 }
