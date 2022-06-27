@@ -42,6 +42,8 @@ capstone = {version = '0.11', optional = true}
 memoffset = {version = '0.6.5', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'no_std']}
+scroll = "0.11.0"
+log-error = "0.1.0"
 
 [[bin]]
 name = 'tracee'

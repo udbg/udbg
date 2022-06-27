@@ -73,37 +73,4 @@ impl fmt::Display for UDbgError {
     }
 }
 
-pub trait LogError {
-    type Output;
-    type Error;
-
-    fn log_error(self, msg: &str) -> Option<Self::Output>;
-    fn log_error_with<F: FnOnce(Self::Error) -> String>(self, msg: F) -> Option<Self::Output>;
-}
-
-impl<T, E: fmt::Debug> LogError for Result<T, E> {
-    type Output = T;
-    type Error = E;
-
-    fn log_error(self, msg: &str) -> Option<T> {
-        match self {
-            Ok(res) => Some(res),
-            Err(err) => {
-                use crate::shell::*;
-                udbg_ui().error(format!("{msg}: {err:?}"));
-                None
-            }
-        }
-    }
-
-    fn log_error_with<F: FnOnce(E) -> String>(self, msg: F) -> Option<Self::Output> {
-        match self {
-            Ok(res) => Some(res),
-            Err(err) => {
-                use crate::shell::*;
-                udbg_ui().error(msg(err));
-                None
-            }
-        }
-    }
-}
+pub use log_error::*;
