@@ -16,6 +16,9 @@ pub struct MiniDumpTarget {
     memory: Vec<MemoryPage>,
 }
 
+unsafe impl Send for MiniDumpTarget {}
+unsafe impl Sync for MiniDumpTarget {}
+
 impl ReadMemory for MiniDumpTarget {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         let mem = self
@@ -167,6 +170,18 @@ impl Target for MiniDumpTarget {
         &self.base
     }
 
+    /// Executable image path of target
+    fn image_path(&self) -> UDbgResult<String> {
+        Ok(self
+            .dump
+            .get_stream::<MinidumpModuleList>()
+            .context("module list")?
+            .main_module()
+            .context("main module")?
+            .name
+            .clone())
+    }
+
     fn symbol_manager(&self) -> Option<&dyn TargetSymbol> {
         Some(self)
     }
@@ -202,6 +217,8 @@ impl Target for MiniDumpTarget {
         Ok(Box::new(iter))
     }
 }
+
+impl UDbgTarget for MiniDumpTarget {}
 
 #[derive(Deref)]
 pub struct MiniDumpThread {

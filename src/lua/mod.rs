@@ -3,7 +3,6 @@
 use crate::{
     os::{pid_t, tid_t},
     pdbfile,
-    pe::PETarget,
     prelude::*,
     register::CpuReg,
 };
@@ -873,10 +872,6 @@ impl UserData for ArcTarget {
                     })
                     .unwrap_or(0)
             })
-        });
-
-        mt.register("open_pe", |path: &str| {
-            PETarget::new(path).map(Arc::new).map(|t| ArcTarget(t as _))
         });
     }
 }

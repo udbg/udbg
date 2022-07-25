@@ -9,6 +9,7 @@ use goblin::pe::PE;
 use std::ffi::CStr;
 use std::os::raw::c_char;
 use std::path::Path;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 pub const PAGE_NOACCESS: u32 = 0x01;
@@ -208,7 +209,7 @@ impl PEModule {
                     base,
                     protect,
                     size: sec.virtual_size as _,
-                    type_: MEM_COMMIT,
+                    type_: MEM_IMAGE,
                     state: MEM_COMMIT,
                     info: Some(sec.name().unwrap_or_default().into()),
                     flags: MemoryFlags::IMAGE,
@@ -253,6 +254,7 @@ impl UDbgModule for PEModule {
 
 pub struct PETarget {
     base: TargetBase,
+    path: PathBuf,
     symgr: SymbolManager<PEModule>,
 }
 
@@ -261,13 +263,14 @@ unsafe impl Sync for PETarget {}
 
 impl PETarget {
     pub fn new<P: AsRef<Path>>(path: P) -> UDbgResult<Self> {
-        let module = PEModule::new(path.as_ref())?;
+        let path = path.as_ref().to_path_buf();
+        let module = PEModule::new(&path)?;
         let base = TargetBase::default();
         base.pid.set(1);
         // base.arch
         let symgr = SymbolManager::default();
         symgr.base.write().list.push(module.into());
-        Ok(Self { base, symgr })
+        Ok(Self { base, symgr, path })
     }
 
     pub fn module(&self, addr: usize) -> Option<Arc<PEModule>> {
@@ -287,15 +290,15 @@ impl ReadMemory for PETarget {
     fn read_memory<'a>(&self, addr: usize, data: &'a mut [u8]) -> Option<&'a mut [u8]> {
         let pe = self.module(addr)?;
         let rva = addr - pe.data.base;
-        let i = pe.pages.binary_search_by(|x| x.cmp(rva)).ok()?;
+        let i = pe.pages.binary_search_by(|x| x.cmp(addr)).ok()?;
         let page = pe.pages.get(i)?;
         let (offset, size) = if i > 0 {
             let sec = pe.helper.section_by_rva(rva)?;
             // TODO: section fill by zero
             let offset = (rva as u32 - sec.virtual_address + sec.pointer_to_raw_data) as usize;
-            (offset, sec.virtual_size as usize - rva)
+            (offset, (sec.virtual_size as usize).checked_sub(rva)?)
         } else {
-            (0, page.size - rva)
+            (rva, page.size - rva)
         };
         let slice = &pe.map.as_ref()[offset..];
         let len = data.len().min(size);
@@ -351,6 +354,11 @@ impl TargetControl for PETarget {
 impl Target for PETarget {
     fn base(&self) -> &TargetBase {
         &self.base
+    }
+
+    /// Executable image path of target
+    fn image_path(&self) -> UDbgResult<String> {
+        Ok(self.path.to_string_lossy().into())
     }
 
     fn enum_thread(
