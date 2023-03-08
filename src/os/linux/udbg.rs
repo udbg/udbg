@@ -820,7 +820,7 @@ impl Target for ProcessTarget {
     }
 
     fn open_thread(&self, tid: tid_t) -> UDbgResult<Box<dyn UDbgThread>> {
-        let task = Task::new(self.process.pid, tid).context("task")?;
+        let task = self.process.task_from_tid(tid).context("task")?;
         Ok(Box::new(NixThread {
             base: ThreadData { tid, wow64: false },
             stat: task.stat().context("stat")?,
@@ -882,7 +882,7 @@ impl EventHandler for DefaultEngine {
                 .or_else(|| {
                     self.targets
                         .iter()
-                        .find(|&t| procfs::process::Task::new(t.process.pid, self.tid).is_ok())
+                        .find(|&t| t.process.task_from_tid(self.tid).is_ok())
                         .cloned()
                 });
 

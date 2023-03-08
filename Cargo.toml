@@ -22,7 +22,6 @@ spin = '0.9'
 ctor = '0.1'
 regex = '1.5'
 pdb = '0.8'
-llua = '0.1.1'
 extend = '1.1'
 bitflags = '1.2'
 anyhow = '1.0'
@@ -30,20 +29,21 @@ futures = '0.3'
 thiserror = '1.0'
 cstrptr = '0.1'
 crossbeam = '0.8'
-minidump = '0.11'
+minidump = '0.15'
 parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
 failed-result = '0.2'
-goblin = {version = '0.5'}
+log-error = "0.1.0"
+goblin = {version = '0.6'}
 memmap2 = {version = '0.5.3'}
-cpp_demangle = {version = '0.3'}
+cpp_demangle = {version = '0.4'}
+llua = {version = '0.1.1', optional = true}
 capstone = {version = '0.11', optional = true}
-memoffset = {version = '0.6.5', features = ['unstable_const']}
+symbolic = {version = '12.1', features = ['demangle']}
+memoffset = {version = '0.8', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'std']}
-scroll = "0.11.0"
-log-error = "0.1.0"
 
 [[bin]]
 name = 'tracee'
@@ -69,21 +69,21 @@ windows = {version = '0.37', features = [
     "Foundation_Collections",
     "Win32_System_WinRT",
 ]}
-ntapi = '0.3'
+ntapi = '0.4'
 unicase = '2.6'
 msvc-demangler = '0.9'
 
 [target.'cfg(not(windows))'.dependencies]
-nix = '0.24'
+nix = '0.26'
 libc = '0.2'
-errno = '0.2'
+errno = '0.3'
 
 [target.'cfg(any(target_os="linux",target_os="android"))'.dependencies]
-procfs = '0.12'
+procfs = '0.15'
 
 [target.'cfg(target_os="macos")'.dependencies]
 mach2 = '0.4'
-libproc = '0.12'
+# libproc = '0.12'
 mach_o_sys = '0.1'
 
 [build-dependencies]
@@ -91,9 +91,6 @@ cc = '1'
 
 [dev-dependencies]
 rustyline = '9'
-flexi_logger = '0.22'
-clap = {version = "3.2", features = ["derive"]}
+flexi_logger = '0.25'
+clap = {version = "4", features = ["derive"]}
 llua = {version = '0.1.1', features = ['vendored']}
-
-[patch.crates-io]
-llua = {git = 'https://github.com/udbg/llua'}

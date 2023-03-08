@@ -214,6 +214,7 @@ fn debug_wow64() -> anyhow::Result<()> {
     test_debug(r"C:\Windows\SysWOW64\cmd.exe", &["/c", "type", ARG])
 }
 
+#[cfg(feature = "llua")]
 #[test]
 fn target() {
     use llua::*;

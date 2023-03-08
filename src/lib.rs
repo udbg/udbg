@@ -5,7 +5,6 @@
 #![feature(ptr_metadata)]
 #![feature(min_specialization)]
 #![feature(stmt_expr_attributes)]
-#![feature(const_ptr_offset_from)]
 #![feature(associated_type_defaults)]
 #![allow(rustdoc::bare_urls)]
 #![allow(unused_variables)]
@@ -36,6 +35,7 @@ pub mod capstone;
 pub mod elf;
 pub mod error;
 pub mod event;
+#[cfg(feature = "llua")]
 pub mod lua;
 pub mod memory;
 pub mod minidump;

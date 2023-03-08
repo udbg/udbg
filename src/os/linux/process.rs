@@ -158,7 +158,7 @@ impl Process {
             }
             let mut protect = [0u8; 4];
             protect.copy_from_slice(prot.as_bytes());
-            let mut result = MemoryPage {
+            let result = MemoryPage {
                 base,
                 size,
                 info: usage.into(),

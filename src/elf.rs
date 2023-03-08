@@ -15,13 +15,13 @@ impl ElfSym<'_> {
     pub fn offset(&self) -> usize {
         self.sym.st_value as usize
     }
-}
 
-pub fn get_symbol<'a>(e: &'a Strtab, s: &Sym) -> Option<ElfSym<'a>> {
-    if s.st_value > 0 {
-        e.get_at(s.st_name).map(|name| ElfSym { sym: *s, name })
-    } else {
-        None
+    pub fn from_raw<'a>(e: &'a Strtab, s: &Sym) -> Option<ElfSym<'a>> {
+        if s.st_value > 0 {
+            e.get_at(s.st_name).map(|name| ElfSym { sym: *s, name })
+        } else {
+            None
+        }
     }
 }
 
@@ -31,7 +31,7 @@ pub struct ElfHelper<'a>(Elf<'a>);
 impl<'a> ElfHelper<'a> {
     pub fn enum_export(&'a self) -> impl 'a + Iterator<Item = ElfSym<'a>> {
         self.0.dynsyms.iter().filter_map(move |s| {
-            get_symbol(&self.0.dynstrtab, &s).or_else(|| get_symbol(&self.0.strtab, &s))
+            ElfSym::from_raw(&self.0.dynstrtab, &s).or_else(|| ElfSym::from_raw(&self.0.strtab, &s))
         })
     }
 
@@ -39,7 +39,7 @@ impl<'a> ElfHelper<'a> {
         self.0
             .syms
             .iter()
-            .filter_map(move |s| get_symbol(&self.0.strtab, &s))
+            .filter_map(move |s| ElfSym::from_raw(&self.0.strtab, &s))
     }
 
     pub fn get_export(&'a self, name: &str) -> Option<ElfSym<'a>> {

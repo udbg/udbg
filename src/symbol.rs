@@ -379,6 +379,7 @@ pub trait UDbgModule: GetProp {
 
     /// specific a symbol file for this module
     fn load_symbol_file(&self, path: Option<&str>) -> UDbgResult<()> {
+        #[allow(unreachable_code)]
         if let Some(syms) = self.symbols_data() {
             *syms.pdb.write() = Some(match path {
                 // TODO:
