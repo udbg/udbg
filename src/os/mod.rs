@@ -254,11 +254,11 @@ where
         Ok(self.deref().add_bp(self, &opt)?)
     }
 
-    default fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+    default fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint>> {
         Some(self.deref().bp_map.read().get(&id)?.clone())
     }
 
-    default fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint + '_>> {
+    default fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint>> {
         self.deref()
             .bp_map
             .read()

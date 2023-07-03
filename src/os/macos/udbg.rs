@@ -23,6 +23,7 @@ use nix::sys::wait::waitpid;
 use nix::sys::wait::WaitPidFlag;
 use nix::unistd::Pid;
 use parking_lot::RwLock;
+use scroll::ctx::*;
 use std::cell::{Cell, UnsafeCell};
 use std::mem::size_of_val;
 use std::slice::from_raw_parts_mut;

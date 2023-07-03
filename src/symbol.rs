@@ -177,7 +177,7 @@ impl SymbolInfo {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModuleData {
     pub base: usize,
     pub size: usize,

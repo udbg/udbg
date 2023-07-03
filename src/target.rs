@@ -48,7 +48,7 @@ impl FromStr for UDbgStatus {
 }
 
 /// Common data for debugger target
-#[derive(Clone, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TargetBase {
     /// Process ID of target, if target is a process
     pub pid: Cell<pid_t>,
@@ -90,6 +90,11 @@ impl TargetBase {
     #[inline]
     pub fn is_wow64(&self) -> bool {
         self.context_arch.get() == ARCH_X86
+    }
+
+    #[inline]
+    pub fn status(&self) -> UDbgStatus {
+        self.status.get()
     }
 
     #[inline]
@@ -177,7 +182,7 @@ impl CommonBase {
         self.bp_map.read().get(&id).is_some()
     }
 
-    pub fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
+    pub fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint>> {
         Some(self.bp_map.read().get(&id)?.clone())
     }
 }
@@ -255,6 +260,19 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
     fn last_error(&self) -> Option<u32> {
         None
+    }
+
+    #[cfg(windows)]
+    fn terminate(&self) -> IoResult<i32> {
+        use failed_result::LastError;
+        use winapi::um::processthreadsapi::TerminateThread;
+
+        unsafe { TerminateThread(*self.handle, 0).last_error() }
+    }
+
+    #[cfg(unix)]
+    fn terminate(&self) -> IoResult<i32> {
+        Ok(unsafe { libc::kill(self.tid, libc::SIGTERM) })
     }
 }
 
@@ -348,8 +366,7 @@ pub trait TargetControl {
     }
     /// wait for target to exit
     fn wait_exit(&self, timeout: Option<u32>) -> UDbgResult<Option<u32>> {
-        timeout.map(|tm| std::thread::sleep(std::time::Duration::from_millis(tm as _)));
-        Ok(None)
+        Err(UDbgError::NotSupport)
     }
 }
 
@@ -715,6 +732,10 @@ impl MemoryPage {
         } else {
             unsafe { core::str::from_utf8_unchecked(self.as_linux_protect()) }.into()
         }
+    }
+
+    pub fn info(&self) -> &str {
+        self.info.as_ref().map(AsRef::as_ref).unwrap_or_default()
     }
 
     pub fn type_(&self) -> &'static str {

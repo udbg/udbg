@@ -42,7 +42,6 @@ pub fn resume_thread(handle: HANDLE) -> u32 {
 }
 
 pub fn enable_privilege(name: &str) -> anyhow::Result<()> {
-    use winapi::shared::winerror::ERROR_NOT_ALL_ASSIGNED;
     use winapi::um::securitybaseapi::AdjustTokenPrivileges;
 
     unsafe {
@@ -184,21 +183,25 @@ impl<T> DerefMut for BufferType<T> {
     }
 }
 
+#[repr(C)]
 pub struct Align16<T> {
     _align: u64,
-    _data: T,
+    data: T,
 }
 
-impl<T> Align16<T> {
-    pub fn new() -> Self {
-        unsafe { core::mem::MaybeUninit::uninit().assume_init() }
+impl<T: Copy> Align16<T> {
+    pub unsafe fn new_zeroed() -> Self {
+        Self {
+            _align: 0,
+            data: core::mem::zeroed(),
+        }
     }
 
     pub fn as_mut(&mut self) -> &mut T {
         unsafe {
             let align_address = transmute::<_, usize>(&self._align);
             if align_address & 0x0F > 0 {
-                &mut self._data
+                &mut self.data
             } else {
                 transmute(align_address)
             }

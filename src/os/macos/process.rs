@@ -1,3 +1,5 @@
+#![allow(deprecated)]
+
 use super::ffi::*;
 use super::*;
 

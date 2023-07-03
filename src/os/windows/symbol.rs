@@ -102,12 +102,12 @@ impl Process {
     pub fn get_address_by_symbol(&self, symbol: &str) -> Result<usize> {
         unsafe {
             let mut buf = [0u8; size_of::<SYMBOL_INFOW>() + MAX_SYM_NAME * 2];
-            let mut si: *mut SYMBOL_INFOW = transmute(buf.as_mut_ptr());
-            (*si).SizeOfStruct = buf.len() as u32;
-            (*si).MaxNameLen = MAX_SYM_NAME as u32;
+            let si = buf.as_mut_ptr().cast::<SYMBOL_INFOW>().as_mut().unwrap();
+            si.SizeOfStruct = buf.len() as u32;
+            si.MaxNameLen = MAX_SYM_NAME as u32;
 
             if SymFromNameW(*self.handle, symbol.to_unicode().as_ptr(), si) > 0 {
-                Ok((*si).Address as usize)
+                Ok(si.Address as usize)
             } else {
                 let symbol = symbol.to_lowercase();
                 for m in self.enum_module() {
@@ -129,9 +129,9 @@ impl Process {
     pub fn get_symbol_by_address(&self, address: usize) -> Option<SymbolInfo> {
         unsafe {
             let mut buf = [0u8; size_of::<SYMBOL_INFOW>() + MAX_SYM_NAME * 2];
-            let mut si: *mut SYMBOL_INFOW = transmute(buf.as_mut_ptr());
-            (*si).SizeOfStruct = size_of::<SYMBOL_INFOW>() as u32;
-            (*si).MaxNameLen = MAX_SYM_NAME as u32;
+            let si = buf.as_mut_ptr().cast::<SYMBOL_INFOW>().as_mut().unwrap();
+            si.SizeOfStruct = buf.len() as u32;
+            si.MaxNameLen = MAX_SYM_NAME as u32;
 
             let mut dis = 0 as u64;
             let mut im: IMAGEHLP_MODULEW64 = zeroed();
@@ -140,7 +140,7 @@ impl Process {
             let module_name = im.ModuleName.to_utf8().into();
 
             if SymFromAddrW(*self.handle, address as u64, &mut dis, si) > 0 {
-                let s = from_raw_parts((*si).Name.as_ptr(), (*si).NameLen as usize);
+                let s = from_raw_parts(si.Name.as_ptr(), si.NameLen as usize);
                 Some(SymbolInfo {
                     module: module_name,
                     symbol: s.to_utf8().into(),

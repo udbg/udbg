@@ -270,12 +270,12 @@ impl WinThread {
 
     fn get_reg(&self, r: &str) -> UDbgResult<CpuReg> {
         if self.wow64 {
-            let mut cx = Align16::<CONTEXT32>::new();
+            let mut cx = unsafe { Align16::<CONTEXT32>::new_zeroed() };
             let context = cx.as_mut();
             context.get_context(*self.handle);
             context.get(r).ok_or(UDbgError::InvalidRegister)
         } else {
-            let mut cx = Align16::<CONTEXT>::new();
+            let mut cx = unsafe { Align16::<CONTEXT>::new_zeroed() };
             let context = cx.as_mut();
             context.get_context(*self.handle);
             context.get(r).ok_or(UDbgError::InvalidRegister)
@@ -995,8 +995,8 @@ impl TargetCommon {
         enable: bool,
     ) -> UDbgResult<bool> {
         let mut result = Ok(enable);
-        let mut cx = Align16::<CONTEXT>::new();
-        let mut wow64cx = Align16::<WOW64_CONTEXT>::new();
+        let mut cx = unsafe { Align16::<CONTEXT>::new_zeroed() };
+        let mut wow64cx = unsafe { Align16::<WOW64_CONTEXT>::new_zeroed() };
         let context = cx.as_mut();
         let cx32 = wow64cx.as_mut();
         cx32.ContextFlags = CONTEXT_DEBUG_REGISTERS;
@@ -1486,7 +1486,7 @@ impl ProcessTarget {
         unsafe { transmute(self.context.get()) }
     }
 
-    fn open_thread(&self, tid: u32) -> UDbgResult<Box<WinThread>> {
+    pub fn open_thread(&self, tid: u32) -> UDbgResult<Box<WinThread>> {
         if let Some(t) = self.threads.borrow().get(&tid) {
             let wow64 = self.symgr.is_wow64.get();
             let handle = unsafe { Handle::clone_from_raw(t.handle) }?;
@@ -1748,7 +1748,7 @@ impl UDbgEngine for DefaultEngine {
     }
 
     fn event_loop(&mut self, callback: &mut UDbgCallback) -> UDbgResult<()> {
-        let mut cx = Align16::<CONTEXT>::new();
+        let mut cx = unsafe { Align16::<CONTEXT>::new_zeroed() };
         let mut cx32 = unsafe { core::mem::zeroed() };
 
         let target = self

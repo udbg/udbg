@@ -39,6 +39,7 @@ pub struct HandleInfo {
 }
 
 bitflags! {
+    #[derive(Debug, Clone, Copy)]
     pub struct UDbgFlags: u32 {
         const NONE = 0b00000000;
         const UNDEC_TYPE = 1 << 0;

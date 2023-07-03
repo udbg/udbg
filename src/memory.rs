@@ -263,6 +263,7 @@ pub trait TargetMemory: ReadMemory + WriteMemory {
 }
 
 bitflags! {
+    #[derive(Debug, Serialize, Deserialize, Clone, Copy)]
     pub struct MemoryFlags: u32 {
         const Normal = 0;
         const IMAGE = 1 << 1;
@@ -283,17 +284,46 @@ impl Default for MemoryFlags {
 }
 
 /// Cross-platform representation of memory page
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Deserialize)]
 pub struct MemoryPage {
     pub base: usize,
     pub alloc_base: usize,
     pub size: usize,
+    #[serde(rename = "type_value")]
     pub type_: u32,
     pub state: u32,
+    #[serde(rename = "protect_value")]
     pub protect: u32,
     pub alloc_protect: u32,
     pub flags: MemoryFlags,
     pub info: Option<Arc<str>>,
+}
+
+impl serde::Serialize for MemoryPage {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeStruct;
+
+        let mut ss = serializer.serialize_struct("MemoryPage", 12)?;
+
+        ss.serialize_field("base", &self.base)?;
+        ss.serialize_field("alloc_base", &self.alloc_base)?;
+        ss.serialize_field("size", &self.size)?;
+        ss.serialize_field("type_value", &self.type_)?;
+        ss.serialize_field("state", &self.state)?;
+        ss.serialize_field("protect_value", &self.protect)?;
+        ss.serialize_field("alloc_protect", &self.alloc_protect)?;
+        ss.serialize_field("flags", &self.flags)?;
+        ss.serialize_field("info", &self.info)?;
+
+        ss.serialize_field("protect", &self.protect())?;
+        ss.serialize_field("type", &self.type_())?;
+        ss.serialize_field("is_private", &self.is_private())?;
+
+        ss.end()
+    }
 }
 
 impl crate::range::RangeValue for MemoryPage {

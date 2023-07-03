@@ -1,6 +1,6 @@
 [package]
 name = "udbg"
-version = "0.2.1"
+version = "0.2.2"
 edition = "2021"
 license = "MIT"
 authors = ["metaworm <metaworm@outlook.com>"]
@@ -19,29 +19,29 @@ glob = '0.3'
 hex = '0.4'
 log = '0.4'
 spin = '0.9'
-ctor = '0.1'
+ctor = '0.2'
 regex = '1.5'
 pdb = '0.8'
 extend = '1.1'
-bitflags = '1.2'
 anyhow = '1.0'
 futures = '0.3'
 thiserror = '1.0'
 cstrptr = '0.1'
 crossbeam = '0.8'
-minidump = '0.15'
+minidump = '0.17'
 parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
 failed-result = '0.2'
-log-error = "0.1.0"
-goblin = {version = '0.6'}
-memmap2 = {version = '0.5.3'}
+log-error = "0.1"
+goblin = {version = '~0.6'}
+memmap2 = {version = '~0.5'}
 cpp_demangle = {version = '0.4'}
-llua = {version = '0.1.1', optional = true}
+ezlua = {version = '0.3', features = ['vendored', 'thread'], optional = true}
+bitflags = {version = '2.0', features = ['serde']}
 capstone = {version = '0.11', optional = true}
 symbolic = {version = '12.1', features = ['demangle']}
-memoffset = {version = '0.8', features = ['unstable_const']}
+memoffset = {version = '0.9', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'std']}
 
@@ -56,8 +56,8 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
-windows = {version = '0.37', features = [
-    "alloc", "implement",
+windows = {version = '0.48', features = [
+    "implement",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_System_Threading",
@@ -83,14 +83,17 @@ procfs = '0.15'
 
 [target.'cfg(target_os="macos")'.dependencies]
 mach2 = '0.4'
-# libproc = '0.12'
+scroll = "0.11"
+libproc = '0.13'
 mach_o_sys = '0.1'
 
 [build-dependencies]
 cc = '1'
 
 [dev-dependencies]
-rustyline = '9'
 flexi_logger = '0.25'
-clap = {version = "4", features = ["derive"]}
-llua = {version = '0.1.1', features = ['vendored']}
+tempfile = '3.6'
+minidump-writer = '0.8.0'
+rustyline = {version = '12'}
+clap = {version = "4", features = ["derive", "env"]}
+ezlua = {version = '0.3', features = ['vendored']}

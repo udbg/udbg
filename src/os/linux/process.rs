@@ -69,7 +69,7 @@ impl Process {
     pub fn pid_environ(pid: pid_t) -> IoResult<HashMap<String, String>> {
         let data = std::fs::read(format!("/proc/{}/environ", pid))?;
         let mut result = HashMap::new();
-        data.split(|b| *b == 0u8).map(|b| unsafe {
+        data.split(|b| *b == 0u8).for_each(|b| unsafe {
             let item = std::str::from_utf8_unchecked(b);
             let mut i = item.split("=");
             if let Some(name) = i.next() {
@@ -162,7 +162,8 @@ impl Process {
                 base,
                 size,
                 info: usage.into(),
-                protect: u32::from_be_bytes(protect),
+                // TODO: detect CPU endian
+                protect: u32::from_le_bytes(protect),
                 ..Default::default()
             };
             Some(result)
@@ -304,10 +305,11 @@ impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
                 }
             }
 
-            let mut sig = [0u8; 4];
+            // let mut sig = [0u8; 4];
             if self.usage.len() > 0
-                && self.p.read_memory(self.base, &mut sig).is_some()
-                && ELF_SIG == sig
+            // TODO: optional verify to the module
+            // && self.p.read_memory(self.base, &mut sig).is_some()
+            // && ELF_SIG == sig
             {
                 // Moudle Begin
                 let base = self.base;

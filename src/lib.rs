@@ -1,11 +1,12 @@
 #![doc = include_str!("../README.md")]
 #![doc(html_logo_url = "https://avatars.githubusercontent.com/u/61437564?s=200&v=4")]
+#![feature(lazy_cell)]
 #![feature(trait_alias)]
-#![feature(once_cell)]
 #![feature(ptr_metadata)]
 #![feature(min_specialization)]
 #![feature(stmt_expr_attributes)]
 #![feature(associated_type_defaults)]
+#![feature(closure_lifetime_binder)]
 #![allow(rustdoc::bare_urls)]
 #![allow(unused_variables)]
 #![allow(unused_must_use)]
@@ -35,7 +36,7 @@ pub mod capstone;
 pub mod elf;
 pub mod error;
 pub mod event;
-#[cfg(feature = "llua")]
+#[cfg(feature = "ezlua")]
 pub mod lua;
 pub mod memory;
 pub mod minidump;

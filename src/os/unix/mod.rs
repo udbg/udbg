@@ -1,6 +1,6 @@
 use crate::prelude::*;
 
-use core::{cell::Cell, fmt};
+use core::cell::Cell;
 use std::sync::Arc;
 
 pub mod udbg;

@@ -1,4 +1,3 @@
-mod ffi;
 #[cfg(test)]
 mod test;
 mod udbg;

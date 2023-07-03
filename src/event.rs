@@ -198,7 +198,7 @@ impl DummyTask {
     }
 }
 
-pub trait UtilFunc = FnMut() -> Result<bool, &'static str>;
+pub trait UtilFunc = FnMut() -> Result<bool, String>;
 
 pub struct UDbgTracer<'a> {
     pub tid: Option<tid_t>,
@@ -218,8 +218,8 @@ impl<'a> UDbgTracer<'a> {
         }
     }
 
-    fn dummy_util() -> Result<bool, &'static str> {
-        Err("")
+    fn dummy_util() -> Result<bool, String> {
+        Err("".into())
     }
 
     pub fn start(&mut self, tid: tid_t, step_in: bool, util: impl UtilFunc + 'a) {

@@ -236,7 +236,7 @@ cfg_if! {
 }
 
 /// Represents a breakpoint
-pub trait UDbgBreakpoint {
+pub trait UDbgBreakpoint: 'static {
     /// Get the ID of this breakpoint
     fn get_id(&self) -> BpID;
 
@@ -388,14 +388,14 @@ pub trait BreakpointManager {
     fn add_breakpoint(&self, opt: BpOpt) -> UDbgResult<Arc<dyn UDbgBreakpoint>> {
         Err(UDbgError::NotSupport)
     }
-    fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+    fn get_breakpoint(&self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint>> {
         None
     }
-    fn get_bp_by_address(&self, a: usize) -> Option<Arc<dyn UDbgBreakpoint + '_>> {
+    fn get_bp_by_address(&self, a: usize) -> Option<Arc<dyn UDbgBreakpoint>> {
         self.get_breakpoint(a as BpID)
     }
 
-    fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint + '_>> {
+    fn get_breakpoints(&self) -> Vec<Arc<dyn UDbgBreakpoint>> {
         vec![]
     }
 }

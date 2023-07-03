@@ -249,20 +249,30 @@ impl TargetCommon {
             let mut f = match File::open(m.path.as_ref()) {
                 Ok(f) => f,
                 Err(_) => {
-                    error!("open module file: {}", m.path);
+                    // error!("open module file: {}", m.path);
                     continue;
                 }
             };
-            let mut buf: Header64 = unsafe { std::mem::zeroed() };
-            if f.read_exact(buf.as_mut_byte_array()).is_err() {
-                error!("read file: {}", m.path);
+
+            // Non-File device will block the progress
+            if !f
+                .metadata()
+                .map(|m| m.file_type().is_file())
+                .unwrap_or(false)
+            {
+                continue;
+            }
+
+            let mut buf: Header64 = unsafe { core::mem::zeroed() };
+            if f.read(buf.as_mut_byte_array()).is_err() {
+                // error!("read file: {}", m.path);
                 continue;
             }
 
             let arch = match ElfHelper::arch_name(buf.e_machine) {
                 Some(a) => a,
                 None => {
-                    error!("error e_machine: {} {}", buf.e_machine, m.path);
+                    // error!("error e_machine: {} {}", buf.e_machine, m.path);
                     continue;
                 }
             };
@@ -271,7 +281,7 @@ impl TargetCommon {
                 "arm64" | "x86_64" => buf.e_entry as usize,
                 "x86" | "arm" => unsafe { transmute::<_, &Header32>(&buf).e_entry as usize },
                 a => {
-                    error!("error arch: {}", a);
+                    // error!("error arch: {}", a);
                     continue;
                 }
             };
@@ -433,46 +443,26 @@ impl TargetCommon {
     }
 
     fn enum_handle<'a>(&'a self) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>> {
-        use std::os::unix::fs::FileTypeExt;
+        use procfs::process::FDTarget;
 
-        let pid = self.process.pid;
         Ok(Box::new(
-            PidIter::proc_fd(pid)?
-                .filter_map(move |id| {
-                    Some((id, read_link(format!("/proc/{}/fd/{}", pid, id)).ok()?))
-                })
-                .map(|(id, path)| {
-                    let ps = &path.to_string_lossy();
-                    let ts = path
-                        .metadata()
-                        .map(|m| {
-                            let ft = m.file_type();
-                            if ft.is_fifo() {
-                                "FIFO"
-                            } else if ft.is_socket() {
-                                "Socket"
-                            } else if ft.is_block_device() {
-                                "Block"
-                            } else {
-                                "File"
-                            }
-                        })
-                        .unwrap_or_else(|_| {
-                            if ps.starts_with("socket:") {
-                                "Socket"
-                            } else if ps.starts_with("pipe:") {
-                                "Pipe"
-                            } else {
-                                ""
-                            }
-                        });
-                    HandleInfo {
-                        ty: 0,
-                        handle: id as _,
-                        type_name: ts.to_string(),
-                        name: ps.to_string(),
-                    }
-                }),
+            self.process.fd().context("fd iter")?.flatten().map(|fd| {
+                let (ty, name) = match fd.target {
+                    FDTarget::Path(p) => ("Path".to_string(), p.to_string_lossy().into_owned()),
+                    FDTarget::Socket(s) => ("Socket".to_string(), s.to_string()),
+                    FDTarget::Net(n) => ("Net".to_string(), n.to_string()),
+                    FDTarget::Pipe(p) => ("Pipe".to_string(), p.to_string()),
+                    FDTarget::AnonInode(i) => ("INode".to_string(), i),
+                    FDTarget::MemFD(m) => ("MemFD".to_string(), m),
+                    FDTarget::Other(a, b) => (a, b.to_string()),
+                };
+                HandleInfo {
+                    ty: 0,
+                    handle: fd.fd as _,
+                    name,
+                    type_name: ty,
+                }
+            }),
         ))
     }
 
@@ -751,11 +741,11 @@ impl GetProp for ProcessTarget {
 
 impl TargetControl for ProcessTarget {
     fn detach(&self) -> UDbgResult<()> {
+        let attached = self.base.status.get() == UDbgStatus::Attached;
         self.base.status.set(UDbgStatus::Detaching);
-        if self.waiting.get() {
+        if attached {
             self.breakk()
         } else {
-            // self.base.reply(UserReply::Run);
             Ok(())
         }
     }
@@ -778,10 +768,39 @@ impl TargetControl for ProcessTarget {
         //     }
         // }
         // return Err(UDbgError::system());
-        match unsafe { kill(self.process.pid, SIGSTOP) } {
-            0 => Ok(()),
-            code => Err(UDbgError::system()),
+        Ok(nix::sys::signal::kill(
+            Pid::from_raw(self.pid()),
+            Signal::SIGSTOP,
+        )?)
+    }
+
+    fn wait_exit(&self, timeout: Option<u32>) -> UDbgResult<Option<u32>> {
+        match nix::sys::wait::waitpid(Pid::from_raw(self.pid()), None).context("wait")? {
+            WaitStatus::Exited(_, code) => Ok(Some(code as _)),
+            err => Err(anyhow::anyhow!("unexpected status: {err:?}").into()),
         }
+    }
+
+    fn suspend(&self) -> UDbgResult<()> {
+        if self.status() == UDbgStatus::Detaching || self.status() == UDbgStatus::Attached {
+            return Err(anyhow::anyhow!("target is attached").into());
+        }
+
+        Ok(nix::sys::signal::kill(
+            Pid::from_raw(self.pid()),
+            Signal::SIGSTOP,
+        )?)
+    }
+
+    fn resume(&self) -> UDbgResult<()> {
+        if self.status() == UDbgStatus::Detaching || self.status() == UDbgStatus::Attached {
+            return Err(anyhow::anyhow!("target is attached").into());
+        }
+
+        Ok(nix::sys::signal::kill(
+            Pid::from_raw(self.pid()),
+            Signal::SIGCONT,
+        )?)
     }
 }
 
@@ -1025,6 +1044,7 @@ impl EventHandler for DefaultEngine {
                     .log_error_with(|err| format!("ptrace_detach({tid}) failed: {err:?}"));
             }
             self.targets.retain(|t| !Arc::ptr_eq(&this, t));
+            this.base.status.set(UDbgStatus::Detached);
         } else if buf.regs_dirty {
             buf.regs_dirty = false;
             buf.write_regs(self.tid);
@@ -1119,9 +1139,6 @@ impl UDbgEngine for DefaultEngine {
             .context("no attached target")?;
 
         self.tid = target.process.pid;
-        target.base.event_tid.set(self.tid);
-        target.base.status.set(UDbgStatus::Attached);
-
         let buf = &mut TraceBuf {
             callback,
             user: unsafe { core::mem::zeroed() },
@@ -1129,11 +1146,20 @@ impl UDbgEngine for DefaultEngine {
             regs_dirty: false,
             target,
         };
+
+        buf.target.base.event_tid.set(self.tid);
+        buf.target.insert_thread(self.tid);
+
+        if buf.target.base.status.get() == UDbgStatus::Detaching {
+            self.cont(None, buf);
+            return Ok(());
+        }
+        buf.target.base.status.set(UDbgStatus::Attached);
+
         buf.call(UEvent::InitBp);
         buf.call(UEvent::ProcessCreate);
-        buf.target.insert_thread(self.tid);
         buf.call(UEvent::ThreadCreate(self.tid));
-        ptrace::cont(Pid::from_raw(self.tid), None);
+        self.cont(None, buf);
 
         while let Some(s) = self.fetch(buf).and_then(|_| self.handle(buf)) {
             self.cont(s, buf);

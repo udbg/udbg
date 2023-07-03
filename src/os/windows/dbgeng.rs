@@ -649,7 +649,7 @@ impl BreakpointManager for DebugTarget {
         }
     }
 
-    fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint + 'a>> {
+    fn get_bp<'a>(&'a self, id: BpID) -> Option<Arc<dyn UDbgBreakpoint>> {
         // self.ctrl.get_bp_by_id(id).map_err(hresult_errcode)?;
         Some(Arc::new(IDbgBpWrapper(
             self.ctrl.get_bp_by_id(id).ok()?,

@@ -214,10 +214,10 @@ fn debug_wow64() -> anyhow::Result<()> {
     test_debug(r"C:\Windows\SysWOW64\cmd.exe", &["/c", "type", ARG])
 }
 
-#[cfg(feature = "llua")]
+#[cfg(feature = "elua")]
 #[test]
 fn target() {
-    use llua::*;
+    use elua::*;
     use udbg::lua::*;
 
     let mut engine = udbg::os::DefaultEngine::default();
@@ -250,17 +250,22 @@ fn target() {
     }
 }
 
-#[test]
-fn tracee() -> anyhow::Result<()> {
-    use std::cell::RefCell;
-
+fn init_tracee() -> &'static str {
     let mut tracee = env!("CARGO_BIN_EXE_tracee");
     if !Path::new(tracee).exists() {
         tracee = "./tracee";
         // assert!(Path::new(tracee).exists());
     }
+    tracee
+}
+
+#[test]
+fn tracee() -> anyhow::Result<()> {
+    use std::cell::RefCell;
+
     set_logger();
 
+    let tracee = init_tracee();
     let mut engine = udbg::os::DefaultEngine::default();
     engine.create(tracee, None, &[]).expect("create target");
 
@@ -302,4 +307,21 @@ fn tracee() -> anyhow::Result<()> {
     assert!(*st.child_count.borrow() > 1);
 
     Ok(())
+}
+
+#[test]
+fn detach() {
+    set_logger();
+
+    let tracee = init_tracee();
+    let mut engine = udbg::os::DefaultEngine::default();
+    let target = engine
+        .create(tracee, None, &["sleep", "0.5"])
+        .expect("create target");
+
+    target.detach().expect("detach");
+    engine
+        .event_loop(&mut |_, _| UserReply::Run(false))
+        .unwrap();
+    target.wait_exit(Some(2000)).expect("wait");
 }
