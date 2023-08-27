@@ -1,6 +1,6 @@
 [package]
 name = "udbg"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 license = "MIT"
 authors = ["metaworm <metaworm@outlook.com>"]
@@ -34,7 +34,7 @@ serde-value = '0.7'
 derive_more = '0.99'
 failed-result = '0.2'
 log-error = "0.1"
-goblin = {version = '~0.6'}
+goblin = {version = '~0.7'}
 memmap2 = {version = '~0.5'}
 cpp_demangle = {version = '0.4'}
 ezlua = {version = '0.3', features = ['vendored', 'thread'], optional = true}
@@ -56,7 +56,7 @@ winapi = {version = '0.3.9', features = [
     "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
     "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
 ]}
-windows = {version = '0.48', features = [
+windows = {version = '0.51', features = [
     "implement",
     "Win32_Foundation",
     "Win32_Security",
@@ -84,7 +84,7 @@ procfs = '0.15'
 [target.'cfg(target_os="macos")'.dependencies]
 mach2 = '0.4'
 scroll = "0.11"
-libproc = '0.13'
+libproc = '0.14'
 mach_o_sys = '0.1'
 
 [build-dependencies]
