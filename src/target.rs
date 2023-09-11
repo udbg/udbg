@@ -270,9 +270,10 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
 
     #[cfg(unix)]
     fn terminate(&self) -> anyhow::Result<()> {
-        unsafe {
-            libc::kill(self.tid, libc::SIGTERM);
-        }
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(self.tid),
+            nix::sys::signal::SIGTERM,
+        )?;
         Ok(())
     }
 }

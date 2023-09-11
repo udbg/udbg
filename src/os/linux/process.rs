@@ -170,7 +170,7 @@ impl Process {
         }))
     }
 
-    pub fn enum_module(&self) -> IoResult<impl Iterator<Item = Module> + '_> {
+    pub fn enum_module(&self) -> IoResult<impl Iterator<Item = ProcModule> + '_> {
         Ok(ModuleIter {
             f: Utils::file_lines(format!("/proc/{}/maps", self.pid))?,
             p: self,
@@ -181,7 +181,7 @@ impl Process {
         })
     }
 
-    pub fn find_module_by_name(&self, name: &str) -> Option<Module> {
+    pub fn find_module_by_name(&self, name: &str) -> Option<ProcModule> {
         self.enum_module().ok()?.find(|m| m.name.as_ref() == name)
     }
 }
@@ -258,7 +258,7 @@ impl<'a> LineParser<'a> {
     }
 }
 
-pub struct Module {
+pub struct ProcModule {
     pub base: usize,
     pub size: usize,
     pub name: Arc<str>,
@@ -296,7 +296,7 @@ impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
         return true;
     }
 
-    fn next_module(&mut self) -> Option<Module> {
+    fn next_module(&mut self) -> Option<ProcModule> {
         loop {
             if !self.cached {
                 self.cached = self.next_line();
@@ -327,7 +327,7 @@ impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
                     }
                     size += self.size;
                 }
-                return Some(Module {
+                return Some(ProcModule {
                     base,
                     size,
                     name,
@@ -341,7 +341,7 @@ impl<I: Iterator<Item = String>> ModuleIter<'_, I> {
 }
 
 impl<'a, I: Iterator<Item = String>> Iterator for ModuleIter<'a, I> {
-    type Item = Module;
+    type Item = ProcModule;
 
     fn next(&mut self) -> Option<Self::Item> {
         while let Some(r) = self.next_module() {
