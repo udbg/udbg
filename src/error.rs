@@ -3,6 +3,10 @@
 use std::{fmt, io};
 use thiserror::Error;
 
+// pub type UDbgError = anyhow::Error;
+// pub type UDbgResult<T> = anyhow::Result<T>;
+pub type UDbgResult<T> = Result<T, UDbgError>;
+
 #[derive(Error)]
 pub enum UDbgError {
     NotSupport,
@@ -59,8 +63,6 @@ impl fmt::Debug for UDbgError {
         }
     }
 }
-
-pub type UDbgResult<T> = std::result::Result<T, UDbgError>;
 
 impl UDbgError {
     #[inline]

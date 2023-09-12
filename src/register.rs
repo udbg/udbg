@@ -154,7 +154,7 @@ impl AbstractRegs for Arm64Regs {
 }
 
 #[cfg(windows)]
-use winapi::um::winnt::{CONTEXT, WOW64_CONTEXT};
+use windows::Win32::System::Diagnostics::Debug::{CONTEXT, WOW64_CONTEXT};
 
 // regid from capstone-rs
 pub mod regid {
@@ -1039,7 +1039,7 @@ mod plat {
                     let mut f = [0.0; 4];
                     _mm_storeu_ps(
                         f.as_mut_ptr(),
-                        transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]),
+                        transmute(from_raw_parts(&mutable(c).Anonymous.Anonymous.Xmm0, 100)[i]),
                     );
                     return CpuReg::Flt(f[0] as f64).into();
                 },
@@ -1048,7 +1048,7 @@ mod plat {
                     let mut f = [0.0; 2];
                     _mm_storeu_pd(
                         f.as_mut_ptr(),
-                        transmute(from_raw_parts(&mutable(c).u.s_mut().Xmm0, 100)[i]),
+                        transmute(from_raw_parts(&mutable(c).Anonymous.Anonymous.Xmm0, 100)[i]),
                     );
                     return CpuReg::Flt(f[0]).into();
                 },
@@ -1085,12 +1085,12 @@ mod plat {
                 X86_REG_EFLAGS => c.EFlags = val.into(),
                 X86_REG_MM0..=X86_REG_MM7 => unsafe {
                     let i = (id - X86_REG_MM0) as usize;
-                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] =
+                    from_raw_parts_mut(&mut c.Anonymous.Anonymous.Xmm0, 100)[i] =
                         transmute(_mm_set1_ps(val.as_flt() as f32));
                 },
                 X86_REG_XMM0..=X86_REG_XMM15 => unsafe {
                     let i = (id - X86_REG_XMM0) as usize;
-                    from_raw_parts_mut(&mut c.u.s_mut().Xmm0, 100)[i] =
+                    from_raw_parts_mut(&mut c.Anonymous.Anonymous.Xmm0, 100)[i] =
                         transmute(_mm_set1_pd(val.as_flt()));
                 },
                 _ => {}
@@ -1106,7 +1106,7 @@ mod plat {
                         let mut f = [0.0; 4];
                         _mm_storeu_ps(
                             f.as_mut_ptr(),
-                            transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]),
+                            transmute(from_raw_parts(&c.Anonymous.Anonymous.Xmm0, 100)[o]),
                         );
                         CpuReg::Flt(f[0] as f64)
                     })
@@ -1120,7 +1120,7 @@ mod plat {
                         let mut f = [0.0; 2];
                         _mm_storeu_pd(
                             f.as_mut_ptr(),
-                            transmute(from_raw_parts(&c.u.s_mut().Xmm0, 100)[o]),
+                            transmute(from_raw_parts(&c.Anonymous.Anonymous.Xmm0, 100)[o]),
                         );
                         CpuReg::Flt(f[0])
                     })
@@ -1153,14 +1153,14 @@ mod plat {
             if name.starts_with("mm") {
                 // float
                 usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
-                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] =
+                    from_raw_parts_mut(&mut self.Anonymous.Anonymous.Xmm0, 100)[o] =
                         transmute(_mm_set1_ps(val.as_flt() as f32));
                 });
             }
             if name.starts_with("xmm") {
                 // double
                 usize::from_str_radix(&name[3..], 10).map(|o| unsafe {
-                    from_raw_parts_mut(&mut self.u.s_mut().Xmm0, 100)[o] =
+                    from_raw_parts_mut(&mut self.Anonymous.Anonymous.Xmm0, 100)[o] =
                         transmute(_mm_set1_pd(val.as_flt()));
                 });
             }
@@ -1219,11 +1219,11 @@ mod plat {
                 ARM_REG_PC | COMM_REG_PC => c.Pc = val.into(),
                 ARM_REG_SP | ARM64_REG_SP | COMM_REG_SP => c.Sp = val.into(),
                 ARM64_REG_X0..=ARM64_REG_X28 => unsafe {
-                    from_raw_parts_mut(&mut c.u.s_mut().X0, 30)[(id - ARM64_REG_X0) as usize] =
-                        val.into();
+                    from_raw_parts_mut(&mut c.Anonymous.Anonymous.X0, 30)
+                        [(id - ARM64_REG_X0) as usize] = val.into();
                 },
-                ARM64_REG_FP => unsafe { c.u.s_mut().Fp = val.into() },
-                ARM64_REG_LR => unsafe { c.u.s_mut().Lr = val.into() },
+                ARM64_REG_FP => unsafe { c.Anonymous.Anonymous.Fp = val.into() },
+                ARM64_REG_LR => unsafe { c.Anonymous.Anonymous.Lr = val.into() },
                 _ => {}
             };
         }
@@ -1672,6 +1672,7 @@ pub trait UDbgRegs: crate::memory::AsByteArray {
     fn as_raw(&self) -> Option<&CONTEXT> {
         None
     }
+
     #[cfg(all(windows, target_arch = "x86_64"))]
     fn as_wow64(&self) -> Option<&WOW64_CONTEXT> {
         None

@@ -127,7 +127,7 @@ pub enum UEvent {
     #[display(fmt = "ProcessExit({_0})")]
     ProcessExit(u32),
     #[display(fmt = "Exception {{ first: {first}, code: 0x{code:x} }}")]
-    Exception { first: bool, code: u32 },
+    Exception { first: bool, code: i32 },
 }
 
 impl Unpin for UEvent {}

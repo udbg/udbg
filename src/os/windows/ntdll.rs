@@ -18,7 +18,6 @@ use core::slice::from_raw_parts;
 use failed_result::*;
 use winapi::shared::ntdef::*;
 use winapi::shared::{minwindef::LPVOID, ntstatus::STATUS_INFO_LENGTH_MISMATCH};
-use winapi::um::winnt::HANDLE;
 
 pub enum ProcessInfoClass {
     BasicInformation = 0,

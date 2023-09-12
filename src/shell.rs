@@ -139,7 +139,7 @@ pub trait UDbgUtil {
     fn enum_process_handle<'a>(
         &self,
         pid: pid_t,
-        p: winapi::um::winnt::HANDLE,
+        p: ::windows::Win32::Foundation::HANDLE,
     ) -> UDbgResult<Box<dyn Iterator<Item = HandleInfo> + 'a>>;
     #[cfg(not(windows))]
     fn enum_process_handle<'a>(

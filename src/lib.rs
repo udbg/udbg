@@ -27,8 +27,6 @@ extern crate derive_more;
 extern crate serde;
 #[macro_use]
 extern crate log;
-#[macro_use]
-extern crate cstrptr;
 
 pub mod breakpoint;
 #[cfg(feature = "capstone")]

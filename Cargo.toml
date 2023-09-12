@@ -11,7 +11,7 @@ repository = "https://github.com/udbg/udbg"
 include = ["/src", "README.md", "/examples"]
 
 [features]
-dbgeng = ['windows/Win32_System_Diagnostics_Debug']
+dbgeng = []
 
 [dependencies]
 cfg-if = '1.0'
@@ -40,7 +40,8 @@ cpp_demangle = {version = '0.4'}
 ezlua = {version = '0.3', features = ['vendored', 'thread'], optional = true}
 bitflags = {version = '2.0', features = ['serde']}
 capstone = {version = '0.11', optional = true}
-symbolic = {version = '12.1', features = ['demangle']}
+symbolic = {version = '12.1'}
+symbolic-demangle = {version = '12.1', default-features = false, features = ["cpp", "msvc", "rust"]}
 memoffset = {version = '0.9', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
 iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'std']}
@@ -50,24 +51,28 @@ name = 'tracee'
 path = 'src/tracee/main.rs'
 
 [target.'cfg(windows)'.dependencies]
-winapi = {version = '0.3.9', features = [
-    "winnt", "processthreadsapi", "psapi", "errhandlingapi", "winuser", "winbase", "fileapi",
-    "memoryapi", "dbghelp", "debugapi", "ioapiset", "winerror", "stringapiset", "winnls",
-    "shellapi", "winsvc", "synchapi", "wincrypt", 'softpub',
-    "shellscalingapi", "sysinfoapi", "heapapi", 'tlhelp32', 'wow64apiset', "securitybaseapi"
-]}
+winapi = {version = '0.3.9', features = ["winnt", "errhandlingapi", "winuser", "winbase", "stringapiset"]}
 windows = {version = '0.51', features = [
     "implement",
+    "Foundation",
+    "Foundation_Collections",
+    "Management_Deployment",
     "Win32_Foundation",
     "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Kernel",
+    "Win32_System_WinRT",
     "Win32_System_Threading",
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_Memory",
-    "Management_Deployment",
-    "Foundation",
-    "Foundation_Collections",
-    "Win32_System_WinRT",
+    "Win32_System_LibraryLoader",
+    "Win32_System_ProcessStatus",
+    "Win32_System_SystemServices",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    "Win32_System_WindowsProgramming",
 ]}
 ntapi = '0.4'
 unicase = '2.6'
@@ -91,9 +96,9 @@ mach_o_sys = '0.1'
 cc = '1'
 
 [dev-dependencies]
-flexi_logger = '0.25'
+flexi_logger = '0.26'
 tempfile = '3.6'
-minidump-writer = '0.8.0'
+minidump-writer = '0.8'
 rustyline = {version = '12'}
 clap = {version = "4", features = ["derive", "env"]}
 ezlua = {version = '0.3', features = ['vendored']}

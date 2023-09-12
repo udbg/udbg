@@ -426,6 +426,7 @@ impl TargetMemory for DebugTarget {
                     state: mbi.State.0,
                     protect: mbi.Protect.0,
                     alloc_protect: mbi.AllocationProtect.0,
+                    ..Default::default()
                 })
             // } else if self.ty == WDbgType::Kernel {
             //     Some(MemoryPage {
@@ -753,7 +754,7 @@ impl Target for DebugTarget {
         &self.base
     }
 
-    fn handle(&self) -> winapi::um::winnt::HANDLE {
+    fn handle(&self) -> ::windows::Win32::Foundation::HANDLE {
         unsafe { self.sysobjs.GetCurrentProcessHandle().unwrap_or_default() as _ }
     }
 

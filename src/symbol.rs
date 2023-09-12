@@ -452,7 +452,7 @@ pub trait TargetSymbol {
         base: usize,
         size: usize,
         path: &str,
-        file: winapi::um::winnt::HANDLE,
+        file: ::windows::Win32::Foundation::HANDLE,
     ) -> bool {
         false
     }
@@ -659,7 +659,7 @@ impl<T: UDbgModule + 'static> TargetSymbol for SymbolManager<T> {
         base: usize,
         size: usize,
         path: &str,
-        file: winapi::um::winnt::HANDLE,
+        file: ::windows::Win32::Foundation::HANDLE,
     ) -> bool {
         false
     }

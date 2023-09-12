@@ -1,75 +1,55 @@
 use super::*;
+use ::windows::{
+    core::PCSTR,
+    Win32::{
+        Foundation::{FARPROC, HANDLE, HMODULE, LUID},
+        Security::*,
+        Storage::FileSystem::QueryDosDeviceW,
+        System::{
+            Diagnostics::Debug::OutputDebugStringW, LibraryLoader::GetProcAddress, Threading::*,
+        },
+    },
+};
 use alloc::vec::Vec;
 use anyhow::Context;
 use core::marker::PhantomData;
 use core::mem;
 use core::ops::{Deref, DerefMut};
 use failed_result::*;
-use winapi::shared::ntdef::HANDLE;
-use winapi::shared::{minwindef::*, ntdef::*};
-use winapi::um::debugapi::OutputDebugStringW;
-use winapi::um::libloaderapi::GetProcAddress;
-use winapi::um::minwinbase::LPTHREAD_START_ROUTINE;
-use winapi::um::processthreadsapi::*;
+use winapi::shared::ntdef::{InitializeObjectAttributes, OBJECT_ATTRIBUTES, PUNICODE_STRING};
 
 #[inline]
 pub fn get_current_tid() -> u32 {
     unsafe { GetCurrentThreadId() }
 }
 
-pub fn get_proc_address(module: HMODULE, name: impl AsRef<[u8]>) -> FARPROC {
-    unsafe { GetProcAddress(module, name.as_ref().as_ptr() as *const i8) }
+pub fn get_proc_address(module: HMODULE, name: PCSTR) -> FARPROC {
+    unsafe { GetProcAddress(module, name) }
 }
 
-#[inline]
-pub fn open_thread(tid: u32, access: u32, inherit: bool) -> Handle {
-    unsafe { Handle::from_raw_handle(OpenThread(access, inherit as i32, tid)) }
-}
-
-pub fn suspend_thread(tid: u32) -> Handle {
-    let handle = open_thread(tid, THREAD_SUSPEND_RESUME, false);
-    if handle.is_valid() {
-        unsafe {
-            SuspendThread(handle.0);
-        }
-    }
-    return handle;
-}
-
-#[inline]
-pub fn resume_thread(handle: HANDLE) -> u32 {
-    unsafe { ResumeThread(handle) }
-}
-
-pub fn enable_privilege(name: &str) -> anyhow::Result<()> {
-    use winapi::um::securitybaseapi::AdjustTokenPrivileges;
-
+pub fn enable_privilege(name: PCWSTR) -> anyhow::Result<()> {
     unsafe {
-        let mut token: HANDLE = null_mut();
+        let mut token = HANDLE::default();
         let mut tp: TOKEN_PRIVILEGES = zeroed();
         let mut luid: LUID = zeroed();
 
         OpenProcessToken(GetCurrentProcess(), TOKEN_ADJUST_PRIVILEGES, &mut token)
-            .last_error()
             .context("open")?;
 
         let token = Handle(token);
-        LookupPrivilegeValueW(null(), name.to_unicode_with_null().as_ptr(), &mut luid)
-            .last_error()
-            .context("lookup")?;
+        LookupPrivilegeValueW(PCWSTR::null(), name, &mut luid).context("lookup")?;
 
         tp.PrivilegeCount = 1;
         tp.Privileges[0].Luid = luid;
         tp.Privileges[0].Attributes = SE_PRIVILEGE_ENABLED;
         AdjustTokenPrivileges(
             token.0,
-            0,
-            &mut tp,
+            false,
+            Some(&tp),
             size_of_val(&tp) as u32,
-            null_mut(),
-            null_mut(),
+            None,
+            None,
         )
-        .last_error()
         .context("adjust")?;
 
         Ok(())
@@ -81,7 +61,8 @@ pub fn enable_debug_privilege() -> anyhow::Result<()> {
 }
 
 pub fn output_debug_string<T: AsRef<str>>(s: T) {
-    unsafe { OutputDebugStringW(s.as_ref().to_unicode_with_null().as_ptr()) }
+    let s = s.as_ref().to_unicode_with_null();
+    unsafe { OutputDebugStringW(PCWSTR(s.as_ptr())) }
 }
 
 // refer to PhCallNtQueryObjectWithTimeout
@@ -94,27 +75,22 @@ pub fn call_with_timeout<T>(
     let (sender, recver) = channel::<T>();
     let (th, tid) = create_thread(move || match sender.send(callback()) {
         _ => {}
-    })?;
+    })
+    .ok()?;
     let result = recver.recv_timeout(timeout).ok();
     if result.is_none() {
-        unsafe {
-            TerminateThread(th, 1);
-        }
+        th.terminate(1).ok();
     }
     result
 }
 
 pub fn to_dos_path(path: &mut [u16]) -> Option<&[u16]> {
-    use winapi::um::fileapi::QueryDosDeviceW;
-
     let mut buf = [016; 100];
     for d in b'C'..=b'Z' {
         unsafe {
-            let mut len = QueryDosDeviceW(
-                [d as u16, b':' as u16, 0].as_ptr(),
-                buf.as_mut_ptr(),
-                buf.len() as u32,
-            ) as usize;
+            let mut len =
+                QueryDosDeviceW(PCWSTR([d as u16, b':' as u16, 0].as_ptr()), Some(&mut buf))
+                    as usize;
             while len > 0 && buf[len - 1] == 0 {
                 len -= 1;
             }
@@ -242,59 +218,15 @@ pub fn duplicate_process(pid: u32, access: u32) -> impl Iterator<Item = Handle> 
         if h.pid() < 5 {
             return None;
         }
-        let p = Handle(OpenProcess(PROCESS_DUP_HANDLE, 0, h.pid()));
-        if p.is_null() {
-            // error!("OpenProcess {} failed {}", h.pid(), get_last_error_string());
-            return None;
-        }
+        let p = Process::open(h.pid(), Some(PROCESS_DUP_HANDLE)).ok()?;
         // println!("Handle {:x} Access {:x} Pid {}", h.HandleValue, h.GrantedAccess, h.pid());
-
-        let mut target: HANDLE = null_mut();
-        if DuplicateHandle(
-            p.0,
-            h.HandleValue as HANDLE,
-            GetCurrentProcess(),
-            &mut target,
-            0,
-            0,
-            DUPLICATE_SAME_ACCESS,
-        ) == 0
-            || target.is_null()
-            || pid != GetProcessId(target)
-        {
-            CloseHandle(target);
+        let target = p
+            .duplicate_handle(HANDLE(h.HandleValue as _), GetCurrentProcess())
+            .ok()?;
+        if target.is_invalid() || pid != GetProcessId(target) {
             None
         } else {
             Some(Handle::from_raw_handle(target))
         }
     })
-}
-
-pub trait IntoThreadProc {
-    fn into_thread_fn(self) -> (LPTHREAD_START_ROUTINE, LPVOID);
-}
-
-impl<F: FnOnce()> IntoThreadProc for F {
-    fn into_thread_fn(self) -> (LPTHREAD_START_ROUTINE, LPVOID) {
-        unsafe extern "system" fn wrapper(p: LPVOID) -> u32 {
-            let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(transmute(p));
-            closure();
-            0
-        }
-        let closure: Box<dyn FnOnce()> = Box::new(self);
-        (Some(wrapper), Box::into_raw(Box::new(closure)) as LPVOID)
-    }
-}
-
-pub fn create_thread(proc: impl IntoThreadProc) -> Option<(HANDLE, u32)> {
-    unsafe {
-        let mut id: DWORD = 0;
-        let (f, p) = proc.into_thread_fn();
-        let handle = CreateThread(null_mut(), 0, f, p, 0, &mut id);
-        if handle.is_null() {
-            None
-        } else {
-            Some((handle, id))
-        }
-    }
 }

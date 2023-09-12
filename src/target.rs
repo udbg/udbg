@@ -192,13 +192,13 @@ pub struct ThreadData {
     pub tid: tid_t,
     pub wow64: bool,
     #[cfg(windows)]
-    pub handle: crate::os::windows::Handle,
+    pub handle: crate::os::ThreadHandle,
     #[cfg(target_os = "macos")]
     pub handle: crate::os::macos::ThreadAct,
 }
 
 #[cfg(windows)]
-pub type ThreadContext = winapi::um::winnt::CONTEXT;
+pub type ThreadContext = windows::Win32::System::Diagnostics::Debug::CONTEXT;
 #[cfg(windows)]
 pub type ThreadContext32 = super::register::CONTEXT32;
 
@@ -263,16 +263,17 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
     }
 
     #[cfg(windows)]
-    fn terminate(&self) -> IoResult<i32> {
-        use failed_result::LastError;
-        use winapi::um::processthreadsapi::TerminateThread;
-
-        unsafe { TerminateThread(*self.handle, 0).last_error() }
+    fn terminate(&self) -> anyhow::Result<()> {
+        self.handle.terminate(2)?;
+        Ok(())
     }
 
     #[cfg(unix)]
-    fn terminate(&self) -> IoResult<i32> {
-        Ok(unsafe { libc::kill(self.tid, libc::SIGTERM) })
+    fn terminate(&self) -> anyhow::Result<()> {
+        unsafe {
+            libc::kill(self.tid, libc::SIGTERM);
+        }
+        Ok(())
     }
 }
 
@@ -386,8 +387,8 @@ pub trait Target: GetProp + TargetMemory + TargetControl {
 
     /// Raw process handle, if target is a process
     #[cfg(windows)]
-    fn handle(&self) -> winapi::um::winnt::HANDLE {
-        core::ptr::null_mut()
+    fn handle(&self) -> ::windows::Win32::Foundation::HANDLE {
+        Default::default()
     }
 
     fn enum_thread(
