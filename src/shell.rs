@@ -28,12 +28,14 @@ pub struct ProcessInfo {
 #[repr(C)]
 #[derive(Debug, Serialize, Deserialize)]
 pub struct HandleInfo {
+    /// Process ID of this handle
+    pub pid: crate::os::pid_t,
     /// Type number of this handle
     pub ty: u32,
     /// Handle/FD value
     pub handle: usize,
     /// Type name of this handle
-    pub type_name: String,
+    pub type_name: Arc<str>,
     /// Name of this handle, maybe file path, pipe name, socket number, etc.
     pub name: String,
 }

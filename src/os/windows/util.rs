@@ -16,6 +16,7 @@ use core::marker::PhantomData;
 use core::mem;
 use core::ops::{Deref, DerefMut};
 use failed_result::*;
+use std::{collections::HashMap, time::Duration};
 use winapi::shared::ntdef::{InitializeObjectAttributes, OBJECT_ATTRIBUTES, PUNICODE_STRING};
 
 #[inline]
@@ -221,12 +222,98 @@ pub fn duplicate_process(pid: u32, access: u32) -> impl Iterator<Item = Handle> 
         let p = Process::open(h.pid(), Some(PROCESS_DUP_HANDLE)).ok()?;
         // println!("Handle {:x} Access {:x} Pid {}", h.HandleValue, h.GrantedAccess, h.pid());
         let target = p
-            .duplicate_handle(HANDLE(h.HandleValue as _), GetCurrentProcess())
+            .duplicate_handle_to_current(HANDLE(h.HandleValue as _))
             .ok()?;
-        if target.is_invalid() || pid != GetProcessId(target) {
+        if target.is_invalid() || pid != GetProcessId(*target) {
             None
         } else {
-            Some(Handle::from_raw_handle(target))
+            Some(target)
         }
     })
+}
+
+#[derive(Debug, Default)]
+pub struct HandleTypeCache {
+    pub cache: HashMap<u32, Arc<str>>,
+}
+
+impl HandleTypeCache {
+    pub fn cache_get(
+        &mut self,
+        ps: &Process,
+        info: &SYSTEM_HANDLE_TABLE_ENTRY_INFO,
+    ) -> Option<HandleInfo> {
+        let handle = ps
+            .duplicate_handle_to_current(HANDLE(info.HandleValue as _))
+            .ok()?;
+        if handle.is_invalid() {
+            return None;
+        }
+
+        let et = self
+            .cache
+            .entry(info.ObjectTypeIndex as u32)
+            .or_insert_with(|| {
+                query_object_type(handle.as_winapi())
+                    .map(|t| t.TypeName.to_string())
+                    .unwrap_or_default()
+                    .into()
+            });
+        let type_name = et.clone();
+        let name = if type_name.as_ref() == "Process" {
+            Process { handle }.image_path().unwrap_or_default()
+        } else {
+            query_object_name_timeout(*handle)
+        };
+        Some(HandleInfo {
+            pid: info.pid(),
+            name,
+            type_name,
+            ty: info.ObjectTypeIndex as u32,
+            handle: info.HandleValue as usize,
+        })
+    }
+}
+
+pub fn query_object_name_timeout(handle: HANDLE) -> String {
+    call_with_timeout(Duration::from_millis(10), || {
+        query_object_name(handle.0 as _)
+            .ok()
+            .map(|r| {
+                // r.as_mut_slice().and_then(to_dos_path).map(|p| p.to_utf8()).unwrap_or_else(|| r.to_string())
+                r.to_string()
+            })
+            .unwrap_or_default()
+    })
+    .unwrap_or_default()
+}
+
+pub fn enum_all_handles<'a>() -> impl Iterator<Item = HandleInfo> + 'a {
+    let mut type_cache = HandleTypeCache::default();
+    let mut ps_cache = HashMap::<u32, Process>::new();
+    system_handle_information().filter_map(move |h| {
+        let mut ps_handle = ps_cache.get(&h.pid());
+        if ps_handle.is_none() {
+            let ph = Process::open(h.pid(), Some(PROCESS_DUP_HANDLE));
+            if let Ok(ph) = ph {
+                ps_cache.insert(h.pid(), ph);
+            }
+            ps_handle = ps_cache.get(&h.pid())
+        }
+        type_cache.cache_get(ps_handle?, h)
+    })
+}
+
+#[inline]
+pub fn map_or_open(file: HANDLE, path: &str) -> anyhow::Result<memmap2::Mmap> {
+    use std::os::windows::io::FromRawHandle;
+
+    if file.is_invalid() {
+        Utils::mapfile(path)
+    } else {
+        unsafe {
+            let f = std::fs::File::from_raw_handle(file.0 as _);
+            memmap2::Mmap::map(&f).map_err(Into::into)
+        }
+    }
 }

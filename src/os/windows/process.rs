@@ -20,8 +20,17 @@ use windows::Win32::{
     },
 };
 
-use super::{ntdll::ProcessInfoClass, toolhelp::*, util, Handle};
-use crate::{error::*, memory::*, shell::ProcessInfo, string::ToMbstr};
+use super::{
+    ntdll::{ProcessInfoClass, SystemHandleInformation},
+    toolhelp::*,
+    util, Handle,
+};
+use crate::{
+    error::*,
+    memory::*,
+    shell::{HandleInfo, ProcessInfo},
+    string::ToMbstr,
+};
 
 #[derive(Debug, Clone)]
 pub struct Process {
@@ -197,16 +206,17 @@ impl Process {
         }
     }
 
-    pub fn duplicate_handle(
-        &self,
-        src_handle: HANDLE,
-        dst_ps: HANDLE,
-    ) -> windows::core::Result<HANDLE> {
+    pub fn duplicate_handle_to_current(&self, src: HANDLE) -> windows::core::Result<Handle> {
+        self.duplicate_handle(src, unsafe { GetCurrentProcess() })
+            .map(|x| unsafe { Handle::from_raw_handle(x) })
+    }
+
+    pub fn duplicate_handle(&self, src: HANDLE, dst_ps: HANDLE) -> windows::core::Result<HANDLE> {
         let mut handle = HANDLE::default();
         unsafe {
             DuplicateHandle(
                 *self.handle,
-                src_handle,
+                src,
                 dst_ps,
                 &mut handle,
                 0,
@@ -371,6 +381,17 @@ impl Process {
                 None
             }
         }
+    }
+
+    pub fn enum_handle(&self, pid: Option<u32>) -> impl Iterator<Item = HandleInfo> + '_ {
+        let pid = pid.unwrap_or_else(|| self.pid());
+        let mut type_cache = util::HandleTypeCache::default();
+        super::ntdll::system_handle_information().filter_map(move |h| {
+            if h.pid() != pid {
+                return None;
+            }
+            type_cache.cache_get(self, h)
+        })
     }
 }
 
