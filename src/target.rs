@@ -268,7 +268,12 @@ pub trait UDbgThread: Deref<Target = ThreadData> + GetProp {
         Ok(())
     }
 
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    fn terminate(&self) -> anyhow::Result<()> {
+        Err(UDbgError::NotSupport.into())
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
     fn terminate(&self) -> anyhow::Result<()> {
         nix::sys::signal::kill(
             nix::unistd::Pid::from_raw(self.tid),

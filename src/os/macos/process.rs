@@ -305,9 +305,10 @@ impl Process {
                 fdt => format!("[{fdt:?}]"),
             };
             HandleInfo {
+                pid,
                 ty: fd.proc_fdtype,
                 handle: fd.proc_fd as _,
-                type_name,
+                type_name: type_name.into(),
                 name,
             }
         }))
