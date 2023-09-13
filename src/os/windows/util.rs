@@ -1,3 +1,4 @@
+use super::string::UnicodeUtil;
 use super::*;
 use ::windows::{
     core::PCSTR,
@@ -250,7 +251,7 @@ impl HandleTypeCache {
             return None;
         }
 
-        let et = self
+        let type_name = self
             .cache
             .entry(info.ObjectTypeIndex as u32)
             .or_insert_with(|| {
@@ -258,12 +259,29 @@ impl HandleTypeCache {
                     .map(|t| t.TypeName.to_string())
                     .unwrap_or_default()
                     .into()
-            });
-        let type_name = et.clone();
+            })
+            .clone();
         let name = if type_name.as_ref() == "Process" {
             Process { handle }.image_path().unwrap_or_default()
         } else {
-            query_object_name_timeout(*handle)
+            call_with_timeout(Duration::from_millis(10), || {
+                query_object_name(handle.as_winapi())
+                    .ok()
+                    .map(|r| {
+                        if type_name.as_ref() == "File" {
+                            r.as_slice_with_null()
+                                .and_then(|x| unsafe {
+                                    #[allow(mutable_transmutes)]
+                                    to_dos_path(core::mem::transmute(x)).map(|p| p.to_utf8())
+                                })
+                                .unwrap_or_else(|| r.to_string())
+                        } else {
+                            r.to_string()
+                        }
+                    })
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default()
         };
         Some(HandleInfo {
             pid: info.pid(),
@@ -273,19 +291,6 @@ impl HandleTypeCache {
             handle: info.HandleValue as usize,
         })
     }
-}
-
-pub fn query_object_name_timeout(handle: HANDLE) -> String {
-    call_with_timeout(Duration::from_millis(10), || {
-        query_object_name(handle.0 as _)
-            .ok()
-            .map(|r| {
-                // r.as_mut_slice().and_then(to_dos_path).map(|p| p.to_utf8()).unwrap_or_else(|| r.to_string())
-                r.to_string()
-            })
-            .unwrap_or_default()
-    })
-    .unwrap_or_default()
 }
 
 pub fn enum_all_handles<'a>() -> impl Iterator<Item = HandleInfo> + 'a {
