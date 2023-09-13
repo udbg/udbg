@@ -448,15 +448,16 @@ impl TargetCommon {
         Ok(Box::new(
             self.process.fd().context("fd iter")?.flatten().map(|fd| {
                 let (ty, name) = match fd.target {
-                    FDTarget::Path(p) => ("Path".to_string(), p.to_string_lossy().into_owned()),
-                    FDTarget::Socket(s) => ("Socket".to_string(), s.to_string()),
-                    FDTarget::Net(n) => ("Net".to_string(), n.to_string()),
-                    FDTarget::Pipe(p) => ("Pipe".to_string(), p.to_string()),
-                    FDTarget::AnonInode(i) => ("INode".to_string(), i),
-                    FDTarget::MemFD(m) => ("MemFD".to_string(), m),
-                    FDTarget::Other(a, b) => (a, b.to_string()),
+                    FDTarget::Path(p) => ("Path".into(), p.to_string_lossy().into_owned()),
+                    FDTarget::Socket(s) => ("Socket".into(), s.to_string()),
+                    FDTarget::Net(n) => ("Net".into(), n.to_string()),
+                    FDTarget::Pipe(p) => ("Pipe".into(), p.to_string()),
+                    FDTarget::AnonInode(i) => ("INode".into(), i),
+                    FDTarget::MemFD(m) => ("MemFD".into(), m),
+                    FDTarget::Other(a, b) => (a.into(), b.to_string()),
                 };
                 HandleInfo {
+                    pid: self.process.pid,
                     ty: 0,
                     handle: fd.fd as _,
                     name,
