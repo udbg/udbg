@@ -9,6 +9,7 @@ pub use ntapi::ntpebteb::*;
 pub use ntapi::ntpsapi::*;
 pub use ntapi::ntzwapi::*;
 
+// use ::windows::Win32::Foundation::UNICODE_STRING;
 use alloc::string::*;
 use alloc::vec::Vec;
 use core::marker::PhantomData;
@@ -111,7 +112,7 @@ pub fn read_object_info(handle: HANDLE, info: u32, extra_size: usize) -> Windows
             let err = NtQueryObject(
                 handle,
                 info,
-                transmute(result.as_mut_ptr()),
+                result.as_mut_ptr().cast(),
                 result.len() as u32,
                 &mut size,
             );
@@ -231,12 +232,9 @@ impl<'a> Iterator for SystemHandleInfoIter<'a> {
         unsafe {
             let this = &*self.ptr;
             let r = from_raw_parts(this.Handles.as_ptr(), this.NumberOfHandles as usize);
-            if self.i >= r.len() {
-                return None;
-            }
-            let result = Some(&r[self.i]);
+            let result = r.get(self.i)?;
             self.i += 1;
-            result
+            Some(result)
         }
     }
 }
@@ -251,7 +249,7 @@ pub fn read_system_information(
         let err = loop {
             let err = ZwQuerySystemInformation(
                 si,
-                transmute(result.as_mut_ptr()),
+                result.as_mut_ptr().cast(),
                 result.len() as u32,
                 &mut size,
             );
@@ -268,11 +266,11 @@ pub fn read_system_information(
 pub fn system_handle_information<'a>() -> SystemHandleInfoIter<'a> {
     let mut size: ULONG = 0;
     unsafe {
-        let mut result = vec![0u8; 16 * 1024];
+        let mut result = vec![0u8; 4 * 1024];
         let err = loop {
             let err = ZwQuerySystemInformation(
                 SystemHandleInformation,
-                transmute(result.as_mut_ptr()),
+                result.as_mut_ptr().cast(),
                 result.len() as u32,
                 &mut size,
             );
@@ -512,7 +510,7 @@ pub fn query_working_set_ex(
             handle,
             null_mut(),
             MemoryWorkingSetExInformation as u32,
-            transmute(infos.as_mut_ptr()),
+            infos.as_mut_ptr().cast(),
             infos.len() * size_of::<MEMORY_WORKING_SET_EX_INFORMATION>(),
             &mut len,
         )

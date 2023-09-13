@@ -1,15 +1,11 @@
-use std::{
-    fmt::Debug,
-    os::windows::prelude::{
-        AsHandle, AsRawHandle, BorrowedHandle, FromRawHandle, IntoRawHandle, OwnedHandle, RawHandle,
-    },
-};
+use std::{fmt::Debug, os::windows::prelude::*};
 
 use windows::Win32::{
     Foundation::{
         CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE, INVALID_HANDLE_VALUE,
+        WAIT_EVENT,
     },
-    System::Threading::GetCurrentProcess,
+    System::Threading::{GetCurrentProcess, WaitForSingleObject, INFINITE},
 };
 
 #[derive(Deref)]
@@ -30,6 +26,10 @@ impl Handle {
 
     pub fn is_null(&self) -> bool {
         self.0 .0 == 0
+    }
+
+    pub fn as_windows_handle(&self) -> HANDLE {
+        self.0
     }
 
     pub fn as_winapi(&self) -> winapi::um::winnt::HANDLE {
@@ -72,6 +72,12 @@ impl Handle {
     }
 }
 
+impl Handle {
+    pub fn wait_single(&self, timeout: Option<u32>) -> WAIT_EVENT {
+        unsafe { WaitForSingleObject(self.0, timeout.unwrap_or(INFINITE)) }
+    }
+}
+
 impl Debug for Handle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.0.fmt(f)
@@ -109,3 +115,25 @@ impl IntoRawHandle for Handle {
         todo!()
     }
 }
+
+macro_rules! typed_handle {
+    ($ty:ident: $handle:ty) => {
+        #[derive(Debug, Clone, Deref)]
+        pub struct $ty(pub $handle);
+
+        impl $ty {
+            #[inline]
+            pub unsafe fn borrow_raw(handle: &::windows::Win32::Foundation::HANDLE) -> &Self {
+                Self::borrow_handle(<$handle>::borrow(handle))
+            }
+
+            #[inline]
+            pub unsafe fn borrow_handle(handle: &$handle) -> &Self {
+                &*(handle as *const _ as *const Self)
+            }
+        }
+    };
+}
+
+typed_handle!(ThreadHandle: Handle);
+typed_handle!(EventHandle: Handle);

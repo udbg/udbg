@@ -18,7 +18,7 @@ use windows::{
 
 use super::{
     ntdll::{query_thread, SystemThreadInformation, ThreadInfoClass},
-    Align16, Handle, Process,
+    Align16, Handle, Process, ThreadHandle,
 };
 use crate::{
     error::*,
@@ -27,20 +27,7 @@ use crate::{
     target::{GetProp, ThreadContext, ThreadContext32, ThreadData, UDbgThread},
 };
 
-#[derive(Debug, Clone, Deref)]
-pub struct ThreadHandle(pub Handle);
-
 impl ThreadHandle {
-    #[inline]
-    pub unsafe fn borrow_raw(handle: &windows::Win32::Foundation::HANDLE) -> &Self {
-        Self::borrow_handle(Handle::borrow(handle))
-    }
-
-    #[inline]
-    pub unsafe fn borrow_handle(handle: &Handle) -> &Self {
-        &*(handle as *const _ as *const Self)
-    }
-
     #[inline]
     pub fn open(
         tid: u32,
@@ -51,6 +38,40 @@ impl ThreadHandle {
             OpenThread(access, inherit, tid)
                 .map(|x| Handle::from_raw_handle(x))
                 .map(Self)
+        }
+    }
+
+    pub fn create_thread(
+        proc: impl IntoThreadProc,
+    ) -> ::windows::core::Result<(ThreadHandle, u32)> {
+        unsafe {
+            let mut id: u32 = 0;
+            let (f, p) = proc.into_thread_fn();
+            let handle = CreateThread(None, 0, f, Some(p), Default::default(), Some(&mut id))?;
+            Ok((ThreadHandle(Handle::from_raw_handle(handle)), id))
+        }
+    }
+
+    pub(crate) fn create_thread_part(
+        proc: impl IntoThreadProcPart,
+    ) -> ::windows::core::Result<(ThreadHandle, u32, Box<Box<dyn Fn()>>)> {
+        unsafe {
+            let mut id: u32 = 0;
+            let (f, p) = proc.into_thread_part();
+            let param = Box::into_raw(Box::new(p));
+            let handle = CreateThread(
+                None,
+                0,
+                f,
+                Some(param.cast()),
+                Default::default(),
+                Some(&mut id),
+            )?;
+            Ok((
+                ThreadHandle(Handle::from_raw_handle(handle)),
+                id,
+                Box::from_raw(param),
+            ))
         }
     }
 
@@ -85,14 +106,31 @@ impl ThreadHandle {
     }
 }
 
+pub trait IntoThreadProcPart {
+    fn into_thread_part(self) -> (LPTHREAD_START_ROUTINE, Box<dyn Fn()>);
+}
+
 pub trait IntoThreadProc {
     fn into_thread_fn(self) -> (LPTHREAD_START_ROUTINE, *const c_void);
+}
+
+impl<F: Fn() + 'static> IntoThreadProcPart for F {
+    fn into_thread_part(self) -> (LPTHREAD_START_ROUTINE, Box<dyn Fn()>) {
+        unsafe extern "system" fn wrapper(p: *mut c_void) -> u32 {
+            let mut closure: Box<Box<dyn Fn()>> = Box::from_raw(p.cast());
+            closure.as_mut()();
+            core::mem::forget(closure);
+            0
+        }
+        let closure: Box<dyn Fn()> = Box::new(self);
+        (Some(wrapper), Box::new(closure))
+    }
 }
 
 impl<F: FnOnce()> IntoThreadProc for F {
     fn into_thread_fn(self) -> (LPTHREAD_START_ROUTINE, *const c_void) {
         unsafe extern "system" fn wrapper(p: *mut c_void) -> u32 {
-            let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(core::mem::transmute(p));
+            let closure: Box<Box<dyn FnOnce()>> = Box::from_raw(p.cast());
             closure();
             0
         }
@@ -101,15 +139,6 @@ impl<F: FnOnce()> IntoThreadProc for F {
             Some(wrapper),
             Box::into_raw(Box::new(closure)) as *const c_void,
         )
-    }
-}
-
-pub fn create_thread(proc: impl IntoThreadProc) -> ::windows::core::Result<(ThreadHandle, u32)> {
-    unsafe {
-        let mut id: u32 = 0;
-        let (f, p) = proc.into_thread_fn();
-        let handle = CreateThread(None, 0, f, Some(p), Default::default(), Some(&mut id))?;
-        Ok((ThreadHandle(Handle::from_raw_handle(handle)), id))
     }
 }
 

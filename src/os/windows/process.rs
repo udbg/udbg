@@ -71,7 +71,9 @@ impl Process {
     pub fn open(pid: u32, access: Option<PROCESS_ACCESS_RIGHTS>) -> anyhow::Result<Process> {
         unsafe {
             let handle = OpenProcess(access.unwrap_or(PROCESS_ALL_ACCESS), false, pid)?;
-            Self::from_handle(Handle::from_raw_handle(handle)).context("from handle")
+            Ok(Self {
+                handle: Handle::from_raw_handle(handle),
+            })
         }
     }
 

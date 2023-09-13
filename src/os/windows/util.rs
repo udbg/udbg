@@ -68,22 +68,29 @@ pub fn output_debug_string<T: AsRef<str>>(s: T) {
 }
 
 // refer to PhCallNtQueryObjectWithTimeout
-pub fn call_with_timeout<T>(
+pub fn call_with_timeout<T: 'static>(
     timeout: std::time::Duration,
-    callback: impl FnOnce() -> T,
+    callback: impl Fn() -> T + 'static,
 ) -> Option<T> {
-    use std::sync::mpsc::*;
+    let event = EventHandle::create(false, false, PCWSTR::null()).ok()?;
+    let mut result = None::<T>;
 
-    let (sender, recver) = channel::<T>();
-    let (th, tid) = create_thread(move || match sender.send(callback()) {
-        _ => {}
+    let resultref = &mut result as *mut Option<T>;
+    let eventref = event.as_windows_handle();
+    let (th, tid, closure) = ThreadHandle::create_thread_part(move || unsafe {
+        resultref.as_mut().unwrap().replace(callback());
+        EventHandle::borrow_raw(&eventref).signal().ok();
     })
     .ok()?;
-    let result = recver.recv_timeout(timeout).ok();
-    if result.is_none() {
-        th.terminate(1).ok();
+
+    if ::windows::Win32::Foundation::WAIT_TIMEOUT
+        == event.wait_single(Some(timeout.as_millis() as u32))
+    {
+        th.terminate(1).ok()?;
+        None
+    } else {
+        result
     }
-    result
 }
 
 pub fn to_dos_path(path: &mut [u16]) -> Option<&[u16]> {
@@ -264,11 +271,12 @@ impl HandleTypeCache {
         let name = if type_name.as_ref() == "Process" {
             Process { handle }.image_path().unwrap_or_default()
         } else {
-            call_with_timeout(Duration::from_millis(10), || {
+            let need_dospath = type_name.as_ref() == "File";
+            call_with_timeout(Duration::from_millis(10), move || {
                 query_object_name(handle.as_winapi())
                     .ok()
                     .map(|r| {
-                        if type_name.as_ref() == "File" {
+                        if need_dospath {
                             r.as_slice_with_null()
                                 .and_then(|x| unsafe {
                                     #[allow(mutable_transmutes)]
@@ -297,13 +305,20 @@ pub fn enum_all_handles<'a>() -> impl Iterator<Item = HandleInfo> + 'a {
     let mut type_cache = HandleTypeCache::default();
     let mut ps_cache = HashMap::<u32, Process>::new();
     system_handle_information().filter_map(move |h| {
-        let mut ps_handle = ps_cache.get(&h.pid());
+        let pid = h.pid();
+        if pid < 5 {
+            return None;
+        }
+        let mut ps_handle = ps_cache.get(&pid);
         if ps_handle.is_none() {
-            let ph = Process::open(h.pid(), Some(PROCESS_DUP_HANDLE));
+            let ph = Process::open(
+                pid,
+                Some(PROCESS_DUP_HANDLE | PROCESS_QUERY_LIMITED_INFORMATION),
+            );
             if let Ok(ph) = ph {
-                ps_cache.insert(h.pid(), ph);
+                ps_cache.insert(pid, ph);
             }
-            ps_handle = ps_cache.get(&h.pid())
+            ps_handle = ps_cache.get(&pid)
         }
         type_cache.cache_get(ps_handle?, h)
     })

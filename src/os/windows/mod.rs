@@ -9,6 +9,7 @@ mod util;
 
 #[cfg(feature = "dbgeng")]
 pub mod dbgeng;
+pub mod event;
 pub mod ntdll;
 pub mod string;
 pub mod symbol;
