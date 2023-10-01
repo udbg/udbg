@@ -1,6 +1,6 @@
 [package]
 name = "udbg"
-version = "0.3.0"
+version = "0.3.1"
 edition = "2021"
 license = "MIT"
 authors = ["metaworm <metaworm@outlook.com>"]
@@ -28,7 +28,7 @@ futures = '0.3'
 thiserror = '1.0'
 cstrptr = '0.1'
 crossbeam = '0.8'
-minidump = '0.17'
+minidump = '~0.17'
 parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
@@ -44,7 +44,7 @@ symbolic = {version = '12.1'}
 symbolic-demangle = {version = '12.1', default-features = false, features = ["cpp", "msvc", "rust"]}
 memoffset = {version = '0.9', features = ['unstable_const']}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
-iced-x86 = {version = '1.11', default-features = false, features = ['decoder', 'intel', 'std']}
+iced-x86 = {version = '1.20', default-features = false, features = ['decoder', 'intel', 'std']}
 
 [[bin]]
 name = 'tracee'
@@ -96,7 +96,7 @@ mach_o_sys = '0.1'
 cc = '1'
 
 [dev-dependencies]
-flexi_logger = '0.26'
+flexi_logger = '0.27'
 tempfile = '3.6'
 minidump-writer = '0.8'
 rustyline = {version = '12'}

@@ -52,6 +52,11 @@ impl Handle {
         Self(handle)
     }
 
+    #[inline(always)]
+    pub unsafe fn from_winapi_handle(handle: winapi::um::winnt::HANDLE) -> Self {
+        Self(HANDLE(handle as _))
+    }
+
     pub unsafe fn clone_from_raw(handle: HANDLE) -> windows::core::Result<Self> {
         let mut result = HANDLE::default();
         DuplicateHandle(
