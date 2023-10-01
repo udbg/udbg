@@ -132,7 +132,7 @@ pub trait SymbolFile {
     }
 }
 
-/// symbol information
+/// Symbol
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Symbol {
     pub offset: u32,
@@ -148,29 +148,75 @@ impl crate::range::RangeValue for Symbol {
     }
 }
 
-/// symbol information with module
-#[derive(Serialize, Deserialize)]
+/// Symbol information of an address carries the module info
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SymbolInfo {
     pub module: Arc<str>,
     pub symbol: Arc<str>,
-    pub offset: usize,
     pub mod_base: usize,
+    pub offset: u32,
+    pub mod_offset: u32,
+}
+
+impl std::fmt::Display for SymbolInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.format(f)
+    }
 }
 
 impl SymbolInfo {
-    pub fn to_string(&self, addr: usize) -> String {
+    pub fn from_symbol(s: Symbol, addr: usize, m: &ModuleData, max_offset: usize) -> Option<Self> {
+        let mod_offset = addr - m.base;
+        let offset = mod_offset - s.offset as usize;
+        if max_offset == 0 && offset != 0 {
+            return None;
+        }
+        if s.len != SYM_NOLEN && offset > s.len as usize {
+            return Some(Self::from_module(addr, m));
+        }
+        let symbol = s.name.clone();
+        Some(Self {
+            mod_base: m.base,
+            offset: offset as u32,
+            module: m.name.clone(),
+            symbol,
+            mod_offset: mod_offset as u32,
+        })
+    }
+
+    pub fn from_module(addr: usize, m: &ModuleData) -> Self {
+        Self {
+            mod_base: m.base,
+            offset: 0,
+            mod_offset: (addr - m.base) as u32,
+            module: m.name.clone(),
+            symbol: "".into(),
+        }
+    }
+
+    pub fn format(&self, w: &mut dyn std::fmt::Write) -> std::fmt::Result {
         if self.symbol.len() > 0 {
             if self.offset == 0 {
-                format!("{}!{}", self.module, self.symbol)
+                write!(w, "{}!{}", self.module, self.symbol)
             } else {
-                format!("{}!{}+{:x}", self.module, self.symbol, self.offset)
+                write!(w, "{}!{}+{:x}", self.module, self.symbol, self.offset)
             }
         } else if self.module.len() > 0 {
-            if addr == self.mod_base {
-                self.module.to_string()
+            if self.mod_offset == 0 {
+                write!(w, "{}", self.module)
             } else {
-                format!("{}+{:x}", self.module, addr - self.mod_base)
+                write!(w, "{}+{:x}", self.module, self.mod_offset)
             }
+        } else {
+            Ok(())
+        }
+    }
+
+    pub fn to_string(&self, addr: usize) -> String {
+        if self.symbol.len() > 0 || self.module.len() > 0 {
+            let mut result = String::new();
+            let _ = self.format(&mut result);
+            result
         } else {
             format!("{:x}", addr)
         }
@@ -558,29 +604,8 @@ impl<T: UDbgModule> ModuleManager<T> {
 
     pub fn get_symbol_info(&self, addr: usize, max_offset: usize) -> Option<SymbolInfo> {
         self.find_module(addr).and_then(|mm| {
-            let m = mm.data();
-            let moffset = addr - m.base;
-            mm.find_symbol(moffset, max_offset).and_then(|s| {
-                let offset = moffset - s.offset as usize;
-                if max_offset == 0 && offset != 0 {
-                    return None;
-                }
-                if s.len != SYM_NOLEN && offset > s.len as usize {
-                    return Some(SymbolInfo {
-                        mod_base: m.base,
-                        offset: moffset,
-                        module: m.name.clone(),
-                        symbol: "".into(),
-                    });
-                }
-                let symbol = s.name.clone();
-                Some(SymbolInfo {
-                    mod_base: m.base,
-                    offset,
-                    module: m.name.clone(),
-                    symbol,
-                })
-            })
+            mm.find_symbol(addr - mm.data().base, max_offset)
+                .and_then(|s| SymbolInfo::from_symbol(s, addr, mm.data(), max_offset))
         })
     }
 }

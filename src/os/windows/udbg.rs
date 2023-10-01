@@ -662,14 +662,6 @@ impl TargetCommon {
         self.process.virtual_query(address)
     }
 
-    pub fn to_syminfo(mut sym: SymbolInfo, addr: usize, max_offset: usize) -> SymbolInfo {
-        if sym.symbol.len() > 0 && sym.offset > max_offset {
-            sym.symbol = "".into();
-            sym.offset = addr - sym.mod_base;
-        }
-        sym
-    }
-
     pub fn get_symbol(&self, addr: usize, max_offset: usize) -> Option<SymbolInfo> {
         self.symgr.base.read().get_symbol_info(addr, max_offset)
     }

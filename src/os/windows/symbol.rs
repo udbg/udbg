@@ -141,14 +141,16 @@ impl Process {
                 Some(SymbolInfo {
                     module: module_name,
                     symbol: s.to_utf8().into(),
-                    offset: dis as usize,
+                    offset: dis as u32,
                     mod_base: im.BaseOfImage as usize,
+                    mod_offset: (address - im.BaseOfImage as usize) as _,
                 })
             } else if !module_name.is_empty() {
                 Some(SymbolInfo {
                     module: module_name,
                     symbol: "".into(),
                     offset: 0,
+                    mod_offset: (address - im.BaseOfImage as usize) as _,
                     mod_base: im.BaseOfImage as usize,
                 })
             } else {

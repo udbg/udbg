@@ -450,21 +450,15 @@ pub trait Target: GetProp + TargetMemory + TargetControl {
             m.get_symbol(right).map(|s| d.base + s.offset as usize)
         }
     }
+
     fn get_symbol(&self, addr: usize, max_offset: usize) -> Option<SymbolInfo> {
         self.find_module(addr).and_then(|m| {
-            let d = m.data();
-            let offset = addr - d.base;
-            m.find_symbol(offset, max_offset).and_then(|s| {
-                let soffset = offset - s.offset as usize;
-                if soffset > max_offset { return None; }
-                Some(SymbolInfo {
-                    mod_base: d.base, offset: soffset, module: d.name.clone(),
-                    symbol: if let Some(n) = Symbol::undecorate(s.name.as_ref(), self.base().flags.get()) { n.into() } else { s.name }
-                })
+            m.find_symbol(addr - m.data().base, max_offset).and_then(|s| {
+                SymbolInfo::from_symbol(s, addr, m.data(), max_offset)
             }).or_else(|| /* if let Some((b, e, _)) = m.find_function(offset) {
                 Some(SymbolInfo { mod_base: d.base, offset: offset - b as usize, module: d.name.clone(), symbol: format!("${:x}", d.base + b as usize).into() })
             } else */ if max_offset > 0 {
-                Some(SymbolInfo { mod_base: d.base, offset, module: d.name.clone(), symbol: "".into() })
+                Some(SymbolInfo::from_module(addr, m.data()))
             } else { None })
         })
     }
