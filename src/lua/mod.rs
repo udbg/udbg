@@ -250,7 +250,7 @@ impl ToLuaMulti for HandleInfo {
         (
             self.handle,
             self.ty,
-            self.type_name.as_str(),
+            self.type_name.as_ref(),
             self.name.as_str(),
         )
             .push_multi(s)
@@ -385,9 +385,9 @@ impl UserData for ArcModule<'_> {
     }
 
     fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.as_deref()
-            .add_deref("add_symbol", <dyn UDbgModule>::add_symbol)?
-            .add_deref("load_symbol", <dyn UDbgModule>::load_symbol_file)?;
+        // mt.as_deref()
+        //     .add_deref("add_symbol", <dyn UDbgModule>::add_symbol)?
+        //     .add_deref("load_symbol", <dyn UDbgModule>::load_symbol_file)?;
 
         mt.set_closure("symbol_file", |this: &Self| {
             this.symbol_file().map(ArcSymbolFile)
@@ -431,7 +431,7 @@ impl UserData for BoxThread {
         #[cfg(windows)]
         fields.set_closure("wow64", |this: &Self| this.wow64)?;
         #[cfg(windows)]
-        fields.set_closure("handle", |this: &Self| *this.handle as usize)?;
+        fields.set_closure("handle", |this: &Self| this.handle.0 .0 .0)?;
         #[cfg(windows)]
         fields.set_closure("entry", |this: &Self| this.entry())?;
         #[cfg(windows)]
@@ -439,20 +439,18 @@ impl UserData for BoxThread {
         fields.set_closure("name", |this: &Self| this.name())?;
         fields.set_closure("status", |this: &Self| this.status())?;
         fields.set_closure("priority", |this: &Self| this.priority())?;
-        #[cfg(windows)]
-        fields.set_closure("context", |s: &LuaState, this: &Self| unsafe {
-            let mut cx: ThreadContext = core::mem::zeroed();
-            s.check_result(this.get_context(&mut cx));
-            s.push_userdata(cx, None);
-            Pushed(1)
-        })?;
-        #[cfg(windows)]
-        fields.set_closure("context32", |s: &LuaState, this: &Self| unsafe {
-            let mut cx: ThreadContext32 = core::mem::zeroed();
-            s.check_result(this.get_context32(&mut cx));
-            s.push_userdata(cx, None);
-            Pushed(1)
-        })?;
+        // #[cfg(windows)]
+        // fields.set_closure("context", |s: &LuaState, this: &Self| unsafe {
+        //     let mut cx: ThreadContext = core::mem::zeroed();
+        //     this.get_context(&mut cx).lua_result()?;
+        //     s.new_userdata(cx)
+        // })?;
+        // #[cfg(all(windows, target_pointer_width = "32"))]
+        // fields.set_closure("context32", |s: &LuaState, this: &Self| unsafe {
+        //     let mut cx: ThreadContext32 = core::mem::zeroed();
+        //     this.get_context32(&mut cx).lua_result()?;
+        //     s.new_userdata(cx)
+        // })?;
 
         Ok(())
     }
@@ -462,6 +460,11 @@ impl UserData for BoxThread {
         mt.set_closure("resume", |this: &Self| this.resume())?;
         #[cfg(windows)]
         mt.set_closure("last_error", |this: &Self| this.last_error())?;
+
+        Ok(())
+    }
+
+    fn metatable(mt: UserdataRegistry<Self>) -> LuaResult<()> {
         mt.set_closure("__call", |s: &LuaState, this: &Self, key: &str| {
             this.0.get_prop(key).map(SerdeValue)
         })?;
@@ -606,8 +609,7 @@ impl UserData for ArcTarget {
         Ok(())
     }
 
-    fn init_userdata(s: &LuaState, ud: &LuaUserData) -> LuaResult<()> {
-        let this = ud.userdata_ref::<Self>().unwrap();
+    fn init_userdata(this: &Self::Trans, s: &LuaState, ud: &LuaUserData) -> LuaResult<()> {
         ud.set_uservalue(s.new_val(SerdeValue(this.base()))?)
     }
 
@@ -633,7 +635,7 @@ impl UserData for ArcTarget {
                 }
             })?;
         #[cfg(windows)]
-        fields.set_closure("handle", |this: &Self| this.handle() as usize)?;
+        fields.set_closure("handle", |this: &Self| this.handle().0)?;
         Ok(())
     }
 
