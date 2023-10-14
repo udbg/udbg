@@ -33,18 +33,19 @@ parking_lot = '0.12'
 serde-value = '0.7'
 derive_more = '0.99'
 failed-result = '0.2'
+serde_bytes = '0.11'
 log-error = "0.1"
 goblin = {version = '~0.7'}
 memmap2 = {version = '~0.5'}
 cpp_demangle = {version = '0.4'}
-ezlua = {version = '0.3', optional = true}
 bitflags = {version = '2.0', features = ['serde']}
 capstone = {version = '0.11', optional = true}
 symbolic = {version = '12.1'}
 symbolic-demangle = {version = '12.1', default-features = false, features = ["cpp", "msvc", "rust"]}
 memoffset = {version = '0.9', features = ['unstable_const']}
+ezlua = {version = '0.3', features = ['serde_bytes'], optional = true}
 serde = {version = "1.0", default-features = false, features = ['derive', 'rc', 'alloc']}
-iced-x86 = {version = '1.20', default-features = false, features = ['decoder', 'intel', 'std']}
+iced-x86 = {version = '1.20', default-features = false, features = ['decoder', 'std']}
 
 [[bin]]
 name = 'tracee'

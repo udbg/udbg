@@ -1209,7 +1209,7 @@ impl DefaultEngine {
 impl UDbgEngine for DefaultEngine {
     fn open(&mut self, pid: u32) -> UDbgResult<Arc<dyn UDbgTarget>> {
         let result = ProcessTarget::open(pid)?;
-        self.targets.push(result.clone());
+        // self.targets.push(result.clone());
         Ok(result)
     }
 

@@ -8,6 +8,12 @@ use crate::{
 use ezlua::{ffi::lua_Integer, marker::*, prelude::*, serde::SerdeValue};
 use std::{cell::RefCell, sync::Arc};
 
+mod symbol;
+mod target;
+
+pub use self::symbol::*;
+pub use self::target::*;
+
 pub struct ReturnAll;
 
 impl ToLuaMulti for ReturnAll {
@@ -33,7 +39,14 @@ pub fn init(s: &LuaState, t: &ValRef) -> LuaResult<()> {
     t.set("SymbolFile", s.register_usertype::<ArcSymbolFile>()?)?;
     t.set("UDbgTarget", s.register_usertype::<ArcTarget>()?)?;
     t.set("UDbgBreakpoint", s.register_usertype::<ArcBreakpoint>()?)?;
-    t.set("Engine", s.register_usertype::<BoxEngine>()?)?;
+    t.set("UDbgEngine", s.register_usertype::<BoxEngine>()?)?;
+    t.set("UDbgThread", s.register_usertype::<BoxThread>()?)?;
+    t.set("UDbgModule", s.register_usertype::<ArcModule>()?)?;
+
+    t.set(
+        "defaultEngine",
+        s.new_closure(|| BoxEngine(Box::new(crate::os::DefaultEngine::default())))?,
+    )?;
 
     let sf = s.new_table_with_size(0, 4)?;
     {
@@ -71,136 +84,6 @@ pub fn init(s: &LuaState, t: &ValRef) -> LuaResult<()> {
     Ok(())
 }
 
-pub fn read_pack<R: ReadMemory + ?Sized>(
-    s: &LuaState,
-    d: &R,
-    a: usize,
-    pack: &[u8],
-    psize: Option<usize>,
-) -> Result<(), &'static str> {
-    use ezlua::luaapi::UnsafeLuaApi;
-
-    let mut iter = pack.iter();
-
-    let read_ptr = |addr| match psize {
-        Some(4) => d.read_value::<u32>(addr).map(|p| p as usize),
-        Some(8) => d.read_value::<u64>(addr).map(|p| p as usize),
-        _ => d.read_value::<usize>(addr),
-    };
-
-    let psize = psize.unwrap_or(core::mem::size_of::<usize>());
-    let mut address = a;
-    let mut ahead = None;
-    while let Some(b) = ahead.take().or_else(|| iter.next()) {
-        let mut c = *b;
-        let mut isptr = false;
-        let mut addr = address;
-        if c == b'*' {
-            c = *iter.next().ok_or("expect *item")?;
-            isptr = true;
-            addr = read_ptr(addr).ok_or("read ptr")?;
-        }
-        let size = if addr != 0 {
-            match c {
-                b'i' => {
-                    let b = iter.next().ok_or("expect integer")?;
-                    match b {
-                        b'1' => s.push(d.read_value::<i8>(addr)),
-                        b'2' => s.push(d.read_value::<i16>(addr)),
-                        b'4' => s.push(d.read_value::<i32>(addr)),
-                        b'8' => s.push(d.read_value::<i64>(addr)),
-                        _ => return Err("invalid integer"),
-                    };
-                    (b - b'0') as usize
-                }
-                b'I' => {
-                    let b = iter.next().ok_or("expect integer")?;
-                    match b {
-                        b'1' => s.push(d.read_value::<u8>(addr)),
-                        b'2' => s.push(d.read_value::<u16>(addr)),
-                        b'4' => s.push(d.read_value::<u32>(addr)),
-                        b'8' => s.push(d.read_value::<u64>(addr)),
-                        _ => return Err("invalid integer"),
-                    };
-                    (b - b'0') as usize
-                }
-                b'f' => {
-                    s.push(d.read_value::<f32>(addr));
-                    4
-                }
-                b'd' => {
-                    s.push(d.read_value::<f64>(addr));
-                    8
-                }
-                b'T' => {
-                    s.push(read_ptr(addr));
-                    psize
-                }
-                b'z' => {
-                    let text = d.read_cstring(addr, None);
-                    if text.is_none() && isptr {
-                        s.push_nil();
-                        0
-                    } else {
-                        let text = text.ok_or("read string")?;
-                        s.push(text.as_slice());
-                        text.len() + 1
-                    }
-                }
-                #[cfg(windows)]
-                b'w' => {
-                    let w = d.read_wstring(addr, None);
-                    if w.is_none() && isptr {
-                        s.push_nil();
-                        0
-                    } else {
-                        let w = w.ok_or("read wstring")?;
-                        s.push(w.as_str());
-                        (w.len() + 1) * 2
-                    }
-                }
-                b's' => {
-                    let b = iter.next().ok_or("expect integer")?;
-                    let len = match b {
-                        b'1' => d.read_value::<u8>(addr).map(|n| n as usize),
-                        b'2' => d.read_value::<u16>(addr).map(|n| n as usize),
-                        b'4' => d.read_value::<u32>(addr).map(|n| n as usize),
-                        b'8' => d.read_value::<u64>(addr).map(|n| n as usize),
-                        _ => return Err("invalid integer"),
-                    }
-                    .ok_or("read integer")?;
-                    let r = d.read_bytes(addr + (b - b'0') as usize, len);
-                    s.push(r.as_slice());
-                    (b - b'0') as usize + r.len()
-                }
-                b'c' => {
-                    let mut len = 0;
-                    while let Some(b) = iter.next() {
-                        if !b.is_ascii_digit() {
-                            ahead = Some(b);
-                            break;
-                        }
-                        len = len * 10 + (*b - b'0') as usize;
-                    }
-                    let r = d.read_bytes(addr + (b - b'0') as usize, len);
-                    s.push(r.as_slice());
-                    r.len()
-                }
-                _ => return Err("invalid type"),
-            }
-        } else {
-            s.push_nil();
-            0
-        };
-        if isptr {
-            address += psize;
-        } else {
-            address += size;
-        }
-    }
-    Ok(())
-}
-
 impl ToLua for CpuReg {
     #[inline(always)]
     fn to_lua<'a>(self, s: &'a LuaState) -> LuaResult<ValRef<'a>> {
@@ -211,265 +94,9 @@ impl ToLua for CpuReg {
     }
 }
 
-impl UserData for MemoryPage {
-    const TYPE_NAME: &'static str = "MemoryPage";
-
-    fn getter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields.set_closure("alloc_base", |this: &Self| this.alloc_base)?;
-        fields.set_closure("alloc_protect", |this: &Self| this.alloc_protect)?;
-        fields.set_closure("base", |this: &Self| this.base)?;
-        fields.set_closure("size", |this: &Self| this.size)?;
-        fields.set_closure("executable", |this: &Self| this.is_executable())?;
-        fields.set_closure("writable", |this: &Self| this.is_writable())?;
-        fields.set_closure("readonly", |this: &Self| this.is_readonly())?;
-        fields.set_closure("private", |this: &Self| this.is_private())?;
-        fields.set_closure("commited", |this: &Self| this.is_commit())?;
-        fields.set_closure("protect", |this: &Self| this.protect)?;
-        fields.set_closure("type", |this: &Self| this.type_)?;
-        fields.set_closure("state", |this: &Self| this.state)?;
-        fields.set_closure("info", |this: &Self| this.info.clone())?;
-        fields.set_closure("memory_info", |this: &Self| {
-            SerdeValue(MemoryPageInfo::from(this))
-        })?;
-
-        Ok(())
-    }
-
-    fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.set_closure("is_commit", MemoryPage::is_commit)?
-            .set_closure("is_reserve", MemoryPage::is_reserve)?
-            .set_closure("is_free", MemoryPage::is_free)?
-            .set_closure("is_private", MemoryPage::is_private)?;
-
-        Ok(())
-    }
-}
-
-impl ToLuaMulti for HandleInfo {
-    fn push_multi(self, s: &LuaState) -> LuaResult<usize> {
-        (
-            self.handle,
-            self.ty,
-            self.type_name.as_ref(),
-            self.name.as_str(),
-        )
-            .push_multi(s)
-    }
-}
-
-impl UserData for Symbol {
-    const TYPE_NAME: &'static str = "UDbgSymbol";
-
-    fn getter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields.add_field_get("name", |_, this: &Self| this.name.as_ref())?;
-        fields.set_closure("offset", |this: &Self| this.offset)?;
-        fields.set_closure("len", |this: &Self| this.len)?;
-        fields.set_closure("flags", |this: &Self| this.flags)?;
-        fields.add_field_get("uname", |s: &LuaState, this: &Self| {
-            if let Some(n) = Symbol::undecorate(&this.name, Default::default()) {
-                s.new_val(n)
-            } else {
-                s.new_val(this.name.as_ref())
-            }
-        })?;
-        fields.set_closure("type_id", |s: &LuaState, this: &Self| {
-            (this.type_id > 0).then_some(this.type_id)
-        })?;
-
-        Ok(())
-    }
-
-    fn methods(methods: UserdataRegistry<Self>) -> LuaResult<()> {
-        Ok(())
-    }
-}
-
-impl ToLuaMulti for FieldInfo {
-    fn push_multi(self, s: &LuaState) -> LuaResult<usize> {
-        (self.type_id, self.offset, self.name.as_str()).push_multi(s)
-    }
-}
-
-#[derive(Deref)]
-pub struct ArcSymbolFile(pub Arc<dyn SymbolFile>);
-
-impl UserData for ArcSymbolFile {
-    const TYPE_NAME: &'static str = "SymbolFile*";
-
-    fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        #[cfg(windows)]
-        mt.set_closure("open", |path: &str| {
-            crate::pdbfile::PDBData::load(path, None).map(|r| ArcSymbolFile(Arc::new(r)))
-        })?;
-        mt.add_method("path", |_, this, ()| this.path())?;
-        mt.set_closure("get_type", |this: &Self, id: u32| {
-            this.get_type(id).map(SerdeValue)
-        })?;
-        mt.set_closure("find_type", |this: &Self, name: &str| {
-            SerdeValue(this.find_type(name))
-        })?;
-        mt.set_closure("get_field", |this: &Self, type_id: u32, val: LuaValue| {
-            match val {
-                LuaValue::String(name) => {
-                    this.find_field(type_id, name.to_str().unwrap_or_default())
-                }
-                LuaValue::Integer(i) => this.get_field(type_id, i as usize),
-                _ => {
-                    // Err("integer|string").lua_result()?;
-                    None
-                }
-            }
-            .ok_or(())
-        })?;
-        mt.set_closure("enum_field", |this: &Self, type_id: u32| {
-            StaticIter::from(this.get_field_list(type_id).into_iter().map(|x| x))
-        })?;
-
-        Ok(())
-    }
-}
-
-pub struct ArcModule<'a>(pub Arc<dyn UDbgModule + 'a>);
-
-impl<'a> std::ops::Deref for ArcModule<'a> {
-    type Target = dyn UDbgModule + 'a;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
-impl<'a> AsRef<dyn UDbgModule + 'a> for ArcModule<'a> {
-    #[inline(always)]
-    fn as_ref(&self) -> &(dyn UDbgModule + 'a) {
-        self.0.as_ref()
-    }
-}
-
-impl UserData for ArcModule<'_> {
-    const TYPE_NAME: &'static str = "UDbgModule*";
-
-    fn metatable(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.set_closure("__index", |s: &LuaState, this: &Self, key: &str| {
-            this.0
-                .get_prop(key)
-                .map(|val| SerdeValue(val))
-                .unwrap_or_else(|_| SerdeValue(serde_value::Value::Unit))
-        })?;
-
-        Ok(())
-    }
-
-    fn getter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields.add_field_get("data", |_, this: &Self| SerdeValue(this.data()))?;
-        fields.set_closure("base", |this: &Self| this.data().base)?;
-        fields.set_closure("size", |this: &Self| this.data().size)?;
-        fields.add_field_get("name", |_, this: &Self| this.data().name.as_ref())?;
-        fields.add_field_get("path", |_, this: &Self| this.data().path.as_ref())?;
-        fields.set_closure("arch", |this: &Self| this.data().arch)?;
-        fields.set_closure("entry", |this: &Self| this.data().entry)?;
-        fields.set_closure("entry_point", |this: &Self| {
-            let data = this.data();
-            data.base + data.entry
-        })?;
-        fields.set_closure("user_module", |this: &Self| this.data().user_module.get())?;
-
-        Ok(())
-    }
-
-    fn setter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields.set_closure("user_module", |this: &Self, user: bool| {
-            this.data().user_module.set(user)
-        })?;
-        Ok(())
-    }
-
-    fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        // mt.as_deref()
-        //     .add_deref("add_symbol", <dyn UDbgModule>::add_symbol)?
-        //     .add_deref("load_symbol", <dyn UDbgModule>::load_symbol_file)?;
-
-        mt.set_closure("symbol_file", |this: &Self| {
-            this.symbol_file().map(ArcSymbolFile)
-        })?;
-        mt.add_method("enum_symbol", |s: &LuaState, this: &Self, pat: &str| {
-            this.enum_symbol(Some(pat))
-                .map(|x| unsafe { s.new_iter(x, [ArgRef(1)]) })
-                .lua_result()
-        })?;
-        mt.add("enum_export", |this: &Self| {
-            this.get_exports()
-                .map(|exports| StaticIter::from(exports.into_iter()))
-        })?;
-        mt.add_method("get_symbol", |s, this: &Self, pat: &str| {
-            this.enum_symbol(Some(pat))
-                .map(|mut x| x.next().map(|sym| s.new_val(sym)).transpose())
-                .lua_result()
-        })?;
-        #[cfg(all(windows, target_arch = "x86_64"))]
-        mt.set_closure(
-            "find_function",
-            |s: &LuaState, this: &Self, a: usize| unsafe {
-                this.find_function(a)
-                    .map(|x| (x.BeginAddress, x.EndAddress, *x.u.UnwindData()))
-                    .ok_or(())
-            },
-        )?;
-
-        Ok(())
-    }
-}
-
-#[derive(Deref)]
-pub struct BoxThread(pub Box<dyn UDbgThread>);
-
-impl UserData for BoxThread {
-    const TYPE_NAME: &'static str = "UDbgThread*";
-
-    fn getter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields.set_closure("tid", |this: &Self| this.tid)?;
-        #[cfg(windows)]
-        fields.set_closure("wow64", |this: &Self| this.wow64)?;
-        #[cfg(windows)]
-        fields.set_closure("handle", |this: &Self| this.handle.0 .0 .0)?;
-        #[cfg(windows)]
-        fields.set_closure("entry", |this: &Self| this.entry())?;
-        #[cfg(windows)]
-        fields.set_closure("teb", |this: &Self| this.teb())?;
-        fields.set_closure("name", |this: &Self| this.name())?;
-        fields.set_closure("status", |this: &Self| this.status())?;
-        fields.set_closure("priority", |this: &Self| this.priority())?;
-        // #[cfg(windows)]
-        // fields.set_closure("context", |s: &LuaState, this: &Self| unsafe {
-        //     let mut cx: ThreadContext = core::mem::zeroed();
-        //     this.get_context(&mut cx).lua_result()?;
-        //     s.new_userdata(cx)
-        // })?;
-        // #[cfg(all(windows, target_pointer_width = "32"))]
-        // fields.set_closure("context32", |s: &LuaState, this: &Self| unsafe {
-        //     let mut cx: ThreadContext32 = core::mem::zeroed();
-        //     this.get_context32(&mut cx).lua_result()?;
-        //     s.new_userdata(cx)
-        // })?;
-
-        Ok(())
-    }
-
-    fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.set_closure("suspend", |this: &Self| this.suspend())?;
-        mt.set_closure("resume", |this: &Self| this.resume())?;
-        #[cfg(windows)]
-        mt.set_closure("last_error", |this: &Self| this.last_error())?;
-
-        Ok(())
-    }
-
-    fn metatable(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.set_closure("__call", |s: &LuaState, this: &Self, key: &str| {
-            this.0.get_prop(key).map(SerdeValue)
-        })?;
-
-        Ok(())
+impl ToLua for HandleInfo {
+    fn to_lua<'a>(self, lua: &'a LuaState) -> LuaResult<ValRef<'a>> {
+        lua.new_val(SerdeValue(self))
     }
 }
 
@@ -498,7 +125,7 @@ impl ToLua for BpType {
 }
 
 impl UserData for ArcBreakpoint {
-    const TYPE_NAME: &'static str = "UDbgBreakpoint*";
+    const TYPE_NAME: &'static str = "UDbgBreakpoint";
     const WEAK_REF_CACHE: bool = false;
 
     fn key_to_cache(&self) -> *const () {
@@ -572,360 +199,6 @@ impl ToLuaMulti for UEvent {
     }
 }
 
-#[derive(Clone)]
-pub struct ArcTarget(pub Arc<dyn UDbgTarget>);
-
-impl std::ops::Deref for ArcTarget {
-    type Target = dyn UDbgTarget;
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
-impl From<Arc<dyn UDbgTarget>> for ArcTarget {
-    fn from(value: Arc<dyn UDbgTarget>) -> Self {
-        value.base().status.set(UDbgStatus::Opened);
-        Self(value)
-    }
-}
-
-impl AsRef<dyn UDbgTarget> for ArcTarget {
-    #[inline(always)]
-    fn as_ref(&self) -> &dyn UDbgTarget {
-        self.0.as_ref()
-    }
-}
-
-impl UserData for ArcTarget {
-    const TYPE_NAME: &'static str = "UDbgTarget*";
-    const INDEX_USERVALUE: bool = true;
-
-    fn metatable(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.set_closure("__index", |this: &Self, key: &str| {
-            this.0.get_prop(key).map(SerdeValue).ok()
-        })?;
-
-        Ok(())
-    }
-
-    fn init_userdata(this: &Self::Trans, s: &LuaState, ud: &LuaUserData) -> LuaResult<()> {
-        ud.set_uservalue(s.new_val(SerdeValue(this.base()))?)
-    }
-
-    fn key_to_cache(&self) -> *const () {
-        (self.0.as_ref() as *const dyn UDbgTarget).to_raw_parts().0
-    }
-
-    fn getter(fields: UserdataRegistry<Self>) -> LuaResult<()> {
-        fields
-            .add_field_get("base", |_, this: &Self| SerdeValue(this.base()))?
-            .set_closure("pid", |this: &Self| this.base().pid.get())?
-            .set_closure("arch", |this: &Self| this.base().arch)?
-            .set_closure("event_tid", |this: &Self| this.base().event_tid.get())?
-            .set_closure("pointer_size", |this: &Self| this.base().pointer_size())?
-            .set_closure("status", |this: &Self| this.base().status.get().as_str())?
-            .set_closure("context_arch", |this: &Self| {
-                match this.base().context_arch.get() {
-                    ARCH_X86 => "x86",
-                    ARCH_X64 => "x86_64",
-                    ARCH_ARM => "arm",
-                    ARCH_ARM64 => "arm64",
-                    _ => unreachable!(),
-                }
-            })?;
-        #[cfg(windows)]
-        fields.set_closure("handle", |this: &Self| this.handle().0)?;
-        Ok(())
-    }
-
-    fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.as_deref()
-            .add_deref("read_u8", <dyn UDbgTarget>::read_value::<u8>)?
-            .add_deref("read_u16", <dyn UDbgTarget>::read_value::<u16>)?
-            .add_deref("read_u32", <dyn UDbgTarget>::read_value::<u32>)?
-            .add_deref("read_u64", <dyn UDbgTarget>::read_value::<u64>)?
-            .add_deref("read_f32", <dyn UDbgTarget>::read_value::<f32>)?
-            .add_deref("read_f64", <dyn UDbgTarget>::read_value::<f64>)?
-            .add_deref("image_path", <dyn UDbgTarget>::image_path)?
-            .add_deref("detach", <dyn UDbgTarget>::detach)?
-            .add_deref("kill", <dyn UDbgTarget>::kill)?
-            .add_deref("pause", <dyn UDbgTarget>::breakk)?
-            .add_deref("resume", <dyn UDbgTarget>::resume)?
-            .add_deref("suspend", <dyn UDbgTarget>::suspend)?
-            .add_deref("wait_exit", <dyn UDbgTarget>::wait_exit)?;
-
-        fn write_value<T>(this: &ArcTarget, a: usize, val: T) {
-            this.write_value(a, &val);
-        }
-        mt.set_closure("write_u8", write_value::<u8>)?
-            .set_closure("write_u16", write_value::<u16>)?
-            .set_closure("write_u32", write_value::<u32>)?
-            .set_closure("write_u64", write_value::<u64>)?
-            .set_closure("write_f32", write_value::<f32>)?
-            .set_closure("write_f64", write_value::<f64>)?;
-
-        let lua = mt.state();
-        mt.set(
-            "add_breakpoint",
-            lua.new_closure6(
-                |s: &LuaState,
-                 this: &Self,
-                 a: usize,
-                 ty: Option<&str>,
-                 size: Option<usize>,
-                 temp: bool,
-                 tid: Option<tid_t>| {
-                    let r = match ty {
-                        Some("int3") | Some("soft") | None => this.add_breakpoint(BpOpt {
-                            address: a,
-                            enable: false,
-                            temp,
-                            tid,
-                            rw: None,
-                            len: None,
-                            table: false,
-                        }),
-                        Some("table") => this.add_breakpoint(BpOpt {
-                            address: a,
-                            enable: false,
-                            temp,
-                            tid,
-                            table: true,
-                            len: None,
-                            rw: None,
-                        }),
-                        Some(tys) => this.add_breakpoint(BpOpt {
-                            address: a,
-                            enable: false,
-                            temp,
-                            tid,
-                            table: false,
-                            rw: Some(match tys {
-                                "execute" => HwbpType::Execute,
-                                "write" => HwbpType::Write,
-                                "access" => HwbpType::Access,
-                                _ => return Err(LuaError::convert("Invalid breakpoint type")),
-                            }),
-                            len: Some(match size {
-                                Some(1) | None => HwbpLen::L1,
-                                Some(2) => HwbpLen::L2,
-                                Some(4) => HwbpLen::L4,
-                                Some(8) => HwbpLen::L8,
-                                _ => return Err(LuaError::convert("Invalid hwbp size")),
-                            }),
-                        }),
-                    };
-                    LuaResult::Ok(match r {
-                        Ok(bp) => (s.new_val(ArcBreakpoint(bp))?, s.new_val(())?),
-                        Err(UDbgError::BpExists) => (s.new_val(false)?, s.new_val("exists")?),
-                        Err(e) => (s.new_val(false)?, s.new_val(format!("{:?}", e))?),
-                    })
-                },
-            )?,
-        )?;
-        mt.set_closure("get_breakpoint", |this: &Self, id: BpID| {
-            this.get_breakpoint(id).map(ArcBreakpoint)
-        })?;
-        mt.set_closure("breakpoint_list", |this: &Self| {
-            IterVec(this.get_breakpoints().into_iter().map(ArcBreakpoint))
-        })?;
-
-        mt.set_closure(
-            "read_string",
-            |this: &Self, a: usize, size: Option<usize>| this.read_cstring(a, size.unwrap_or(1000)),
-        )?;
-        #[cfg(windows)]
-        mt.set_closure(
-            "read_wstring",
-            |this: &Self, a: usize, size: Option<usize>| this.read_wstring(a, size.unwrap_or(1000)),
-        )?;
-        mt.set_closure("write_string", |this: &Self, a: usize, buf: &[u8]| {
-            this.write_cstring(a, buf)
-        })?;
-        #[cfg(windows)]
-        mt.set_closure("write_wstring", |this: &Self, a: usize, buf: &str| {
-            this.write_wstring(a, buf)
-        })?;
-
-        mt.set_closure(
-            "read_pack",
-            |s: &LuaState, this: &Self, a: usize, pack: &[u8]| {
-                read_pack(
-                    s,
-                    this.0.as_ref(),
-                    a,
-                    pack,
-                    this.base().pointer_size().into(),
-                )
-                .map(|_| ReturnAll)
-            },
-        )?
-        .set_closure(
-            "detect_string",
-            |this: &Self, p: usize, max: Option<usize>| {
-                this.detect_string(p, max.unwrap_or(32))
-                    .map(|(wide, text)| (text, wide))
-            },
-        )?
-        .set_closure("open_thread", |this: &Self, tid: tid_t| {
-            this.open_thread(tid).map(|x| BoxThread(x))
-        })?
-        .set_closure("thread_list", |this: &Self| unsafe {
-            this.enum_thread(true).map(|iter| {
-                IterMap(
-                    core::mem::transmute::<
-                        _,
-                        Box<dyn Iterator<Item = Box<dyn UDbgThread>> + 'static>,
-                    >(iter)
-                    .map(|t| (t.tid, BoxThread(t))),
-                )
-            })
-        })?;
-
-        mt.add_method("enum_module", |s, this: &Self, ()| {
-            this.enum_module().map(|r| unsafe {
-                s.new_iter_map(r, |s, m| s.new_userdata(ArcModule(m)), [ArgRef(1)])
-            })
-        })?
-        .add_method("enum_thread", |s, this: &Self, detail: bool| {
-            this.enum_thread(detail)
-                .map(|r| unsafe { s.new_iter(r.map(BoxThread), [ArgRef(1)]) })
-        })?
-        .add_method("enum_memory", |s, this: &Self, ()| {
-            this.enum_memory()
-                .map(|r| unsafe { s.new_iter(r, [ArgRef(1)]) })
-        })?
-        .add_method("enum_handle", |s, this: &Self, ()| {
-            this.enum_handle()
-                .map(|r| unsafe { s.new_iter(r, [ArgRef(1)]) })
-        })?;
-
-        mt.set_closure("collect_memory", |this: &Self| {
-            IterVec(this.collect_memory_info().into_iter().map(SerdeValue))
-        })?
-        .set_closure("get_module", |s: &LuaState, this: &Self, val: ValRef| {
-            (if val.type_of().is_none_or_nil() {
-                this.find_module(this.base().image_base)
-            } else {
-                let base = val.to_integer() as usize;
-                if base > 0 {
-                    this.find_module(base)
-                } else {
-                    this.get_module(val.to_str().unwrap_or(""))
-                }
-            })
-            .map(ArcModule)
-        })?;
-
-        mt.set_closure("virtual_query", |this: &Self, a: usize| {
-            this.virtual_query(a)
-        })?
-        .set_closure(
-            "virtual_alloc",
-            |this: &Self, a: usize, size: usize, ty: Option<&str>| {
-                this.virtual_alloc(a, size, ty.unwrap_or(""))
-            },
-        )?
-        .set_closure("virtual_free", |this: &Self, a: usize| {
-            this.virtual_free(a);
-        })?;
-
-        mt.set(
-            "read_type",
-            lua.new_closure3(|s: &LuaState, this: &Self, a: usize, ty: &str| {
-                let address = a;
-                match ty {
-                    "usize" => s.new_val(this.read_value::<usize>(address)),
-                    "u8" => s.new_val(this.read_value::<u8>(address)),
-                    "u16" => s.new_val(this.read_value::<u16>(address)),
-                    "u32" => s.new_val(this.read_value::<u32>(address)),
-                    "u64" => s.new_val(this.read_value::<u64>(address)),
-                    "isize" => s.new_val(this.read_value::<isize>(address)),
-                    "i8" => s.new_val(this.read_value::<i8>(address)),
-                    "i16" => s.new_val(this.read_value::<i16>(address)),
-                    "i32" => s.new_val(this.read_value::<i32>(address)),
-                    "i64" => s.new_val(this.read_value::<i64>(address)),
-                    "f32" => s.new_val(this.read_value::<f32>(address)),
-                    "f64" => s.new_val(this.read_value::<f64>(address)),
-                    "ptr" => s.new_val(this.read_ptr(address)),
-                    "z" => s.new_val(this.read_cstring(address, 1000).as_ref().map(Vec::as_slice)),
-                    #[cfg(windows)]
-                    "w" => s.new_val(this.read_wstring(address, 1000)),
-                    _ => s.new_val(()),
-                }
-            })?,
-        )?;
-
-        mt.set(
-            "read_bytes",
-            lua.new_closure4(
-                |s: &LuaState, this: &Self, a: usize, length: usize, userdata: bool| unsafe {
-                    use ezlua::luaapi::UnsafeLuaApi;
-
-                    if userdata {
-                        let p = UnsafeLuaApi::new_userdata(s, length);
-                        let buf = core::slice::from_raw_parts_mut(p.cast::<u8>(), length);
-                        s.new_val(this.read_memory(a, buf).map(|x| x as &_))
-                    } else if length > STACK_BUFFER_SIZE {
-                        let mut buf: Vec<u8> = vec![0u8; length];
-                        s.new_val(this.read_memory(a, &mut buf).map(|x| x as &_))
-                    } else {
-                        let mut buf = [0u8; STACK_BUFFER_SIZE];
-                        s.new_val(this.read_memory(a, &mut buf[..length]).map(|x| x as &_))
-                    }
-                },
-            )?,
-        )?;
-
-        mt.set_closure(
-            "write_bytes",
-            |this: &Self, a: usize, buf: &[u8], len: Option<usize>| {
-                this.write_memory(a, len.map(|len| &buf[..len]).unwrap_or(buf))
-            },
-        )?;
-
-        mt.set_closure(
-            "write_type",
-            |s: &LuaState, this: &Self, a: usize, ty: &str| {
-                use ezlua::luaapi::UnsafeLuaApi;
-
-                let address = a;
-                match ty {
-                    "usize" => this.write_value(address, &(s.to_integer(4) as usize)),
-                    "u8" => this.write_value(address, &(s.to_integer(4) as u8)),
-                    "u16" => this.write_value(address, &(s.to_integer(4) as u16)),
-                    "u32" => this.write_value(address, &(s.to_integer(4) as u32)),
-                    "u64" => this.write_value(address, &(s.to_integer(4) as u64)),
-                    "isize" => this.write_value(address, &(s.to_integer(4) as isize)),
-                    "i8" => this.write_value(address, &(s.to_integer(4) as i8)),
-                    "i16" => this.write_value(address, &(s.to_integer(4) as i16)),
-                    "i32" => this.write_value(address, &(s.to_integer(4) as i32)),
-                    "i64" => this.write_value(address, &(s.to_integer(4) as i64)),
-                    "f32" => this.write_value(address, &(s.to_number(4) as f32)),
-                    "f64" => this.write_value(address, &(s.to_number(4) as f64)),
-                    _ => None,
-                }
-            },
-        )?;
-
-        mt.set_closure("get_symbol", |this: &Self, a: usize, o: Option<usize>| {
-            this.get_symbol_(a, o).map(|s| s.to_string(a))
-        })?;
-
-        mt.set_closure(
-            "get_symbol_detail",
-            |s: &LuaState, this: &Self, a: usize| {
-                this.get_symbol_(a, None)
-                    .map(|r| (r.module, r.symbol, r.offset, r.mod_base))
-                    .ok_or(())
-            },
-        )?;
-
-        Ok(())
-    }
-}
-
 impl ToLua for ProcessInfo {
     #[inline(always)]
     fn to_lua<'a>(self, s: &'a LuaState) -> LuaResult<ValRef<'a>> {
@@ -937,28 +210,16 @@ impl ToLua for ProcessInfo {
 pub struct BoxEngine(pub Box<dyn UDbgEngine>);
 
 impl UserData for BoxEngine {
-    const TYPE_NAME: &'static str = "UDbgEngine*";
+    const TYPE_NAME: &'static str = "UDbgEngine";
 
     type Trans = RefCell<Self>;
 
     fn methods(mt: UserdataRegistry<Self>) -> LuaResult<()> {
-        mt.add("enum_process", |this: &Self| {
+        mt.add("enumProcess", |this: &Self| {
             this.enum_process().map(StaticIter::from)
         })?
         .add_mut("open", |this: &mut Self, pid: pid_t| {
             this.open(pid).map(ArcTarget::from)
-        })?
-        .add_mut("find", |this: &mut Self, name: &str| {
-            #[cfg(windows)]
-            let pred = |p: &ProcessInfo| p.name.eq_ignore_ascii_case(name);
-            #[cfg(not(windows))]
-            let pred = |p: &ProcessInfo| p.name == name;
-            this.enum_process()
-                .lua_result()?
-                .find(pred)
-                .map(|p| this.open(p.pid).map(ArcTarget::from))
-                .transpose()
-                .lua_result()
         })?
         .add_mut("attach", |this: &mut Self, pid: pid_t| {
             this.attach(pid).map(ArcTarget)
@@ -969,30 +230,31 @@ impl UserData for BoxEngine {
                 this.create(path, cwd, &args).map(ArcTarget)
             },
         )?;
+
+        // TODO:
         // mt.add_mut(
         //     "event_loop",
         //     |s: &LuaState, this: &mut Self, mut co: Coroutine| {
-        //         todo!()
-        //         // let ui = udbg_ui();
-        //         // let mut resume = move |ctx: &dyn TraceContext, event| -> UserReply {
-        //         //     let this = ArcTarget(ctx.target());
-        //         //     let res =
-        //         //         co.resume::<_, (Option<&str>, Value)>(ResumeArgs(this.clone(), event));
-        //         //     match res {
-        //         //         Ok((action, _)) => match action.unwrap_or_default() {
-        //         //             "step" | "stepin" => UserReply::StepIn,
-        //         //             "stepout" => UserReply::StepOut,
-        //         //             "goto" => UserReply::Goto(co.to_integer(-1) as usize),
-        //         //             "native" => UserReply::Native(co.to_integer(-1) as usize),
-        //         //             "run" | _ => UserReply::Run(co.to_bool(-1)),
-        //         //         },
-        //         //         Err(err) => {
-        //         //             s.traceback(&co, cstr!("resume event"), 1);
-        //         //             s.error();
-        //         //         }
-        //         //     }
-        //         // };
-        //         // this.event_loop(&mut |ctx, event| resume(ctx, event));
+        //         let ui = udbg_ui();
+        //         let mut resume = move |ctx: &dyn TraceContext, event| -> UserReply {
+        //             let this = ArcTarget(ctx.target());
+        //             let res =
+        //                 co.resume::<_, (Option<&str>, Value)>(ResumeArgs(this.clone(), event));
+        //             match res {
+        //                 Ok((action, _)) => match action.unwrap_or_default() {
+        //                     "step" | "stepin" => UserReply::StepIn,
+        //                     "stepout" => UserReply::StepOut,
+        //                     "goto" => UserReply::Goto(co.to_integer(-1) as usize),
+        //                     "native" => UserReply::Native(co.to_integer(-1) as usize),
+        //                     "run" | _ => UserReply::Run(co.to_bool(-1)),
+        //                 },
+        //                 Err(err) => {
+        //                     s.traceback(&co, cstr!("resume event"), 1);
+        //                     s.error();
+        //                 }
+        //             }
+        //         };
+        //         this.event_loop(&mut |ctx, event| resume(ctx, event));
         //     },
         // )?;
 
